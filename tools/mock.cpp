@@ -162,7 +162,11 @@ int main(const int argc, char** const argv)
         return 1;
     }
 
-    std::printf("\x1b[92mchatwire-mock\x1b[0m serving ws://127.0.0.1:%u\n", port);
+    // server.port(), not `port`: the two differ whenever 0 was requested, and
+    // printing the REQUEST rather than the RESULT is exactly the confusion this
+    // reports around -- a log that says 0 while the server listens elsewhere
+    // sends you looking for a bug that is not there.
+    std::printf("\x1b[92mchatwire-mock\x1b[0m serving ws://127.0.0.1:%u\n", server.port());
     if (quiet) { std::printf("  (quiet: commands are echoed, no chat is emitted)\n"); }
     else       { std::printf("  emitting a synthetic chat line every %u ms\n", interval_ms); }
     std::printf("  Ctrl+C to stop\n\n");

@@ -26,7 +26,7 @@
 namespace
 {
     /*
-        @brief Reads the port from CHATWIRE_PORT, else 0 for "use the default".
+        @brief Reads the port from CHATWIRE_PORT, else chatwire::default_port.
         @details
         An environment variable rather than a config file: an injector already
         controls the environment of the process it starts, and a file would be
@@ -40,7 +40,7 @@ namespace
     {
         char        buffer[16]{};
         const DWORD n{ ::GetEnvironmentVariableA("CHATWIRE_PORT", buffer, sizeof(buffer)) };
-        if (n == 0u || n >= sizeof(buffer)) { return 0u; }
+        if (n == 0u || n >= sizeof(buffer)) { return chatwire::default_port; }
 
         unsigned long value{ 0u };
         for (DWORD i{ 0 }; i < n; ++i)
@@ -49,15 +49,19 @@ namespace
             if (c < '0' || c > '9')
             {
                 chatwire::log::warn("CHATWIRE_PORT is not a number; using the default port");
-                return 0u;
+                return chatwire::default_port;
             }
             value = value * 10u + static_cast<unsigned long>(c - '0');
             if (value > 65535u)
             {
                 chatwire::log::warn("CHATWIRE_PORT is out of range; using the default port");
-                return 0u;
+                return chatwire::default_port;
             }
         }
+        // 0 is a legal value for bind() -- it means "any free port" -- so it must
+        // never be used as a sentinel for "unset".  It was, briefly, and the
+        // server dutifully bound an ephemeral port that no client could guess.
+        if (value == 0u) { return chatwire::default_port; }
         return static_cast<std::uint16_t>(value);
     }
 

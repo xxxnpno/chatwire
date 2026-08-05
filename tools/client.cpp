@@ -276,6 +276,28 @@ namespace
         }
     }
 
+    /*
+        @brief Keeps the window open when there is nothing else to read.
+        @details
+        A double-clicked console exe closes the instant main() returns, so an
+        error message that took two seconds to appear is gone before it can be
+        read -- the failure looks like "it just closes" rather than like the
+        diagnosis it actually printed.  Only pauses when stdin is a terminal, so
+        piping into this from a script still exits immediately.
+    */
+    auto wait_before_exit(const int code) -> int
+    {
+        const HANDLE in{ ::GetStdHandle(STD_INPUT_HANDLE) };
+        DWORD        mode{ 0 };
+        if (in != INVALID_HANDLE_VALUE && ::GetConsoleMode(in, &mode))
+        {
+            std::printf("\n  press enter to close.\n");
+            (void)std::getchar();
+        }
+        return code;
+    }
+
+
     auto json_escape(const std::string& text) -> std::string
     {
         std::string out;
@@ -352,17 +374,25 @@ int main(const int argc, char** const argv)
     std::printf("connecting to ws://127.0.0.1:%u ...\n", port);
     if (::connect(g_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
     {
-        std::printf("  could not connect.  Is chatwire injected and the game running?\n");
+        // Ordered by how likely each is, because "could not connect" on its own
+        // sends people to check the wrong thing first.
+        std::printf("\n\x1b[91m  could not connect to port %u.\x1b[0m\n\n"
+                    "  Check, in order:\n"
+                    "    1. Minecraft is running and chatwire has been injected\n"
+                    "    2. the game's console says \"chatwire ready on ws://127.0.0.1:<port>\"\n"
+                    "    3. that port is the one you are dialling - pass --port if it is not\n",
+                    port);
         ::closesocket(g_sock);
         ::WSACleanup();
-        return 1;
+        return wait_before_exit(1);
     }
     if (!handshake(g_sock, port))
     {
-        std::printf("  the websocket handshake failed.\n");
+        std::printf("\n\x1b[91m  something is listening on port %u, but it is not "
+                    "chatwire.\x1b[0m\n  The websocket handshake was refused.\n", port);
         ::closesocket(g_sock);
         ::WSACleanup();
-        return 1;
+        return wait_before_exit(1);
     }
 
     std::printf("\x1b[92mconnected.\x1b[0m  type to chat, /add for client-side, /quit to exit\n\n");

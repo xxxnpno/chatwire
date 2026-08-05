@@ -121,6 +121,12 @@ namespace chatwire
     {
         if (detail::g_running.load(std::memory_order_acquire)) { return true; }
 
+        // Port 0 asks the OS for ANY free port, which is a legitimate thing to
+        // want but never what a caller who simply did not set one means.  A
+        // caller that genuinely wants an ephemeral port can read the bound one
+        // back from the log.
+        const std::uint16_t bind_port{ port == 0u ? default_port : port };
+
         log::info("chatwire {} starting (vmhook {}.{}.{})", chatwire::version,
                   VMHOOK_VERSION_MAJOR, VMHOOK_VERSION_MINOR, VMHOOK_VERSION_PATCH);
 
@@ -187,7 +193,7 @@ namespace chatwire
 
         // 5. The server, last, so an instant client finds a working API.
         features::chat::set_sink(&detail::broadcast_line);
-        if (!detail::server_instance().start(port, &detail::dispatch))
+        if (!detail::server_instance().start(bind_port, &detail::dispatch))
         {
             log::error("websocket server failed to start; shutting down");
             (void)pump::submit([]() noexcept { registry::stop_all(); });
@@ -197,7 +203,7 @@ namespace chatwire
         }
 
         detail::g_running.store(true, std::memory_order_release);
-        log::info("chatwire ready on ws://127.0.0.1:{}", port);
+        log::info("chatwire ready on ws://127.0.0.1:{}", detail::server_instance().port());
         return true;
     }
 

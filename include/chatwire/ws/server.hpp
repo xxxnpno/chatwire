@@ -193,7 +193,22 @@ namespace chatwire::ws
                 return false;
             }
 
-            chatwire::log::info("websocket server listening on ws://127.0.0.1:{}", port);
+            // Report the port the OS ACTUALLY bound, not the one we asked for.
+            // They differ whenever port 0 was requested (bind picks an ephemeral
+            // one), and logging the request instead of the result is what turned
+            // a one-line bug into a puzzle: the log said 0, the server was
+            // listening on something else entirely, and no client could find it.
+            this->bound_port_ = port;
+            sockaddr_in actual{};
+            int actual_size{ sizeof(actual) };
+            if (::getsockname(this->listener_, reinterpret_cast<sockaddr*>(&actual),
+                              &actual_size) == 0)
+            {
+                this->bound_port_ = ::ntohs(actual.sin_port);
+            }
+
+            chatwire::log::info("websocket server listening on ws://127.0.0.1:{}",
+                                this->bound_port_);
             return true;
         }
 
@@ -249,6 +264,7 @@ namespace chatwire::ws
             }
 
             this->cleanup_winsock();
+            this->bound_port_ = 0u;
             chatwire::log::info("websocket server stopped");
         }
 
@@ -295,6 +311,17 @@ namespace chatwire::ws
         [[nodiscard]] auto is_running() const noexcept -> bool
         {
             return this->running_.load(std::memory_order_acquire);
+        }
+
+        /*
+            @brief The port actually bound, which is not always the one asked for.
+            @details
+            Requesting port 0 makes the OS choose; this is how a caller finds out
+            what it got.  Zero before start() succeeds.
+        */
+        [[nodiscard]] auto port() const noexcept -> std::uint16_t
+        {
+            return this->bound_port_;
         }
 
     private:
@@ -592,6 +619,7 @@ namespace chatwire::ws
         }
 
         SOCKET                          listener_{ INVALID_SOCKET };
+        std::uint16_t                   bound_port_{ 0 };
         bool                            wsa_started_{ false };
         std::atomic<bool>               running_{ false };
         message_handler                 handler_{ nullptr };
