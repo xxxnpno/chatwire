@@ -116,6 +116,12 @@ class net/minecraft/client/Minecraft exists?
 MCP and SRG share class names and differ only in members, so the class check cannot separate
 them — only a field probe can. That is why the order is what it is.
 
+**Per-feature coverage, honestly.** `chat` and `system` carry all three spellings. `world` carries
+MCP and SRG but not OBF — the obfuscated names for `playerEntities`, `getName` and `getUniqueID`
+are not in the table, so on a raw vanilla jar that command fails cleanly rather than guessing. Add
+them to `mapping.hpp` and it works; a wrong guess there would call the wrong method, which is worse
+than an honest failure.
+
 ## Quick start
 
 ```bash
