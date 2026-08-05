@@ -38,6 +38,89 @@ namespace chatwire::console
 {
     namespace detail
     {
+        /* Whether the console host accepted ENABLE_VIRTUAL_TERMINAL_PROCESSING.
+           When it did not, ANSI escapes must be STRIPPED rather than emitted --
+           printing them raw turns every coloured line into "[92mtext[0m". */
+        inline std::atomic<bool> g_colour{ false };
+
+        /*
+            @brief Removes ANSI escapes, for a console host that cannot render them.
+            @details
+            Only CSI sequences (ESC [ ... final byte) appear in chatwire's output, so
+            that is all this understands; anything else is left alone rather than
+            guessed at.
+        */
+        [[nodiscard]] inline auto strip_ansi(const std::string_view text) -> std::string
+        {
+            std::string out;
+            out.reserve(text.size());
+            for (std::size_t i{ 0 }; i < text.size(); ++i)
+            {
+                if (text[i] != '\x1b' || i + 1 >= text.size() || text[i + 1] != '[')
+                {
+                    out += text[i];
+                    continue;
+                }
+                i += 2;
+                while (i < text.size() && !(text[i] >= '@' && text[i] <= '~')) { ++i; }
+            }
+            return out;
+        }
+
+        /*
+            @brief Writes one line to the console, correctly, whatever its code page.
+            @details
+            Via WriteConsoleW, deliberately.  chatwire may be SHARING the game's
+            console -- Lunar, and any java.exe launch, already has one -- and the
+            obvious fix for mojibake, SetConsoleOutputCP(CP_UTF8), changes the code
+            page for the WHOLE console, the game's own logger included.  Fixing our
+            output by corrupting theirs is not a fix.
+
+            WriteConsoleW takes UTF-16 and consults no code page at all, so the
+            section sign and any non-ASCII player name arrive intact while nothing
+            else is disturbed.
+
+            Falls back to stdout when there is no console handle, which is the case
+            for the tools that share this header but run in an ordinary terminal.
+        */
+        inline auto write_line(const std::string_view utf8) noexcept -> void
+        {
+            try
+            {
+                const std::string text{ detail::g_colour.load(std::memory_order_acquire)
+                                            ? std::string{ utf8 }
+                                            : strip_ansi(utf8) };
+
+                const HANDLE out{ ::GetStdHandle(STD_OUTPUT_HANDLE) };
+                DWORD        mode{ 0 };
+                if (out == INVALID_HANDLE_VALUE || out == nullptr || !::GetConsoleMode(out, &mode))
+                {
+                    std::fprintf(stdout, "%.*s\n", static_cast<int>(text.size()), text.data());
+                    std::fflush(stdout);
+                    return;
+                }
+
+                const int wide_len{ ::MultiByteToWideChar(CP_UTF8, 0, text.data(),
+                                                          static_cast<int>(text.size()),
+                                                          nullptr, 0) };
+                if (wide_len < 0) { return; }
+
+                std::wstring wide(static_cast<std::size_t>(wide_len), L'\0');
+                if (wide_len > 0)
+                {
+                    ::MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                                          wide.data(), wide_len);
+                }
+                wide += L'\n';
+
+                DWORD written{ 0 };
+                (void)::WriteConsoleW(out, wide.data(), static_cast<DWORD>(wide.size()),
+                                      &written, nullptr);
+            }
+            catch (...) { }
+        }
+
+
         /* What `detach` should call.  Set by attach(); a plain function pointer
            so there is nothing to destroy at exit. */
         inline std::atomic<void (*)()> g_on_detach{ nullptr };
@@ -65,7 +148,7 @@ namespace chatwire::console
             case CTRL_CLOSE_EVENT:
             case CTRL_LOGOFF_EVENT:
             case CTRL_SHUTDOWN_EVENT:
-                chatwire::log::raw("\x1b[93m  console closing - detaching chatwire...\x1b[0m");
+                write_line("\x1b[93m  console closing - detaching chatwire...\x1b[0m");
                 do_detach();
                 return TRUE;
             default:
@@ -104,7 +187,7 @@ namespace chatwire::console
                 }
                 if (command == "help" || command == "?")
                 {
-                    chatwire::log::raw(
+                    write_line(
                         "\n  \x1b[97mcommands\x1b[0m\n"
                         "    detach    unload chatwire and close this window\n"
                         "    verbose   show the start-up trace as well as chat\n"
@@ -115,16 +198,16 @@ namespace chatwire::console
                 if (command == "verbose")
                 {
                     chatwire::log::set_level(chatwire::log::level::info);
-                    chatwire::log::raw("  \x1b[90mverbose logging on\x1b[0m");
+                    write_line("  \x1b[90mverbose logging on\x1b[0m");
                     continue;
                 }
                 if (command == "quiet")
                 {
                     chatwire::log::set_level(chatwire::log::level::warning);
-                    chatwire::log::raw("  \x1b[90mverbose logging off\x1b[0m");
+                    write_line("  \x1b[90mverbose logging off\x1b[0m");
                     continue;
                 }
-                chatwire::log::raw("  \x1b[90munknown command; try 'help'\x1b[0m");
+                write_line("  \x1b[90munknown command; try 'help'\x1b[0m");
             }
         }
     }
@@ -155,18 +238,23 @@ namespace chatwire::console
         (void)::freopen_s(&stream, "CONOUT$", "w", stderr);
         (void)::freopen_s(&stream, "CONIN$",  "r", stdin);
 
-        // ANSI escapes, or the colour codes print as literal garbage.
-        if (const HANDLE out{ ::GetStdHandle(STD_OUTPUT_HANDLE) }; out != INVALID_HANDLE_VALUE)
+        // Try for colour, and REMEMBER whether we got it.  An old console host
+        // rejects the flag, and emitting escapes it cannot render is worse than
+        // plain text: every line becomes "[92mtext[0m".
+        if (const HANDLE out{ ::GetStdHandle(STD_OUTPUT_HANDLE) };
+            out != INVALID_HANDLE_VALUE && out != nullptr)
         {
             DWORD mode{ 0 };
             if (::GetConsoleMode(out, &mode))
             {
-                (void)::SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+                const bool ok{ ::SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+                               != 0 };
+                detail::g_colour.store(ok, std::memory_order_release);
             }
         }
-        // The game sends UTF-8; without this every § and any non-ASCII player
-        // name prints as mojibake.
-        (void)::SetConsoleOutputCP(CP_UTF8);
+        // Deliberately NOT SetConsoleOutputCP -- see write_line.  The code page
+        // belongs to the whole console, which we may be sharing with the game's
+        // own logger, and WriteConsoleW needs no code page at all.
         (void)::SetConsoleTitleA("chatwire");
 
         detail::g_on_detach.store(on_detach, std::memory_order_release);
@@ -200,23 +288,29 @@ namespace chatwire::console
         return true;
     }
 
-    /* @brief The banner.  Uses raw(), because it is not a diagnostic. */
+    /* @brief Writes one line to the console.  See detail::write_line. */
+    inline auto write_line(const std::string_view utf8) noexcept -> void
+    {
+        detail::write_line(utf8);
+    }
+
+    /* @brief The banner.  Not a diagnostic, so it bypasses the level filter. */
     inline auto banner(const std::string_view version, const std::uint16_t port,
                        const std::string_view mapping) noexcept -> void
     {
         try
         {
-            chatwire::log::raw("");
-            chatwire::log::raw(std::format(
+            write_line("");
+            write_line(std::format(
                 "  \x1b[92mchatwire {}\x1b[0m  \x1b[90m|\x1b[0m  ws://127.0.0.1:{}"
                 "  \x1b[90m|\x1b[0m  {}", version, port, mapping));
-            chatwire::log::raw(
+            write_line(
                 "  \x1b[90mchat appears below.  type 'help' for commands, "
                 "'detach' to unload.\x1b[0m");
-            chatwire::log::raw(
+            write_line(
                 "  \x1b[90m(the close button is disabled on purpose - closing a "
                 "console kills the game)\x1b[0m");
-            chatwire::log::raw("");
+            write_line("");
         }
         catch (...) { }
     }
@@ -224,14 +318,14 @@ namespace chatwire::console
     /* @brief Prints one chat line, colours and all. */
     inline auto chat_line(const std::string_view formatted) noexcept -> void
     {
-        try { chatwire::log::raw(chatwire::ansi::render(formatted)); }
+        try { write_line(chatwire::ansi::render(formatted)); }
         catch (...) { }
     }
 
     /* @brief A chatwire event, visually distinct from game chat. */
     inline auto event(const std::string_view text) noexcept -> void
     {
-        try { chatwire::log::raw(std::format("  \x1b[90m* {}\x1b[0m", text)); }
+        try { write_line(std::format("  \x1b[90m* {}\x1b[0m", text)); }
         catch (...) { }
     }
 

@@ -28,8 +28,15 @@ namespace chatwire::config
     {
         /* @brief TCP port on 127.0.0.1.  0 means "the caller said nothing". */
         std::uint16_t port{ 0 };
-        /* @brief Attach a console window to the game. */
-        bool console{ true };
+        /*
+            @brief Attach a console window to the game.
+            @details
+            OFF by default, matching the injector.  chatwire's interface is the
+            websocket; the console is a convenience for watching chat, and on a
+            game that already has one (Lunar, or any java.exe launch) chatwire's
+            output has to share it with the game's own logger.  Opt in.
+        */
+        bool console{ false };
         /* @brief Show the start-up trace, not just chat and problems. */
         bool verbose{ false };
     };

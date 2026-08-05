@@ -9,6 +9,16 @@
 
 namespace chatwire::ansi
 {
+    /*
+        @brief Minecraft's section sign, U+00A7, as the UTF-8 bytes C2 A7.
+        @details
+        Spelled once, here, because writing it by hand is a trap: a source file
+        saved as UTF-8 that then gets its bytes re-encoded turns C2 A7 into
+        C3 82 C2 A7, and the extra byte shows up as a stray "A" in front of every
+        colour code -- in the game's chat as well as the console.  That happened.
+    */
+    inline constexpr std::string_view section{ "\xC2\xA7" };
+
     /* @brief Resets all attributes.  Worth emitting after every line. */
     inline constexpr std::string_view reset{ "\x1b[0m" };
 

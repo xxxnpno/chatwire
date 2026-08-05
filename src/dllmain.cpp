@@ -43,8 +43,9 @@ namespace
            --background reach a game the injector did not start: a process's
            environment is fixed at creation, so a flag cannot be delivered as an
            environment variable to something already running.
-        2. CHATWIRE_PORT / CHATWIRE_BACKGROUND / CHATWIRE_VERBOSE in the game's
-           own environment, for anyone launching the game themselves.
+        2. CHATWIRE_PORT / CHATWIRE_CONSOLE / CHATWIRE_BACKGROUND /
+           CHATWIRE_VERBOSE in the game's own environment, for anyone launching
+           the game themselves.
         3. The defaults.
     */
     auto load_settings() noexcept -> chatwire::config::settings
@@ -85,9 +86,14 @@ namespace
             }
         }
 
+        // The console is OPT-IN, matching the injector's default.  Both spellings
+        // are honoured because both read naturally depending on which way round
+        // you are thinking about it.
+        env_flag("CHATWIRE_CONSOLE", s.console);
         bool background{ !s.console };
         env_flag("CHATWIRE_BACKGROUND", background);
         s.console = !background;
+
         env_flag("CHATWIRE_VERBOSE", s.verbose);
 
         if (s.port == 0u) { s.port = chatwire::default_port; }

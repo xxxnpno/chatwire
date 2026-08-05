@@ -76,7 +76,11 @@ namespace chatwire::detail
         (void)pump::submit([message = std::move(text)]() noexcept
         {
             if (!sdk::in_world()) { return; }
-            (void)sdk::add_chat("Â§""8[Â§""bchatwireÂ§""8] Â§""7" + message);
+            const std::string prefix{ std::string{ chatwire::ansi::section } + "8["
+                                      + std::string{ chatwire::ansi::section } + "bchatwire"
+                                      + std::string{ chatwire::ansi::section } + "8] "
+                                      + std::string{ chatwire::ansi::section } + "7" };
+            (void)sdk::add_chat(prefix + message);
         });
     }
 

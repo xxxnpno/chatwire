@@ -8,8 +8,13 @@
 //   chatwire-inject                     find Minecraft, inject chatwire.dll
 //   chatwire-inject --pid 1234          inject into a specific process
 //   chatwire-inject --dll path.dll      inject a different DLL
-//   chatwire-inject --port 9000         set CHATWIRE_PORT for the target first
+//   chatwire-inject --port 9000         listen on a different port
+//   chatwire-inject --console           also open a console showing live chat
 //   chatwire-inject --list              list candidate processes and exit
+//
+// No console by default: chatwire's interface is the websocket, and on a game
+// that already has a console (Lunar, or any java.exe launch) chatwire's output
+// has to share the window with the game's own logger.
 //
 // WHY LoadLibraryW AND NOT SOMETHING CLEVERER
 // Manual mapping and thread hijacking exist to avoid detection.  chatwire is a
@@ -297,7 +302,7 @@ namespace
             "  chatwire-inject --pid <n>       inject into a specific process\n"
             "  chatwire-inject --dll <path>    inject a different DLL\n"
             "  chatwire-inject --port <n>      port for chatwire to listen on\n"
-            "  chatwire-inject --background    inject with no console window\n"
+            "  chatwire-inject --console       ALSO open a console showing chat\n"
             "  chatwire-inject --verbose       show chatwire's start-up trace\n"
             "\n"
             "The DLL defaults to chatwire.dll next to this executable.\n");
@@ -310,7 +315,10 @@ int main(const int argc, char** const argv)
     DWORD        pid{ 0 };
     bool         list_only{ false };
     unsigned     port{ 0 };
-    bool         background{ false };
+    // No console by DEFAULT.  chatwire's interface is the websocket; the
+    // console is a convenience for watching chat, and one that has to share the
+    // game's window when the game has one.  Opt in with --console.
+    bool         console{ false };
     bool         verbose{ false };
 
     for (int i{ 1 }; i < argc; ++i)
@@ -320,7 +328,8 @@ int main(const int argc, char** const argv)
 
         if (arg == "--help" || arg == "-h") { usage(); return 0; }
         else if (arg == "--list") { list_only = true; }
-        else if (arg == "--background") { background = true; }
+        else if (arg == "--console") { console = true; }
+        else if (arg == "--background") { console = false; }   // kept: it is what it says
         else if (arg == "--verbose") { verbose = true; }
         else if (arg == "--pid")  { if (const char* v{ next() }) { pid = std::strtoul(v, nullptr, 10); } }
         else if (arg == "--port") { if (const char* v{ next() }) { port = std::strtoul(v, nullptr, 10); } }
@@ -404,7 +413,7 @@ int main(const int argc, char** const argv)
     {
         chatwire::config::settings settings{};
         settings.port    = static_cast<std::uint16_t>(port);
-        settings.console = !background;
+        settings.console = console;
         settings.verbose = verbose;
 
         const std::string cfg{ to_utf8(dll.substr(0, dll.find_last_of(L"\\/") + 1u))
@@ -418,7 +427,7 @@ int main(const int argc, char** const argv)
         {
             std::printf("  port  : %u%s%s\n",
                         port != 0u ? port : 24455u,
-                        background ? "   (no console)" : "",
+                        console ? "   (console)" : "   (no console)",
                         verbose ? "   (verbose)" : "");
         }
     }
