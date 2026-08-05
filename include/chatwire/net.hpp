@@ -74,6 +74,39 @@ namespace chatwire::net
 #endif
 
     /*
+        @brief Byte-order conversion, without the `::` that breaks on macOS.
+        @details
+        htons and its family are FUNCTIONS on Windows and Linux and MACROS on
+        macOS (<sys/_endian.h>).  chatwire qualifies every C library call with
+        `::` to say "the global one, not some member" -- and on macOS that turns
+        `::htons(port)` into `::__DARWIN_OSSwapInt16(port)`, which does not
+        parse.  The error is `expected unqualified-id` pointing at a line that
+        is obviously fine, with the macro expansion three notes further down.
+
+        Wrapping them is not ceremony: it is the difference between one file
+        knowing this and every call site being a platform trap.  The bodies call
+        them UNQUALIFIED, which is the only spelling that works as both a
+        function and a macro.
+    */
+    [[nodiscard]] inline auto to_network_port(const std::uint16_t port) noexcept
+        -> std::uint16_t
+    {
+        return htons(port);
+    }
+
+    [[nodiscard]] inline auto from_network_port(const std::uint16_t port) noexcept
+        -> std::uint16_t
+    {
+        return ntohs(port);
+    }
+
+    /* @brief 127.0.0.1, in network byte order.  The only address chatwire binds. */
+    [[nodiscard]] inline auto loopback_address() noexcept -> std::uint32_t
+    {
+        return htonl(INADDR_LOOPBACK);
+    }
+
+    /*
         @brief Brings the socket library up.  Idempotent per process on POSIX.
         @details
         Winsock genuinely needs this and refuses every call until it has had it.

@@ -142,6 +142,18 @@ target_include_directories(chatwire_lib PUBLIC
 target_link_libraries(chatwire_lib PUBLIC vmhook::vmhook Threads::Threads)
 target_compile_features(chatwire_lib PUBLIC cxx_std_23)
 
+# This archive is linked INTO a shared library, so its objects have to be
+# position-independent -- a static library is not PIC by default and CMake will
+# not infer it.  On Windows nothing notices, because a PE image is relocated
+# wholesale and there is no such distinction; on ELF the link fails outright:
+#
+#   relocation R_X86_64_TPOFF32 against symbol `...attached_by_us' can not be
+#   used when making a shared object; recompile with -fPIC
+#
+# TPOFF32 is a thread-local relocation, which is why vmhook's per-thread state
+# is what happened to name itself in the error.
+set_target_properties(chatwire_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 if(WIN32)
     target_link_libraries(chatwire_lib PUBLIC ws2_32)
 else()

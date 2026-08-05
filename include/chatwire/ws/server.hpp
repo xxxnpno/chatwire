@@ -187,9 +187,9 @@ namespace chatwire::ws
 
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
-            addr.sin_port   = ::htons(port);
+            addr.sin_port   = chatwire::net::to_network_port(port);
             // Loopback ONLY.  See the file header.
-            addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+            addr.sin_addr.s_addr = chatwire::net::loopback_address();
 
             if (::bind(this->listener_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
             {
@@ -232,7 +232,7 @@ namespace chatwire::ws
             if (::getsockname(this->listener_, reinterpret_cast<sockaddr*>(&actual),
                               &actual_size) == 0)
             {
-                this->bound_port_ = ::ntohs(actual.sin_port);
+                this->bound_port_ = chatwire::net::from_network_port(actual.sin_port);
             }
 
             chatwire::log::info("websocket server listening on ws://127.0.0.1:{}",

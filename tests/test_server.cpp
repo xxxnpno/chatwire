@@ -53,8 +53,8 @@ namespace
 
             sockaddr_in addr{};
             addr.sin_family      = AF_INET;
-            addr.sin_port        = ::htons(port);
-            addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+            addr.sin_port        = chatwire::net::to_network_port(port);
+            addr.sin_addr.s_addr = chatwire::net::loopback_address();
             if (::connect(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
             {
                 return false;
