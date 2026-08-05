@@ -16,13 +16,13 @@
 //   chatwire-mock --port 9000     a different port
 //   chatwire-mock --interval 500  emit a line every 500 ms
 //   chatwire-mock --quiet         only echo commands, never emit chat
-#include "../src/core/prelude.hpp"
+#include "chatwire/common.hpp"
+#include "chatwire/json.hpp"
+#include "chatwire/ws/server.hpp"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
-import chatwire.ws.server;
-import chatwire.core.json;
 
 namespace
 {

@@ -1,3 +1,5 @@
+#pragma once
+
 // chatwire.core.log — diagnostics that cannot take the host process down.
 //
 // This library runs inside someone else's Minecraft.  A logger that throws, or
@@ -9,14 +11,7 @@
 //     entirely (a logger that outlives its mutex is a crash at exit);
 //   * writes are serialised, because a torn line from two threads is worse than
 //     no line.
-module;
-
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "../core/prelude.hpp"
-
-export module chatwire.core.log;
-
+#include "chatwire/common.hpp"
 namespace chatwire::log::detail
 {
     // Deliberately leaked: `new` with no delete.  A destroyed mutex that a
@@ -45,7 +40,7 @@ namespace chatwire::log::detail
     }
 }
 
-export namespace chatwire::log
+namespace chatwire::log
 {
     /*
         @brief Formatted logging that never throws and never escapes.

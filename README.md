@@ -203,40 +203,39 @@ It runs inside someone's game. The rules that follow from that:
 ### Layering
 
 ```
-dllmain.cpp        Win32 only, no imports  ── C ABI ──►  entry.ixx
-chatwire.ixx       start / stop, the public surface
-  features/*.ixx   behaviour; knows nothing about vmhook
-  core/*.ixx       pump, feature registry, JSON, logging
-  ws/*.ixx         RFC 6455 by hand, Winsock only
-  sdk.ixx          ◄── THE ONLY MODULE THAT INCLUDES vmhook.hpp
-  mapping.ixx      the three name tables; pure data
+dllmain.cpp             Win32 entry; spawns a thread and returns
+src/chatwire.cpp        start / stop -- the only TU that sees vmhook AND Winsock
+include/chatwire/
+  chatwire.hpp          the public surface; includes neither heavyweight header
+  features/*.hpp        behaviour; knows nothing about vmhook
+  feature.hpp           the extension point
+  pump.hpp              the game-thread queue
+  json.hpp  log.hpp     helpers
+  ws/*.hpp              RFC 6455 by hand, Winsock only
+  sdk.hpp               ◄── THE ONLY HEADER THAT INCLUDES vmhook.hpp
+  mapping.hpp           the three name tables; pure data, no vmhook
 ```
 
-`sdk.ixx` is a facade exposing only `std::string`, `bool` and function pointers, so no vmhook
+`sdk.hpp` is a facade exposing only `std::string`, `bool` and function pointers, so no vmhook
 type crosses it. A feature is written in terms of "send this chat message", never in terms of
-klasses, oops and detours.
+klasses, oops and detours — which is also why a feature cannot accidentally make the mistake
+described below.
 
-## Tools
+### Resolving methods on the object's real class
 
-| Command | |
-|---|---|
-| `chatwire-inject` | find Minecraft and inject |
-| `chatwire-inject --list` | list candidate processes without injecting |
-| `chatwire-inject --pid N` | pick a specific process |
-| `chatwire-inject --dll P` | inject a different DLL |
-| `chatwire-client` | connect and chat |
-| `chatwire-client --raw` | print raw JSON instead of rendered text |
-| `chatwire-client --port N` | a different port |
-| `chatwire-mock` | serve the protocol with fake chat |
-| `chatwire-mock --quiet` | echo commands only, emit no chat |
+Worth stating because getting it wrong crashed Minecraft.
 
-The injector uses a plain `LoadLibraryW` remote thread. Manual mapping and thread hijacking
-exist to avoid detection; chatwire is a tool you run against your own game, so there is nothing
-to hide from — and `LoadLibraryW` is the one method the loader performs itself, which means the
-DLL gets a real module handle, real TLS and a real `DllMain`.
+`printChatMessage`'s parameter is declared as `IChatComponent`, so the wrapper is registered as
+that. But `IChatComponent` is an **interface**: `getFormattedText` on it is an abstract
+declaration with no body, and its interpreted entry is HotSpot's abstract-method-error stub.
+Resolving the method from the *registered* class found that stub, and invoking it through a
+synthetic call frame took the VM down.
 
-It **waits for the remote thread and checks its exit code**, which is `LoadLibraryW`'s return
-value. Not waiting is how an injector reports success for a DLL that never loaded.
+The object at runtime is never an `IChatComponent` — it is a `ChatComponentText`, a
+`ChatComponentTranslation`, or another concrete subclass, all of which inherit a real
+implementation from `ChatComponentStyle`. chatwire therefore asks the oop what it *actually* is
+(`vmhook::klass_from_oop`) and walks that hierarchy, **skipping abstract methods**, which is
+what virtual dispatch would have picked.
 
 ## Adding a feature
 
@@ -296,23 +295,24 @@ forge a second JSON field.
 ## Requirements
 
 - **Windows.** It is injected into a running process and uses Winsock directly.
-- **CMake 3.28+** and a generator that scans module dependencies (Ninja, or Visual Studio).
-- **A C++26 compiler with named-module support.** Developed against GCC 15.2 (MSYS2).
+- **CMake 3.20+** and any C++23 compiler. Developed against GCC 15.2 (MSYS2); MSVC and Clang
+  work too.
 
-### On compilers
+No modules, no package manager, no dependencies beyond `ws2_32`. `vmhook` is vendored in `ext/`.
 
-chatwire is built as C++26 named modules, and today that is genuinely rough terrain. Two
-compiler bugs shaped the architecture, and both are documented at the point they bite:
+### A note on modules
 
-- GCC 15 **segfaults** when one translation unit instantiates both `vmhook::register_class` and
-  `vmhook::hook`, and **cannot compile** a TU that both `import`s a module and includes
-  `<windows.h>`.
-- Clang 19 **crashes** compiling a 24k-line header as a module interface unit.
+chatwire was first written as C++26 named modules. That is gone, and the reason is worth
+recording: GCC 15 segfaults instantiating vmhook inside a module, neither GCC 15 nor Clang 19
+can compile a translation unit that both `import`s a module and includes `<windows.h>`, Clang
+crashes outright on a 24k-line header as a module interface, and GCC does not COMDAT
+function-local statics of module-attached inline functions. None of that was a defect in this
+code, and all of it was time spent on the build rather than on the library.
 
-The response was to concentrate vmhook behind a single module (`sdk.ixx`) and to separate the
-Win32 entry point behind a C ABI (`entry.ixx`). Both are better designs than what they replaced,
-so the constraints cost nothing — but they are why the code is shaped this way, and they should
-be revisited when the compilers catch up.
+The layering those constraints forced was worth keeping — one boundary for vmhook, one for
+Winsock — and it survives as ordinary include discipline. `sdk.hpp` is still the only header
+that includes vmhook; `ws/server.hpp` is still the only one that includes Winsock; and
+`chatwire.hpp` includes neither, so a consumer's build pays for neither.
 
 ## Tests
 

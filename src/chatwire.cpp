@@ -1,27 +1,17 @@
-// chatwire — implementation unit for the root module.
+// chatwire.cpp — the bodies of start() / stop() and the wiring they use.
 //
-// Holds the bodies of start() / stop() / client_count() / is_running(), and the
-// detail namespace they use.  They live here rather than inline in chatwire.ixx
-// for two reasons, the second of which forced the issue:
+// Separate from the header because start() is large, runs exactly once, and has
+// no business being emitted into every translation unit that calls it.  It is
+// also the only place that pulls in the two heavyweight headers: sdk.hpp, which
+// includes vmhook, and ws/server.hpp, which includes Winsock.  Everything else
+// in chatwire sees neither.
 //
-//   1. An inline definition in a module interface is emitted into every
-//      importer.  start() is large, runs once, and has no business being
-//      duplicated into every TU that calls it.
-//   2. GCC 15 segfaults compiling start() in an importing TU.
-//
-// The startup ORDER below is not arbitrary — see the header of chatwire.ixx.
-module;
+// The startup ORDER is not arbitrary -- see the header of chatwire/chatwire.hpp.
+#include "chatwire/chatwire.hpp"
 
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "core/prelude.hpp"
-
-module chatwire;
-
-// The two heavyweight modules, imported HERE and nowhere else.
-import chatwire.sdk;
-import chatwire.ws.server;
-import chatwire.features.chat;
+#include "chatwire/features/chat.hpp"
+#include "chatwire/sdk.hpp"
+#include "chatwire/ws/server.hpp"
 
 namespace chatwire::detail
 {
@@ -131,10 +121,8 @@ namespace chatwire
     {
         if (detail::g_running.load(std::memory_order_acquire)) { return true; }
 
-        // No vmhook version here: modules do not export macros (a language
-        // rule, not an omission), and VMHOOK_VERSION_* are macros.  A TU that
-        // wants them includes <vmhook/vmhook.hpp> directly.
-        log::info("chatwire {} starting", chatwire::version);
+        log::info("chatwire {} starting (vmhook {}.{}.{})", chatwire::version,
+                  VMHOOK_VERSION_MAJOR, VMHOOK_VERSION_MINOR, VMHOOK_VERSION_PATCH);
 
         // 1. Wait for Minecraft, and work out which mapping this build uses.
         const auto deadline{ std::chrono::steady_clock::now() + timeout };

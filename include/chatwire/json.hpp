@@ -1,3 +1,5 @@
+#pragma once
+
 // chatwire.core.json — just enough JSON, with no dependency.
 //
 // ===========================================================================
@@ -24,15 +26,8 @@
 //
 // That last one matters most: chat text is ATTACKER-CONTROLLED (any player on
 // the server can say anything), and it flows straight into the JSON this emits.
-module;
-
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "../core/prelude.hpp"
-
-export module chatwire.core.json;
-
-export namespace chatwire::json
+#include "chatwire/common.hpp"
+namespace chatwire::json
 {
     /*
         @brief Escapes `text` into a JSON string body (without the quotes).

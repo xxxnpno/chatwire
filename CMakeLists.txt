@@ -1,22 +1,27 @@
-cmake_minimum_required(VERSION 3.28)   # CXX_MODULES file sets
+cmake_minimum_required(VERSION 3.20)
 
 project(chatwire
-    VERSION      0.1.0
+    VERSION      0.2.0
     DESCRIPTION  "Live WebSocket API for Minecraft 1.8.9, built on vmhook"
     LANGUAGES    CXX)
 
 # ---------------------------------------------------------------------------
-# C++26 + modules.
+# C++23, header-based.
 #
-# The standard is not aspirational here: chatwire is built as a set of named
-# modules, and the whole project is one `import chatwire;` away from a host.
-# CXX_SCAN_FOR_MODULES needs a generator that understands dyndep -- Ninja or
-# Visual Studio.  Makefiles will not do.
+# chatwire was originally built as C++26 named modules.  That is gone: GCC 15
+# and Clang 19 both fall over on this shape -- segfaults instantiating vmhook
+# inside a module, a hard failure for any TU that both imports a module and
+# includes <windows.h>, duplicate symbols from module-attached inline statics.
+# None of it was a defect in this code, and all of it was time spent on the
+# build rather than on the library.
+#
+# Headers build everywhere, today, with no workarounds.  The layering the
+# modules forced -- one boundary for vmhook, one for Winsock -- was worth
+# keeping, and survives as ordinary include discipline.
 # ---------------------------------------------------------------------------
-set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build configuration" FORCE)
@@ -29,6 +34,8 @@ if(NOT WIN32)
 endif()
 
 option(CHATWIRE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+option(CHATWIRE_BUILD_TOOLS        "Build the injector, client and mock" ON)
+option(CHATWIRE_BUILD_TESTS        "Build the no-Minecraft test suite"   ON)
 
 # ---------------------------------------------------------------------------
 # vmhook — vendored, header-only.
@@ -43,56 +50,24 @@ target_include_directories(vmhook INTERFACE
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ext>")
 
 # ---------------------------------------------------------------------------
-# The library itself: every .ixx is a module interface unit.
+# The library.  Header-based, with one .cpp for the bodies that should not be
+# duplicated into every consumer (start/stop and the wiring they use).
 # ---------------------------------------------------------------------------
-# The implementation unit is an ordinary source, not part of the CXX_MODULES
-# file set: it PROVIDES no module interface, it belongs to one.
-add_library(chatwire_lib STATIC src/chatwire_impl.cpp)
+add_library(chatwire_lib STATIC src/chatwire.cpp)
 add_library(chatwire::chatwire ALIAS chatwire_lib)
 
-target_sources(chatwire_lib
-    PUBLIC
-        FILE_SET CXX_MODULES FILES
-            src/core/log.ixx
-            src/core/pump.ixx
-            src/core/feature.ixx
-            src/core/json.ixx
-            src/mapping.ixx
-            src/sdk.ixx
-            src/ws/websocket.ixx
-            src/ws/server.ixx
-            src/features/chat.ixx
-            src/chatwire.ixx
-            src/entry.ixx)
-
+target_include_directories(chatwire_lib PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
 target_link_libraries(chatwire_lib PUBLIC vmhook::vmhook ws2_32)
-
-# GCC 15 segfaults in the `local-fnsummary` GIMPLE pass while instantiating
-# std::_Hashtable::try_emplace for vmhook's class registry inside a module TU.
-# It is a compiler bug in the interprocedural analysis, not a code defect, and
-# -fno-ipa-* is a far smaller hammer than dropping the optimisation level for
-# the whole library.  Revisit when GCC 16 lands.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(chatwire_lib PRIVATE -fno-ipa-cp -fno-ipa-sra)
-endif()
-target_compile_features(chatwire_lib PUBLIC cxx_std_26)
-
-# ---------------------------------------------------------------------------
-# The injectable DLL.
-# ---------------------------------------------------------------------------
-add_library(chatwire SHARED src/dllmain.cpp)
-target_link_libraries(chatwire PRIVATE chatwire::chatwire)
-set_target_properties(chatwire PROPERTIES
-    PREFIX ""                       # chatwire.dll, not libchatwire.dll
-    OUTPUT_NAME "chatwire")
+target_compile_features(chatwire_lib PUBLIC cxx_std_23)
 
 # ---------------------------------------------------------------------------
 # Warnings.
 #
 # vmhook is a 24k-line third-party header; its diagnostics are not chatwire's to
 # fix, and -Werror on someone else's header only ever produces noise.  So the
-# warning set is applied to chatwire's own targets and vmhook is INTERFACE
-# (never compiled on its own).
+# warning set applies to chatwire's own targets, and vmhook is INTERFACE (never
+# compiled on its own).
 # ---------------------------------------------------------------------------
 function(chatwire_apply_warnings target)
     if(MSVC)
@@ -112,92 +87,65 @@ function(chatwire_apply_warnings target)
 endfunction()
 
 chatwire_apply_warnings(chatwire_lib)
+
+# ---------------------------------------------------------------------------
+# The injectable DLL.
+# ---------------------------------------------------------------------------
+add_library(chatwire SHARED src/dllmain.cpp)
+target_link_libraries(chatwire PRIVATE chatwire::chatwire)
+set_target_properties(chatwire PROPERTIES
+    PREFIX ""                       # chatwire.dll, not libchatwire.dll
+    OUTPUT_NAME "chatwire")
 chatwire_apply_warnings(chatwire)
 
-# ---------------------------------------------------------------------------
-# GCC 15 does not put function-local statics from MODULE-ATTACHED inline
-# functions into COMDAT sections, so every TU that instantiates one emits its
-# own copy and the linker sees a duplicate symbol.  It is a gap in the module
-# implementation, not an ODR violation in the code: the definitions are
-# genuinely identical, produced from one source, and --allow-multiple-definition
-# makes the linker keep the FIRST and point every reference at it.  One object,
-# one cache, one mutex -- which is the intended semantics.
-#
-# Scoped to the final link only.  Revisit when GCC emits these as weak.
-# ---------------------------------------------------------------------------
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_link_options(chatwire PRIVATE -Wl,--allow-multiple-definition)
-endif()
-
-# Static-link the runtime so the DLL is self-contained.  It is injected into a
-# process whose PATH we do not control; a missing libstdc++/libgcc there fails
-# the injection with an error that looks nothing like its cause.
+# Self-contained: injected into a process whose PATH we do not control, where a
+# missing libstdc++/libgcc fails the injection with an error that looks nothing
+# like its cause.
 if(MINGW)
     target_link_options(chatwire PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
 # ---------------------------------------------------------------------------
-# Tools: the injector and the reference client.
-#
-# Both are plain Win32 translation units with NO import of the chatwire modules.
-# They talk to chatwire the way any other consumer would -- the injector through
-# the OS, the client through the socket -- which is the point: if the reference
-# client needs privileged access to the library, the API is not really an API.
-#
-# It also sidesteps the compiler limitation that shaped src/entry.ixx: neither
-# GCC 15 nor Clang 19 can compile a TU that both imports a module and includes
-# <windows.h>.
+# Tools.
 # ---------------------------------------------------------------------------
-option(CHATWIRE_BUILD_TOOLS "Build the injector and the reference client" ON)
-
 if(CHATWIRE_BUILD_TOOLS)
+    # The injector talks to the OS, not to chatwire, so it links nothing of ours.
     add_executable(chatwire-inject tools/injector.cpp)
     chatwire_apply_warnings(chatwire-inject)
 
     # The mock serves chatwire's protocol with synthetic chat, so a consumer can
-    # be built and tested without a Minecraft client open on the next monitor.
-    # It links the library (it uses the real server and JSON), which is what
-    # keeps it honest: the wire format cannot drift from the real one.
+    # be built and tested without a Minecraft client open.  It links the REAL
+    # server and JSON, which is what keeps its wire format from drifting.
     add_executable(chatwire-mock tools/mock.cpp)
     target_link_libraries(chatwire-mock PRIVATE chatwire::chatwire)
     chatwire_apply_warnings(chatwire-mock)
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        target_link_options(chatwire-mock PRIVATE -Wl,--allow-multiple-definition)
-    endif()
 
+    # The reference client speaks the protocol over a socket like any other
+    # consumer would -- it links nothing of ours on purpose.  If the reference
+    # client needed privileged access to the library, the API would not be one.
     add_executable(chatwire-client tools/client.cpp)
     target_link_libraries(chatwire-client PRIVATE ws2_32)
     chatwire_apply_warnings(chatwire-client)
 
-    # Self-contained, like the DLL: these are handed to users who will not have
-    # a MinGW runtime on PATH.
     if(MINGW)
-        target_link_options(chatwire-inject PRIVATE -static -static-libgcc -static-libstdc++)
-        target_link_options(chatwire-mock   PRIVATE -static -static-libgcc -static-libstdc++)
-        target_link_options(chatwire-client PRIVATE -static -static-libgcc -static-libstdc++)
+        foreach(tool chatwire-inject chatwire-mock chatwire-client)
+            target_link_options(${tool} PRIVATE -static -static-libgcc -static-libstdc++)
+        endforeach()
     endif()
 endif()
 
 # ---------------------------------------------------------------------------
-# Tests.
-#
-# Only the halves that can run without Minecraft: the WebSocket server, the
-# framing, and the JSON.  They are also the halves most likely to be wrong -- a
+# Tests: the halves that run without Minecraft -- the WebSocket server, the
+# framing, and the JSON.  They are also the halves most likely to be wrong: a
 # hand-written RFC 6455 codec is exactly the kind of code that looks right and
-# mishandles a length boundary.  The Minecraft side needs a live game and is
-# verified by injecting.
+# mishandles a length boundary.  The Minecraft side needs a live game.
 # ---------------------------------------------------------------------------
-option(CHATWIRE_BUILD_TESTS "Build the no-Minecraft test suite" ON)
-
 if(CHATWIRE_BUILD_TESTS)
     enable_testing()
     add_executable(chatwire_test_server tests/test_server.cpp)
     target_link_libraries(chatwire_test_server PRIVATE chatwire::chatwire)
     chatwire_apply_warnings(chatwire_test_server)
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        target_link_options(chatwire_test_server PRIVATE -Wl,--allow-multiple-definition)
-    endif()
     add_test(NAME server COMMAND chatwire_test_server)
 endif()
 
-message(STATUS "chatwire ${PROJECT_VERSION} - C++${CMAKE_CXX_STANDARD}, modules ON")
+message(STATUS "chatwire ${PROJECT_VERSION} - C++${CMAKE_CXX_STANDARD}, header-based")

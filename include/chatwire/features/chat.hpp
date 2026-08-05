@@ -1,3 +1,5 @@
+#pragma once
+
 // chatwire.features.chat — the chat bridge.
 //
 // ===========================================================================
@@ -25,21 +27,14 @@
 // handle() runs on a SOCKET thread and only enqueues.  The actual Java calls run
 // later, inside the pump's detour, on Minecraft's own thread.  Nothing in this
 // file calls Java from a socket thread — that would crash the VM.
-module;
+#include "chatwire/common.hpp"
 
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "../core/prelude.hpp"
-
-export module chatwire.features.chat;
-
-import chatwire.core.feature;
-import chatwire.core.json;
-import chatwire.core.log;
-import chatwire.core.pump;
-import chatwire.mapping;
-import chatwire.sdk;
-
+#include "chatwire/feature.hpp"
+#include "chatwire/json.hpp"
+#include "chatwire/log.hpp"
+#include "chatwire/mapping.hpp"
+#include "chatwire/pump.hpp"
+#include "chatwire/sdk.hpp"
 namespace chatwire::features
 {
     namespace map = chatwire::mapping;
@@ -215,7 +210,7 @@ namespace chatwire::features
     };
 }
 
-export namespace chatwire::features::chat
+namespace chatwire::features::chat
 {
     /* @brief Installs the sink every observed chat line is handed to. */
     inline auto set_sink(const chatwire::features::chat_sink sink) noexcept -> void

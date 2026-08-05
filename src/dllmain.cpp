@@ -16,27 +16,12 @@
 // is the normal case for an injected library; a caller wanting a clean shutdown
 // calls the exported chatwire_stop() first.
 //
-// ===========================================================================
-// WHY THERE IS NO `import` HERE
-// ===========================================================================
-// GCC 15 cannot compile a TU that both imports a module and includes
-// <windows.h>.  This file needs <windows.h>; everything else needs the module.
-// So the two never meet: chatwire.entry defines a small C ABI, and this file
-// declares it by hand below.  See src/entry.ixx.
-#include <cstdio>
+// Standard headers first, then chatwire, then Windows: <windows.h> declares
+// its world inside `extern "C"`, and a std declaration first seen from inside
+// that block can pick up C language linkage.
+#include "chatwire/chatwire.hpp"
 
 #include <windows.h>
-
-// ---------------------------------------------------------------------------
-// The chatwire C ABI, declared by hand.  Defined in src/entry.ixx.  Keep these
-// four signatures in lockstep with that file — they are matched by the linker,
-// not by the compiler, so a mismatch is a runtime crash rather than a build
-// error.  There are only four, and they are not expected to grow.
-// ---------------------------------------------------------------------------
-extern "C" int  chatwire_bootstrap(unsigned short port);
-extern "C" void chatwire_shutdown(void);
-extern "C" int  chatwire_running(void);
-extern "C" void chatwire_log(const char* message);
 
 namespace
 {
@@ -51,7 +36,7 @@ namespace
         half-read: `strtol` alone would turn "80abc" into 80, and binding a port
         the user did not ask for is worse than ignoring their typo.
     */
-    auto configured_port() noexcept -> unsigned short
+    auto configured_port() noexcept -> std::uint16_t
     {
         char        buffer[16]{};
         const DWORD n{ ::GetEnvironmentVariableA("CHATWIRE_PORT", buffer, sizeof(buffer)) };
@@ -63,17 +48,17 @@ namespace
             const char c{ buffer[i] };
             if (c < '0' || c > '9')
             {
-                chatwire_log("CHATWIRE_PORT is not a number; using the default port");
+                chatwire::log::warn("CHATWIRE_PORT is not a number; using the default port");
                 return 0u;
             }
             value = value * 10u + static_cast<unsigned long>(c - '0');
             if (value > 65535u)
             {
-                chatwire_log("CHATWIRE_PORT is out of range; using the default port");
+                chatwire::log::warn("CHATWIRE_PORT is out of range; using the default port");
                 return 0u;
             }
         }
-        return static_cast<unsigned short>(value);
+        return static_cast<std::uint16_t>(value);
     }
 
     auto WINAPI worker(const LPVOID module_handle) noexcept -> DWORD
@@ -87,9 +72,9 @@ namespace
             (void)::freopen_s(&stream, "CONOUT$", "w", stderr);
         }
 
-        if (chatwire_bootstrap(configured_port()) == 0)
+        if (!chatwire::start(configured_port()))
         {
-            chatwire_log("chatwire could not start; unloading");
+            chatwire::log::error("chatwire could not start; unloading");
             if (module_handle != nullptr)
             {
                 // Unload ourselves so a failed injection leaves nothing behind
@@ -110,13 +95,13 @@ namespace
 */
 extern "C" __declspec(dllexport) auto chatwire_stop() -> void
 {
-    chatwire_shutdown();
+    chatwire::stop();
 }
 
 /* @brief Whether chatwire is up.  For an injector to poll after injecting. */
 extern "C" __declspec(dllexport) auto chatwire_is_running() -> int
 {
-    return chatwire_running();
+    return chatwire::is_running() ? 1 : 0;
 }
 
 BOOL WINAPI DllMain(const HINSTANCE module_handle, const DWORD reason, LPVOID)

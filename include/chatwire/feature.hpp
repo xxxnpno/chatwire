@@ -1,3 +1,5 @@
+#pragma once
+
 // chatwire.core.feature — the extension point.
 //
 // ===========================================================================
@@ -33,17 +35,10 @@
 // handle() runs ON THE SOCKET THREAD.  A feature that needs Java from there
 // must go through the pump — that is the whole reason the pump exists, and the
 // reason handle() returns a response by value rather than being handed a socket.
-module;
+#include "chatwire/common.hpp"
 
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "../core/prelude.hpp"
-
-export module chatwire.core.feature;
-
-import chatwire.core.log;
-
-export namespace chatwire
+#include "chatwire/log.hpp"
+namespace chatwire
 {
     /*
         @brief One command from a client, already parsed.

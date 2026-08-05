@@ -1,3 +1,5 @@
+#pragma once
+
 // chatwire.sdk — the ONLY module that knows vmhook exists.
 //
 // ===========================================================================
@@ -27,19 +29,14 @@
 // So: this file includes vmhook.hpp.  Nothing else does.  The facade below
 // exposes only plain types — std::string, bool, function pointers — so no
 // vmhook type ever crosses the boundary.
-module;
+#include "chatwire/common.hpp"
 
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "core/prelude.hpp"
-
+// THE ONE PLACE vmhook IS INCLUDED.  See the header comment above for why
+// that boundary matters.
 #include <vmhook/vmhook.hpp>
 
-export module chatwire.sdk;
-
-import chatwire.mapping;
-import chatwire.core.log;
-
+#include "chatwire/log.hpp"
+#include "chatwire/mapping.hpp"
 namespace chatwire::sdk::detail
 {
     namespace map = chatwire::mapping;
@@ -54,25 +51,100 @@ namespace chatwire::sdk::detail
         }
 
         /*
-            @brief Calls a no-arg String-returning method, degrading to "".
+            @brief Calls a no-arg String-returning method on this component.
             @details
-            Every failure — method missing under this mapping, receiver stale,
-            call refused — has to produce a string, because the caller is a
-            detour that must not throw, and an unreadable chat line is not worth
-            crashing a game over.
+            THE METHOD IS RESOLVED FROM THE OBJECT'S RUNTIME CLASS, not from the
+            wrapper's registered one.  That distinction is the whole reason this
+            function exists instead of a plain get_method() call, and getting it
+            wrong CRASHED MINECRAFT.
+
+            The wrapper is registered as `IChatComponent`, because that is what
+            printChatMessage's parameter is declared as.  But IChatComponent is
+            an INTERFACE: `getFormattedText` on it is an abstract declaration
+            with no body, and its interpreted entry is HotSpot's
+            abstract-method-error stub.  vmhook's get_method() resolves from the
+            REGISTERED class, so it found that stub, and invoking it through a
+            synthetic call frame took the VM down.
+
+            The object at runtime is never an IChatComponent -- it is a
+            ChatComponentText, ChatComponentTranslation, or another concrete
+            subclass -- and every one of them inherits a real implementation from
+            ChatComponentStyle.  Asking the oop what it actually is, then walking
+            THAT class's hierarchy, finds the implementation instead of the
+            declaration.
+
+            Every failure degrades to "": the caller is a detour that must not
+            throw, and an unreadable chat line is not worth a crash.
         */
-        [[nodiscard]] auto text_via(const std::string& method) const noexcept -> std::string
+        [[nodiscard]] auto text_via(const std::string& method_name) const noexcept -> std::string
         {
             try
             {
-                if (method.empty() || !this->get_instance()) { return {}; }
-                auto proxy{ const_cast<chat_component*>(this)->get_method(method.c_str()) };
-                if (!proxy.has_value()) { return {}; }
-                const auto value{ proxy->call() };
+                if (method_name.empty()) { return {}; }
+                vmhook::oop_t const oop{ this->get_instance() };
+                if (!oop) { return {}; }
+
+                // What is this object REALLY?  Not what the wrapper claims.
+                vmhook::hotspot::klass* const concrete{ vmhook::klass_from_oop(oop) };
+                if (!concrete || !vmhook::hotspot::is_valid_pointer(concrete)) { return {}; }
+
+                vmhook::hotspot::method* const m{ find_method_in_hierarchy(
+                    concrete, method_name, "()Ljava/lang/String;") };
+                if (!m) { return {}; }
+
+                const vmhook::method_proxy proxy{ oop, m, "()Ljava/lang/String;" };
+                const auto value{ proxy.call() };
                 if (value.threw()) { return {}; }
                 return value.as_string();
             }
             catch (...) { return {}; }
+        }
+
+    private:
+        /*
+            @brief Finds a concrete method by name+descriptor, walking supers.
+            @details
+            ABSTRACT METHODS ARE SKIPPED.  A class can carry an abstract
+            re-declaration of a method its own superclass implements, and picking
+            that up would reintroduce exactly the crash above.  The first
+            NON-abstract match wins, which is what virtual dispatch would pick.
+
+            Every dereference is pointer-validated: this runs inside a detour on
+            a live JVM, where a bad read is a crash rather than an exception.
+        */
+        [[nodiscard]] static auto find_method_in_hierarchy(vmhook::hotspot::klass* const start,
+                                                           const std::string& name,
+                                                           const std::string& descriptor) noexcept
+            -> vmhook::hotspot::method*
+        {
+            for (vmhook::hotspot::klass* k{ start };
+                 k != nullptr && vmhook::hotspot::is_valid_pointer(k);
+                 k = k->get_super())
+            {
+                const std::int32_t count{ k->get_methods_count() };
+                vmhook::hotspot::method** const methods{ k->get_methods_ptr() };
+                if (!methods || count <= 0) { continue; }
+
+                for (std::int32_t i{ 0 }; i < count; ++i)
+                {
+                    vmhook::hotspot::method* const m{ methods[i] };
+                    if (!m || !vmhook::hotspot::is_valid_pointer(m)) { continue; }
+                    // JVM_ACC_ABSTRACT (0x0400).  Read through vmhook's
+                    // fault-safe probe rather than dereferencing the flags
+                    // pointer: this runs inside a detour, and a Method* left
+                    // cold by a deopt or a class unload would AV the JVM on a
+                    // raw read.  An unreadable slot reports "not found", and we
+                    // treat that as abstract -- skipping a method we cannot
+                    // vouch for is the safe direction.
+                    bool flags_readable{ false };
+                    const bool abstract{ m->safe_access_flags_test(0x0400u, flags_readable) };
+                    if (!flags_readable || abstract) { continue; }
+                    if (std::string{ m->get_name() } != name) { continue; }
+                    if (std::string{ m->get_signature() } != descriptor) { continue; }
+                    return m;
+                }
+            }
+            return nullptr;
         }
     };
 
@@ -161,7 +233,7 @@ namespace chatwire::sdk::detail
     }
 }
 
-export namespace chatwire::sdk
+namespace chatwire::sdk
 {
     /*
         @brief Called for each chat line: (formatted, plain), both UTF-8.

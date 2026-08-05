@@ -1,3 +1,5 @@
+#pragma once
+
 // chatwire.ws.server — the local WebSocket server.
 //
 // ===========================================================================
@@ -34,21 +36,14 @@
 //     they remove themselves before exiting;
 //   * a client that stops reading cannot stall the game: writes are best-effort
 //     and a failed write closes that client rather than blocking the broadcaster.
-module;
+#include "chatwire/common.hpp"
 
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "../core/prelude.hpp"
+#include "chatwire/log.hpp"
+#include "chatwire/ws/websocket.hpp"
 
-// Platform headers strictly AFTER the standard ones.
+// Platform headers strictly after the standard ones.
 #include <winsock2.h>
 #include <ws2tcpip.h>
-
-export module chatwire.ws.server;
-
-import chatwire.ws.websocket;
-import chatwire.core.log;
-
 namespace chatwire::ws::detail
 {
     /*
@@ -106,7 +101,7 @@ namespace chatwire::ws::detail
     using client_ptr = std::shared_ptr<client>;
 }
 
-export namespace chatwire::ws
+namespace chatwire::ws
 {
     /*
         @brief What the server does with a decoded client message.

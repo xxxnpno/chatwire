@@ -1,3 +1,5 @@
+#pragma once
+
 // chatwire.mapping — Minecraft 1.8.9 name resolution across all three mappings.
 //
 // ===========================================================================
@@ -33,15 +35,8 @@
 // The order matters.  MCP and SRG share the same CLASS names and differ only in
 // MEMBER names, so the class check cannot separate them — only a field probe
 // can.  OBF differs at both levels, so its class check is decisive.
-module;
-
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "core/prelude.hpp"
-
-export module chatwire.mapping;
-
-export namespace chatwire::mapping
+#include "chatwire/common.hpp"
+namespace chatwire::mapping
 {
     /*
         @brief Which name set the attached Minecraft build uses.

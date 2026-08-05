@@ -1,3 +1,5 @@
+#pragma once
+
 // chatwire.ws.websocket — RFC 6455 handshake and framing, by hand.
 //
 // ===========================================================================
@@ -24,14 +26,7 @@
 // NOT implemented: extensions (the handshake never negotiates one, so a
 // compliant client will not send one), binary frames beyond passing the opcode
 // through, and continuation of control frames (which RFC 6455 forbids anyway).
-module;
-
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "../core/prelude.hpp"
-
-export module chatwire.ws.websocket;
-
+#include "chatwire/common.hpp"
 namespace chatwire::ws::detail
 {
     // ── SHA-1 ───────────────────────────────────────────────────────────────
@@ -156,7 +151,7 @@ namespace chatwire::ws::detail
     }
 }
 
-export namespace chatwire::ws
+namespace chatwire::ws
 {
     /* @brief RFC 6455 opcodes.  Only the ones a text protocol needs. */
     enum class opcode : std::uint8_t

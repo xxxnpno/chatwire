@@ -9,20 +9,16 @@
 // socket, performs a real handshake, and pushes real frames through it —
 // including the boundary sizes and the malformed inputs a hostile client would
 // send.  What it cannot test is the Minecraft side, which needs a live game.
-#include "../src/core/prelude.hpp"
+#include "chatwire/common.hpp"
+#include "chatwire/json.hpp"
+#include "chatwire/ws/server.hpp"
+#include "chatwire/ws/websocket.hpp"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
 #include <cstdio>
 
-// Declared by hand rather than imported: this is a plain TU, and GCC 15 cannot
-// compile a TU that both imports a module and includes <windows.h>.  The
-// functions under test are re-implemented against the same modules through the
-// test entry points below.
-import chatwire.ws.websocket;
-import chatwire.ws.server;
-import chatwire.core.json;
 
 namespace
 {

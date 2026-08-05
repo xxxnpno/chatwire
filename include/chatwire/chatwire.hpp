@@ -1,3 +1,5 @@
+#pragma once
+
 // chatwire — a live WebSocket API for Minecraft 1.8.9.
 //
 // This is the root module: the only thing a host has to import, and the only
@@ -15,40 +17,26 @@
 //      finds a working API rather than a half-built one
 //
 // Shutdown is the exact reverse, and for the same reasons.
-module;
-
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "core/prelude.hpp"
-
-export module chatwire;
-
-// Re-exported: a host that imports chatwire gets the public surface — logging,
-// the feature interface, the JSON helpers, the pump and the mapping tables —
-// without having to know which submodule each name lives in.
-export import chatwire.core.feature;
-export import chatwire.core.json;
-export import chatwire.core.log;
-export import chatwire.core.pump;
-export import chatwire.mapping;
-
-// NOT re-exported.  chatwire.sdk is the module that includes vmhook.hpp, and
-// chatwire.ws.server is the one that includes <winsock2.h>.  Re-exporting either
-// would drag those 24k lines (and Winsock's extern "C" block) into every
-// importer's translation unit, which is what today's compilers cannot survive —
-// see the header of src/sdk.ixx.  They are implementation detail regardless: a
-// host talks to chatwire through start()/stop() and the feature interface, never
-// through vmhook or a socket.
+#include "chatwire/common.hpp"
+#include "chatwire/feature.hpp"
+#include "chatwire/json.hpp"
+#include "chatwire/log.hpp"
+#include "chatwire/mapping.hpp"
+#include "chatwire/pump.hpp"
+// The public surface: a consumer includes this one header and gets logging,
+// the feature interface, the JSON helpers, the pump and the mapping tables.
 //
-// They are imported by the implementation unit, which is the only TU that needs
-// them.
-
-export namespace chatwire
+// NOT included here: sdk.hpp (vmhook's 24k lines) and ws/server.hpp (Winsock's
+// extern "C" block).  They are implementation detail -- a host talks to
+// chatwire through start()/stop() and the feature interface, never through
+// vmhook or a socket -- so a consumer's build should not pay for either.
+// src/chatwire.cpp is the only translation unit that includes them.
+namespace chatwire
 {
     /* @brief chatwire's own version. */
-    inline constexpr std::string_view version{ "0.1.0" };
+    inline constexpr std::string_view version{ "0.2.0" };
 
-    /* @brief The default port.  Loopback only; see ws/server.ixx. */
+    /* @brief The default port.  Loopback only; see ws/server.hpp. */
     inline constexpr std::uint16_t default_port{ 24455 };
 
     /*
@@ -57,11 +45,9 @@ export namespace chatwire
         Blocks until the JVM is ready (bounded by `timeout`), then installs
         everything.  Safe to call twice; the second call is a no-op.
 
-        DECLARED here and DEFINED in chatwire_impl.cpp, deliberately.  An inline
-        definition in a module interface is emitted into every importer, and GCC
-        15 segfaults compiling this one there.  Keeping the body in a single
-        implementation unit is also the ordinary shape for a function this size:
-        importers get a call, not a copy.
+        DECLARED here and DEFINED in src/chatwire.cpp.  The body is large, runs
+        once, and pulls in both heavyweight headers (vmhook and Winsock); an
+        inline definition would emit all of that into every consumer.
 
         @param port     TCP port on 127.0.0.1.
         @param timeout  How long to wait for Minecraft's classes to appear.  A
@@ -81,6 +67,9 @@ export namespace chatwire
         server first (no new work can arrive), then the chat sink, then the
         features (hooks come down on the game thread), then the pump.  Every
         stage is bounded; nothing here can hang the game.
+
+        Must NOT be called from DllMain — it joins threads, and the loader lock
+        makes that a deadlock.
     */
     auto stop() noexcept -> void;
 

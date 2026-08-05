@@ -1,3 +1,5 @@
+#pragma once
+
 // chatwire.core.pump — the ONE place this process is allowed to enter Java.
 //
 // ===========================================================================
@@ -41,17 +43,10 @@
 //   * SURVIVES A DEAD GAME.  If the pump detour never fires (menu screen, game
 //     hung, hook failed), tasks accumulate to the cap and are dropped.  Nothing
 //     blocks and nothing waits forever.
-module;
+#include "chatwire/common.hpp"
 
-// The shared preamble, FIRST and identical in every module.  See the header
-// for why GCC 15 requires that of a modular build.
-#include "../core/prelude.hpp"
-
-export module chatwire.core.pump;
-
-import chatwire.core.log;
-
-export namespace chatwire::pump
+#include "chatwire/log.hpp"
+namespace chatwire::pump
 {
     /*
         @brief A unit of work to run on the Minecraft client thread.
