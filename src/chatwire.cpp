@@ -13,14 +13,16 @@
 #include "chatwire/console.hpp"
 #include "chatwire/features/chat.hpp"
 #include "chatwire/features/system.hpp"
+#include "chatwire/features/world.hpp"
 #include "chatwire/sdk.hpp"
 #include "chatwire/ws/server.hpp"
 
 namespace chatwire::detail
 {
     /*
-        The server and the pump hook are function-local statics that are NEVER
-        DESTROYED, deliberately.
+        The server is a function-local static that is NEVER DESTROYED,
+        deliberately -- and so is the hook list over in sdk.hpp, for the same
+        reason.
 
         Both destructors do things that must not happen during static
         destruction or DLL unload: ~server joins threads, and ~hook_handle
@@ -64,24 +66,45 @@ namespace chatwire::detail
         @brief Says something in the player's own chat box.
         @details
         Client-side only (addChatMessage), so nothing is transmitted and no
-        server sees it.  Queued onto the pump because it has to run on the game
-        thread, and skipped entirely when the player is not in a world -- there
-        is no chat box on the title screen, and the message would be lost rather
-        than delayed.
+        server sees it.  Skipped entirely when the player is not in a world --
+        there is no chat box on the title screen, and the message would go
+        nowhere.
+
+        Callable from whichever thread wanted to say something -- start-up says
+        hello from the start-up thread, a connecting client's own socket thread
+        announces it -- and SYNCHRONOUS either way: sdk::add_chat routes itself
+        onto a thread allowed to touch Java and waits, so when this returns the
+        message has either been shown or failed, and both are reported.  The
+        version this replaces submitted to a queue and returned, which is why it
+        could not tell anyone when nothing happened.
 
         Prefixed so it is obviously chatwire talking and not another player.
     */
-    inline auto notify_in_game(std::string text) noexcept -> void
+    inline auto notify_in_game(const std::string_view text) noexcept -> void
     {
-        (void)pump::submit([message = std::move(text)]() noexcept
+        try
         {
-            if (!sdk::in_world()) { return; }
+            // Both outcomes are REPORTED.  The earlier version discarded the
+            // result, so an inject that landed on the title screen -- where
+            // there is no chat box and no player to address -- looked exactly
+            // like one that had worked, and the only symptom was a message that
+            // never appeared.  A courtesy message failing is not worth a
+            // warning, but it is worth a line.
+            if (!sdk::in_world())
+            {
+                log::info("not in a world; skipped the in-game notice: {}", text);
+                return;
+            }
             const std::string prefix{ std::string{ chatwire::ansi::section } + "8["
                                       + std::string{ chatwire::ansi::section } + "bchatwire"
                                       + std::string{ chatwire::ansi::section } + "8] "
                                       + std::string{ chatwire::ansi::section } + "7" };
-            (void)sdk::add_chat(prefix + message);
-        });
+            if (!sdk::add_chat(prefix + std::string{ text }))
+            {
+                log::warn("could not show the in-game notice: {}", text);
+            }
+        }
+        catch (...) { }
     }
 
     /*
@@ -90,20 +113,38 @@ namespace chatwire::detail
         Both in the console and in the player's own chat, because the person
         playing is the one who wants to know that something just attached to
         their game.
+
+        Runs on that client's OWN socket thread, and now calls into Java from
+        there.  The in-game half is skipped once chatwire is no longer running,
+        which is not a detail: stop() joins these threads, so every one of them
+        passes through here on the way out, and a shutdown that says goodbye
+        once per connected client would enter the JVM as many times as there
+        happen to be clients, while the hooks are coming down.  The console half
+        still reports it -- that is chatwire talking to its operator, not to the
+        game.
     */
     inline auto on_presence(const bool connected, const std::size_t total) noexcept -> void
     {
         try
         {
+            const bool live{ g_running.load(std::memory_order_acquire) };
             if (connected)
             {
                 chatwire::console::event(std::format("client connected ({} total)", total));
-                notify_in_game(std::format("a client connected ({} total)", total));
+                if (live) { notify_in_game(std::format("a client connected ({} total)", total)); }
             }
             else
             {
                 chatwire::console::event(std::format("client disconnected ({} left)", total));
-                notify_in_game(std::format("a client disconnected ({} left)", total));
+                if (live) { notify_in_game(std::format("a client disconnected ({} left)", total)); }
+
+                // This is the last thing a client thread does before it exits,
+                // and it may well have become a JavaThread on the way (any
+                // command that reached the game attaches it).  Release it HERE
+                // rather than trusting the thread_local teardown to fire: the
+                // VM must not be left holding a JavaThread for an OS thread
+                // that is about to disappear.
+                sdk::detach_thread();
             }
         }
         catch (...) { }
@@ -138,7 +179,12 @@ namespace chatwire::detail
             const auto cmd{ json::get_string(request, "cmd") };
             if (!cmd) { return reply(false, "missing or non-string 'cmd'"); }
 
-            const std::size_t dot{ cmd->find('.') };
+            // The LAST dot, not the first.  A command is <prefix>.<verb>, and the
+            // prefix may be a bare feature name ("chat") or a fully-qualified
+            // Java class ("net.minecraft.client.entity.EntityPlayerSP") -- which
+            // has dots of its own.  Splitting at the first would make "net" the
+            // feature name and the rest nonsense.
+            const std::size_t dot{ cmd->rfind('.') };
             if (dot == std::string::npos || dot == 0u || dot + 1u >= cmd->size())
             {
                 return reply(false, "'cmd' must look like feature.verb");
@@ -177,8 +223,9 @@ namespace chatwire
         @param timeout  How long to wait for Minecraft's classes to appear.
                         A client that is still on the launcher screen has a JVM
                         but no Minecraft class yet.
-        @return false when no supported Minecraft was found, or the pump could
-                not be installed — in which case nothing was left installed.
+        @return false when no supported Minecraft was found, or the VM would not
+                let this thread call Java — in which case nothing was left
+                installed.
     */
     auto start(const std::uint16_t port, const std::chrono::seconds timeout) noexcept
         -> bool
@@ -218,47 +265,54 @@ namespace chatwire
         //     rather than self-registering — see features/chat.ixx for why.
         registry::add(features::chat::instance());
         registry::add(features::system::instance());
+        registry::add(features::world::instance());
 
-        // 3. Deoptimise BOTH hook targets in one class-graph walk, before either
-        //    hook is installed.  Doing it per-hook meant walking every loaded
-        //    class twice, which on a modded client is seconds each time.
+        // 3. Deoptimise the hook target before installing the hook: a
+        //    JIT-compiled method never reaches the interpreter entry a detour
+        //    patches, so the hook would install and never fire.
         sdk::deoptimize_hook_targets();
 
-        // 4. The pump.  Everything after this needs a way onto the game thread.
-        pump::reopen();
-        if (!sdk::install_pump(&pump::drain))
+        // 4. Join the VM.  Everything past this point may call Java from this
+        //    thread; nothing before it could.  This is where the pump used to
+        //    be -- a detour on Minecraft.runTick, a queue, and a tick of
+        //    latency, all of it in service of "a call must happen inside a
+        //    hook".  It does not any more.
+        //
+        //    Failing here is fatal in the same way a missing Minecraft class
+        //    is: chatwire could still observe chat, but nothing a client asked
+        //    for would ever work, and a bridge that only listens is not the
+        //    thing anyone injected.
+        if (!sdk::attach_thread())
         {
-            log::error("could not hook Minecraft.runTick; chatwire cannot reach "
-                       "the game thread");
+            log::error("this thread could not join the VM; chatwire cannot call "
+                       "into the game");
             return false;
         }
 
-        // 5. Features, on the game thread.  Hooking resolves klasses, which has
-        //    the same thread requirements as any other JVM work.
-        {
-            std::atomic<bool> done{ false };
-            (void)pump::submit([&done]() noexcept
-            {
-                const std::size_t started{ registry::start_all() };
-                log::info("{} feature(s) started", started);
-                done.store(true, std::memory_order_release);
-            });
+        // 4b. The safepoint gate and the caches every call depends on, resolved
+        //     HERE, on a thread nothing is waiting for.  Doing either for the
+        //     first time on the direct route would stop the game for the length
+        //     of a class-graph walk.
+        sdk::warm_up();
 
-            // Bounded wait.  If the pump never fires (game not ticking yet) we
-            // carry on: the features will start on the first tick that happens,
-            // and the server can already answer `stats`.
-            const auto feature_deadline{ std::chrono::steady_clock::now()
-                                         + std::chrono::seconds{ 30 } };
-            while (!done.load(std::memory_order_acquire)
-                   && std::chrono::steady_clock::now() < feature_deadline)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds{ 50 });
-            }
-            if (!done.load(std::memory_order_acquire))
-            {
-                log::warn("features have not started yet (is the game ticking?); "
-                          "they will start on the first tick");
-            }
+        if (!sdk::can_call_into_game())
+        {
+            // Not fatal -- observing chat still works, and that is most of what
+            // chatwire does.  But every command will fail, so say so once, now.
+            log::error("this JVM's collector relocates objects concurrently, so "
+                       "vmhook will not enter Java on any thread; chat observation "
+                       "works, commands will not");
+        }
+
+
+
+        // 5. Features.  Installing a hook is metaspace work rather than a Java
+        //    call, so it is safe on this thread and does not go through the
+        //    pump -- and doing it here means a feature that fails is reported
+        //    before the server opens rather than a tick later.
+        {
+            const std::size_t started{ registry::start_all() };
+            log::info("{} feature(s) started", started);
         }
 
         // 6. The server, last, so an instant client finds a working API.
@@ -267,20 +321,31 @@ namespace chatwire
         if (!detail::server_instance().start(bind_port, &detail::dispatch, &detail::on_presence))
         {
             log::error("websocket server failed to start; shutting down");
-            (void)pump::submit([]() noexcept { registry::stop_all(); });
-            pump::shutdown();
+            registry::stop_all();
             sdk::remove_hooks();
+            // Same reason as the detach at the end of stop(): a failed start
+            // ends in FreeLibraryAndExitThread on this very thread, and the VM
+            // must not be left holding a JavaThread for it.
+            sdk::detach_thread();
             return false;
         }
 
         detail::g_running.store(true, std::memory_order_release);
 
         features::system::set_status_port(detail::server_instance().port());
+        features::system::set_can_call(sdk::can_call_into_game());
+        features::system::set_client_counter(&chatwire::client_count);
 
         chatwire::console::banner(chatwire::version, detail::server_instance().port(),
                                   mapping::mode_name(mode));
-        detail::notify_in_game("connected - listening on 127.0.0.1:"
-                               + std::to_string(detail::server_instance().port()));
+        // Just "attached".  The port belongs in the console banner and the log,
+        // where someone is looking for it; in the chat box it is noise in front
+        // of the one fact the player wants, which is that chatwire is in.
+        detail::notify_in_game("attached");
+
+        // The start-up thread returns to dllmain and exits straight after this,
+        // and saying hello attached it.  Release it explicitly.
+        sdk::detach_thread();
         return true;
     }
 
@@ -289,12 +354,20 @@ namespace chatwire
         @details
         Reverse of start(), and the order is what keeps unload from crashing:
 
-          server first  — no new client work can arrive
+          goodbye       — said first, while the hooks are still up
+          server        — no new client work can arrive, and every client
+                          thread is joined before anything is removed
           sink cleared  — the chat detour stops touching the server
-          features      — hooks come down, on the game thread
-          pump          — closed only after the tasks that needed it have run
+          features      — whatever they installed comes down
+          hooks         — last, so nothing is mid-detour when it goes
+          this thread   — released from the VM, see below
 
-        Every stage is bounded; nothing here can hang the game.
+        Every stage is bounded; nothing here can hang the game.  What made the
+        old order delicate was the pump: teardown had to keep a queue open long
+        enough for work already in it to run, and guess at a deadline for when
+        the game would next tick.  Nothing here waits on the game any more --
+        the calls happen on this thread, so they are finished when the line
+        below them starts.
     */
     auto stop() noexcept -> void
     {
@@ -302,47 +375,91 @@ namespace chatwire
 
         log::info("chatwire stopping");
 
-        // Say goodbye while the hooks are still up -- afterwards there is no way
-        // onto the game thread to say anything at all.  Bounded wait: if the
-        // game is not ticking, shutdown must not hang on a courtesy message.
-        detail::notify_in_game("detaching - goodbye");
+        // Said while the hooks are still up, and synchronously: when this
+        // returns the player has been told.  The old version put the message in
+        // a queue and then waited up to half a second hoping the game would
+        // tick and drain it, which was the best it could do and still lost the
+        // message on a paused or hitching client.
+        /*
+            THE GOODBYE RUNS ON A THREAD OF ITS OWN, AND THAT IS NOT DECORATION.
+
+            Saying anything in-game means calling Java, and calling Java means
+            becoming a JavaThread -- which registers a thread_local destructor
+            (vmhook's exit_detacher) whose code lives in THIS DLL.  The thread
+            running stop() is the detach worker, and it does not get to exit
+            normally: it ends in FreeLibraryAndExitThread, unmapping the module
+            that destructor lives in.  Letting it attach kills the game a moment
+            after a detach that looked like it worked -- MEASURED, twice.
+
+            A short-lived thread that is JOINED here has none of that problem: it
+            attaches, speaks, and exits while the DLL is still loaded, so its
+            thread_local teardown runs against mapped code and vmhook detaches it
+            from the VM properly.  The unloading thread stays a plain native
+            thread the JVM has never heard of, which is the only kind that is
+            safe to unload from.
+        */
+        try
         {
-            const auto deadline{ std::chrono::steady_clock::now()
-                                 + std::chrono::milliseconds{ 500 } };
-            while (pump::snapshot().pending > 0u
-                   && std::chrono::steady_clock::now() < deadline)
+            std::thread farewell{ []() noexcept
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds{ 25 });
-            }
+                detail::notify_in_game("detached");
+                // Explicit, for the same reason as the client threads.
+                sdk::detach_thread();
+            } };
+            farewell.join();
         }
+        catch (...) { }
 
         detail::server_instance().stop();
         features::chat::set_sink(nullptr);
         features::chat::set_console_sink(nullptr);
+        features::system::set_client_counter(nullptr);
 
-        {
-            std::atomic<bool> done{ false };
-            (void)pump::submit([&done]() noexcept
-            {
-                registry::stop_all();
-                done.store(true, std::memory_order_release);
-            });
-            const auto deadline{ std::chrono::steady_clock::now() + std::chrono::seconds{ 5 } };
-            while (!done.load(std::memory_order_acquire)
-                   && std::chrono::steady_clock::now() < deadline)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds{ 25 });
-            }
-            if (!done.load(std::memory_order_acquire))
-            {
-                log::warn("features did not stop in time; unhooking anyway");
-            }
-        }
+        registry::stop_all();
 
-        pump::shutdown();
-        // Hooks come down LAST, in one pass: a task still running in a detour
-        // must not have its detour removed underneath it.
+        // Hooks come down LAST: a thread still inside a detour must not have
+        // that detour removed underneath it.
         sdk::remove_hooks();
+
+        /*
+            AND THEN WE WAIT, which is not optional and was learned the hard way:
+            removing the hooks killed the game.
+
+            The reasoning that omitted this was "by here the server has joined
+            every client thread, so the only thread that could be inside a detour
+            is this one".  That was true when the only hook was the chat
+            observer, which fires when a message arrives.  It is false with the
+            pump: its detour is on Minecraft.runTick, so THE GAME THREAD IS
+            INSIDE OUR CODE TWENTY TIMES A SECOND, and nothing above joins the
+            game thread -- it belongs to Minecraft and outlives us.
+
+            remove_hooks() unpatches the entry point, so no thread ENTERS a
+            trampoline afterwards.  It does not, and cannot, evict a thread that
+            is in one already: vmhook keeps no in-flight count and offers no
+            quiesce.  The caller of stop() then unloads the DLL immediately --
+            FreeLibraryAndExitThread -- and any thread still executing a
+            trampoline, a detour body or drain() is left running on unmapped
+            pages.
+
+            So: unpatch, then let everyone leave.  A detour body is microseconds
+            and a tick is 50 ms, so this is many times longer than it needs to be
+            on purpose -- the cost is a pause nobody sees during a teardown that
+            was already asynchronous, and the alternative is the game dying a
+            moment after a detach that looked like it worked.  Waiting is the
+            only tool available; the honest fix is an in-flight count in vmhook,
+            and this is what stands in for it until there is one.
+        */
+        std::this_thread::sleep_for(std::chrono::milliseconds{ 500 });
+
+        // Let go of the VM explicitly.  An attached thread is normally detached
+        // by vmhook when it exits -- but THIS thread does not get to exit
+        // normally: it is the detach worker, and it ends in
+        // FreeLibraryAndExitThread, which unmaps the module the thread-exit
+        // handler lives in.  Detaching here means the VM is not left holding a
+        // JavaThread for a thread that is about to vanish, whose stack a
+        // safepoint would later try to walk.
+        sdk::detach_thread();
+
         log::info("chatwire stopped");
     }
 

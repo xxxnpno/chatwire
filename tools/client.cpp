@@ -9,16 +9,22 @@
 //   chatwire-client --raw            print the raw JSON instead of the text
 //
 // AT THE PROMPT
-//   any text            -> chat.sendChatMessage  (to the SERVER, as if typed)
-//   /add <text>         -> chat.addChatMessage   (CLIENT-side only)
-//   /stats              -> chat.stats
-//   /status             -> system.status
-//   /detach             -> system.detach  (UNLOADS chatwire from the game)
-//   /quit               -> disconnect (leaves chatwire running)
+//   any text                      -> chat.sendChatMessage (to the SERVER, as typed)
+//   /chat.addChatMessage <text>   -> client-side only, nobody else sees it
+//   /chat.stats                   -> counters
+//   /system.status                -> version, mapping, port, clients
+//   /system.ping                  -> liveness
+//   /system.detach                -> stops chatwire (it stays loaded)
+//   /quit                         -> disconnect, leaving chatwire running
+//
+// The commands ARE the protocol verbs, and any `/feature.verb [text]` is sent
+// through untranslated -- so a feature added to chatwire is reachable from here
+// without touching this file.  The older short forms (/add, /stats, /status,
+// /ping, /detach) still work as aliases.
 //
 // The default is `send` rather than `add` because that is what a chat client
 // does when you type into it.  `add` is the deliberate one, so it gets a prefix.
-#include <cstdio>
+#include <print>
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
@@ -246,7 +252,7 @@ namespace
 
             if (g_raw)
             {
-                std::printf("%s\n", payload.c_str());
+                std::println("{}", payload);
                 std::fflush(stdout);
                 continue;
             }
@@ -259,24 +265,23 @@ namespace
             {
                 const std::string formatted{ json_string(payload, "formatted") };
                 const std::string plain{ json_string(payload, "plain") };
-                std::printf("%s\n", render(formatted.empty() ? plain : formatted).c_str());
+                std::println("{}", render(formatted.empty() ? plain : formatted));
             }
             else if (payload.find("\"ok\":false") != std::string::npos)
             {
-                std::printf("\x1b[91m  ! %s\x1b[0m\n",
-                            json_string(payload, "error").c_str());
+                std::println("\x1b[91m  ! {}\x1b[0m", json_string(payload, "error"));
             }
             else
             {
                 // A result with no shape we recognise: show it rather than hide it.
-                std::printf("\x1b[90m  %s\x1b[0m\n", payload.c_str());
+                std::println("\x1b[90m  {}\x1b[0m", payload);
             }
             std::fflush(stdout);
         }
 
         if (g_running.exchange(false, std::memory_order_acq_rel))
         {
-            std::printf("\n\x1b[90m  connection closed.  Press enter to exit.\x1b[0m\n");
+            std::println("\n\x1b[90m  connection closed.  Press enter to exit.\x1b[0m");
             std::fflush(stdout);
         }
     }
@@ -296,7 +301,7 @@ namespace
         DWORD        mode{ 0 };
         if (in != INVALID_HANDLE_VALUE && ::GetConsoleMode(in, &mode))
         {
-            std::printf("\n  press enter to close.\n");
+            std::println("\n  press enter to close.");
             (void)std::getchar();
         }
         return code;
@@ -338,11 +343,11 @@ int main(const int argc, char** const argv)
         }
         else if (arg == "--help" || arg == "-h")
         {
-            std::printf("chatwire-client [--port N] [--raw]\n\n"
+            std::println("chatwire-client [--port N] [--raw]\n\n"
                         "  <text>        send to the server, as if typed\n"
                         "  /add <text>   show only to this client\n"
                         "  /stats        counters\n"
-                        "  /quit         exit\n");
+                        "  /quit         exit");
             return 0;
         }
     }
@@ -364,45 +369,53 @@ int main(const int argc, char** const argv)
     WSADATA wsa{};
     if (::WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
     {
-        std::printf("WSAStartup failed\n");
+        std::println("WSAStartup failed");
         return 1;
     }
 
     g_sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (g_sock == INVALID_SOCKET) { std::printf("socket() failed\n"); return 1; }
+    if (g_sock == INVALID_SOCKET) { std::println("socket() failed"); return 1; }
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
     addr.sin_port        = ::htons(port);
     addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
 
-    std::printf("connecting to ws://127.0.0.1:%u ...\n", port);
+    std::println("connecting to ws://127.0.0.1:{} ...", port);
     if (::connect(g_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
     {
         // Ordered by how likely each is, because "could not connect" on its own
         // sends people to check the wrong thing first.
-        std::printf("\n\x1b[91m  could not connect to port %u.\x1b[0m\n\n"
+        std::println("\n\x1b[91m  could not connect to port {}.\x1b[0m\n\n"
                     "  Check, in order:\n"
                     "    1. Minecraft is running and chatwire has been injected\n"
                     "    2. the game's console says \"chatwire ready on ws://127.0.0.1:<port>\"\n"
-                    "    3. that port is the one you are dialling - pass --port if it is not\n",
-                    port);
+                    "    3. that port is the one you are dialling - pass --port if it is not", port);
         ::closesocket(g_sock);
         ::WSACleanup();
         return wait_before_exit(1);
     }
     if (!handshake(g_sock, port))
     {
-        std::printf("\n\x1b[91m  something is listening on port %u, but it is not "
-                    "chatwire.\x1b[0m\n  The websocket handshake was refused.\n", port);
+        std::println("\n\x1b[91m  something is listening on port {}, but it is not "
+                    "chatwire.\x1b[0m\n  The websocket handshake was refused.", port);
         ::closesocket(g_sock);
         ::WSACleanup();
         return wait_before_exit(1);
     }
 
-    std::printf("\x1b[92mconnected.\x1b[0m  type to chat  \x1b[90m|\x1b[0m  "
-                "/add client-side  \x1b[90m|\x1b[0m  /status  \x1b[90m|\x1b[0m  "
-                "/detach unloads  \x1b[90m|\x1b[0m  /quit\n\n");
+    // The commands ARE the protocol verbs.  This is the reference consumer, so
+    // what it shows you is what you would put in a `cmd` field yourself -- a
+    // client with its own private vocabulary teaches you its vocabulary instead
+    // of the API's.
+    std::println("\x1b[92mconnected.\x1b[0m  anything you type goes to "
+                "\x1b[96mchat.sendChatMessage\x1b[0m\n"
+                "  \x1b[96m/chat.addChatMessage \x1b[90m<text>\x1b[0m  "
+                "\x1b[96m/chat.stats\x1b[0m  "
+                "\x1b[96m/system.status\x1b[0m  "
+                "\x1b[96m/system.ping\x1b[0m  "
+                "\x1b[96m/system.detach\x1b[0m  "
+                "\x1b[90m/quit\x1b[0m\n");
 
     std::thread reader{ &reader_thread };
 
@@ -414,26 +427,53 @@ int main(const int argc, char** const argv)
 
         std::string request;
         if (line == "/quit") { break; }
-        else if (line == "/stats")
+        else if (line[0] == '/')
         {
-            request = R"({"cmd":"chat.stats"})";
-        }
-        else if (line == "/status")
-        {
-            request = R"({"cmd":"system.status"})";
-        }
-        else if (line == "/detach")
-        {
-            // The connection will close as a consequence; that is the point, not
-            // a failure, so say so before it happens.
-            std::printf("  \x1b[93mrequesting detach - chatwire will unload and this\n"
-                        "  connection will close.\x1b[0m\n");
-            request = R"({"cmd":"system.detach"})";
-        }
-        else if (line.rfind("/add ", 0) == 0)
-        {
-            request = R"({"cmd":"chat.addChatMessage","text":")"
-                      + json_escape(line.substr(5)) + R"("})";
+            // The short spellings the first version of this client used.  Kept
+            // as aliases so muscle memory and old notes still work, but they are
+            // rewritten to the real verb immediately -- there is exactly one
+            // vocabulary past this point.
+            std::string command{ line.substr(1) };
+            if (command.rfind("add ", 0) == 0) { command = "chat.addChatMessage " + command.substr(4); }
+            else if (command == "stats")       { command = "chat.stats"; }
+            else if (command == "status")      { command = "system.status"; }
+            else if (command == "ping")        { command = "system.ping"; }
+            else if (command == "detach")      { command = "system.detach"; }
+
+            // Everything else is passed through UNINTERPRETED as feature.verb,
+            // with the rest of the line as `text`.  That is what makes this a
+            // reference client rather than a menu: a feature added to chatwire
+            // tomorrow is reachable from here today, with no change to this file.
+            const std::size_t space{ command.find(' ') };
+            const std::string verb{ command.substr(0, space) };
+            const std::string text{ space == std::string::npos
+                                        ? std::string{}
+                                        : command.substr(space + 1) };
+
+            if (verb.find('.') == std::string::npos)
+            {
+                std::println("  \x1b[91mnot a command:\x1b[0m {}"
+                            "  \x1b[90m(commands look like feature.verb)\x1b[0m", verb);
+                continue;
+            }
+
+            if (verb == "system.detach")
+            {
+                // The connection closing is the point, not a failure, so say so
+                // before it happens.  chatwire stops but stays loaded in the
+                // game -- unloading it while a game thread might be inside it is
+                // what used to kill the process.
+                std::println("  \x1b[93mrequesting detach - chatwire will stop and this\n"
+                            "  connection will close.  Re-run chatwire-inject to "
+                            "start it again.\x1b[0m");
+            }
+
+            request = R"({"cmd":")" + json_escape(verb) + R"("})";
+            if (!text.empty())
+            {
+                request = R"({"cmd":")" + json_escape(verb) + R"(","text":")"
+                          + json_escape(text) + R"("})";
+            }
         }
         else
         {
@@ -443,7 +483,7 @@ int main(const int argc, char** const argv)
 
         if (!send_text(g_sock, request))
         {
-            std::printf("  send failed; the connection is gone.\n");
+            std::println("  send failed; the connection is gone.");
             break;
         }
     }

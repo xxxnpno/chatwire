@@ -179,21 +179,6 @@ namespace chatwire::sdk::detail
     };
 
     /*
-        The pump hook needs its OWN wrapper type even though it targets the same
-        Minecraft class as `minecraft` above: vmhook keys a hook's target class
-        off the wrapper type, so reusing the accessor wrapper would tie the two
-        together.
-    */
-    class pump_target : public vmhook::object<pump_target>
-    {
-    public:
-        explicit pump_target(const vmhook::oop_t oop = nullptr) noexcept
-            : vmhook::object<pump_target>{ oop }
-        {
-        }
-    };
-
-    /*
         Installed hooks, kept alive here and NEVER destroyed.
         ~hook_handle removes a detour; running that during static destruction or
         DLL unload would touch a JVM that may already be tearing down.
@@ -205,11 +190,49 @@ namespace chatwire::sdk::detail
         return *h;
     }
 
-    /* The callbacks the facade installs.  Plain function pointers: no captures
+    /* The callback the facade installs.  A plain function pointer: no captures
        to dangle, nothing to destroy at exit, and atomic so the detour thread
        and the installer never race. */
     inline std::atomic<void (*)(const char*, const char*)> g_chat_callback{ nullptr };
-    inline std::atomic<void (*)()>                         g_tick_callback{ nullptr };
+
+
+    /*
+        @brief The local player as a JNI reference, or nullptr.
+        @details
+        The same walk as player() below -- Minecraft.theMinecraft, then
+        .thePlayer -- but done entirely through JNI, so no raw oop is ever held.
+        That is what makes it safe from a thread that is not inside a hook: every
+        intermediate is a reference the collector tracks and updates.
+
+        The caller releases the result with vmhook::jni_release.
+    */
+    [[nodiscard]] inline auto jni_player() noexcept -> void*
+    {
+        try
+        {
+            const auto mc_class{ map::resolve(map::minecraft::clazz) };
+            const auto mc_field{ map::resolve(map::minecraft::the_minecraft) };
+            const auto player_field{ map::resolve(map::entity_player_sp::clazz) };
+            const auto the_player{ map::resolve(map::minecraft::the_player) };
+            if (mc_class.empty() || mc_field.empty() || the_player.empty()) { return nullptr; }
+
+            vmhook::hotspot::klass* const k{ vmhook::find_class(mc_class) };
+            if (!k) { return nullptr; }
+
+            // Descriptors are built from the mapping, so this works under MCP,
+            // SRG and OBF without three code paths.
+            const std::string mc_descriptor{ "L" + mc_class + ";" };
+            void* const mc{ vmhook::jni_static_object(k, mc_field.c_str(), mc_descriptor.c_str()) };
+            if (!mc) { return nullptr; }
+
+            const std::string player_descriptor{ "L" + player_field + ";" };
+            void* const player{ vmhook::jni_object_field(mc, the_player.c_str(),
+                                                         player_descriptor.c_str()) };
+            vmhook::jni_release(mc);
+            return player;
+        }
+        catch (...) { return nullptr; }
+    }
 
     /* @brief Resolves the local player, or an empty handle. */
     [[nodiscard]] inline auto player() noexcept -> vmhook::borrowed<local_player>
@@ -240,13 +263,70 @@ namespace chatwire::sdk
         @details
         A plain function pointer, not std::function: it is installed once and
         never changes, and a function pointer cannot throw on copy or dangle
-        after a lambda's captures die.  It runs ON THE GAME THREAD, inside a
-        detour, so it must be quick and must not throw.
+        after a lambda's captures die.  It runs INSIDE A DETOUR, so it must be
+        quick and must not throw -- usually on the game thread, which is who
+        normally prints chat, but on whichever thread called printChatMessage
+        when that is somebody else.
     */
     using chat_callback = void (*)(const char* formatted, const char* plain);
 
-    /* @brief Called once per client tick, ON THE GAME THREAD, in a detour. */
-    using tick_callback = void (*)();
+    /*
+        @brief Makes the calling thread able to CALL Java.  Any thread, anywhere.
+        @details
+        Reading Java never needed this: a field get is a load from an address and
+        works from any thread in the process.  Calling does — a call needs a
+        JavaThread, the VM-side object holding the frame anchor a GC stack-walk
+        follows and the state a safepoint reads — and a native thread the VM has
+        never seen has none of that.
+
+        vmhook asks the VM to adopt this thread as a daemon.  It is idempotent
+        (a thread that is already a JavaThread, such as one inside a detour, gets
+        a cheap `true`), and the VM releases the thread automatically when it
+        exits, so nothing has to be arranged around it.
+
+        chatwire calls this at the top of every entry point that reaches Java,
+        rather than once somewhere central, because there is no central thread to
+        do it on: a WebSocket client gets a thread of its own, and that thread is
+        the one that has to be able to call.
+
+        @return false when there is no JVM to attach to, or it refused — at which
+                point no Java call from this thread can be made safely, and the
+                caller must report failure rather than try anyway.
+    */
+    [[nodiscard]] inline auto attach_thread() noexcept -> bool
+    {
+        return vmhook::attach_current_thread();
+    }
+
+    /*
+        @brief Releases this thread from the VM, if chatwire attached it.
+        @details
+        A no-op on a thread vmhook did not attach — a detour thread stays the
+        VM's.  Rarely needed, because an attached thread detaches itself when it
+        exits; chatwire calls it on exactly one thread, the one that unloads the
+        DLL, which does NOT get to exit normally.  See chatwire::stop().
+    */
+    inline auto detach_thread() noexcept -> void
+    {
+        vmhook::detach_current_thread();
+    }
+
+    /*
+        @brief Whether this JVM lets chatwire call into the game at all.
+        @details
+        vmhook enters Java on any thread now, but it refuses on a collector that
+        relocates objects CONCURRENTLY (ZGC, Shenandoah), where "no stop-the-world
+        collection is running" stops meaning "nothing is moving".  Everything a
+        desktop JVM picks by default -- Serial, Parallel, G1 -- is supported.
+
+        Worth one line at start-up: a user on an unsupported collector should be
+        told at inject time, not by every command failing later.
+    */
+    [[nodiscard]] inline auto can_call_into_game() noexcept -> bool
+    {
+        return vmhook::vm_capabilities().supported;
+    }
+
 
     /*
         @brief Probes the JVM and decides the mapping mode.
@@ -313,10 +393,8 @@ namespace chatwire::sdk
                                   static_cast<d::chat_component*>(nullptr)) };
         const bool chat_gui{ reg("GuiNewChat", map::gui_new_chat::clazz,
                                  static_cast<d::gui_new_chat*>(nullptr)) };
-        const bool pump{ reg("Minecraft (pump target)", map::minecraft::clazz,
-                             static_cast<d::pump_target*>(nullptr)) };
 
-        if (!mc || !player || !pump)
+        if (!mc || !player)
         {
             chatwire::log::error("essential Minecraft classes missing; chatwire cannot run");
             return false;
@@ -327,83 +405,41 @@ namespace chatwire::sdk
     }
 
     /*
-        @brief Deoptimises every method chatwire hooks, in ONE pass.
+        @brief Deoptimises the one method chatwire hooks.
         @details
         vmhook's deoptimize_methods_if walks EVERY loaded class.  On a modded
-        client that is tens of thousands of them, and it takes seconds -- doing
-        it once per hook meant the chat observer landed about five seconds after
-        the pump, which is exactly the gap that showed up in the logs.
+        client that is tens of thousands of them, and it takes seconds, so it is
+        worth doing exactly once and only for what is actually hooked.
 
-        One walk, one predicate covering both targets.
+        That used to be two methods — printChatMessage and runTick, the pump
+        target — walked together because doing it twice cost seconds twice.  The
+        pump is gone (chatwire calls Java on the calling thread now; see
+        attach_thread), so one target is left and the combined predicate with it.
 
-        The deopt is necessary at all because both targets are hot: runTick is
-        the client's main loop and printChatMessage runs on every message, so
-        both are JIT-compiled long before anything injects.  A compiled dispatch
-        bypasses the i2i interpreter entry a vmhook detour patches, so without
-        this the hooks install successfully and simply never fire.  vmhook holds
-        NO_COMPILE on a hooked Method, so the route stays put once established.
+        The deopt is necessary because the target is hot: printChatMessage runs
+        on every message and is JIT-compiled long before anything injects.  A
+        compiled dispatch bypasses the i2i interpreter entry a vmhook detour
+        patches, so without this the hook installs successfully and simply never
+        fires.  vmhook holds NO_COMPILE on a hooked Method, so the route stays
+        put once established.
     */
     inline auto deoptimize_hook_targets() noexcept -> void
     {
         namespace map = chatwire::mapping;
         try
         {
-            const std::string mc_class{ map::resolve(map::minecraft::clazz) };
-            const std::string tick{ map::resolve(map::minecraft::run_tick) };
             const std::string chat_class{ map::resolve(map::gui_new_chat::clazz) };
             const std::string print{ map::resolve(map::gui_new_chat::print_chat_message) };
+            if (chat_class.empty() || print.empty()) { return; }
 
             (void)vmhook::deoptimize_methods_if(
                 [&](const std::string& class_name, vmhook::hotspot::method* m) -> bool
                 {
                     if (!m) { return false; }
-                    if (class_name == mc_class && !tick.empty()
-                        && m->get_name() == tick) { return true; }
-                    if (class_name == chat_class && !print.empty()
-                        && m->get_name() == print) { return true; }
-                    return false;
+                    return class_name == chat_class && m->get_name() == print;
                 });
         }
         catch (...) { }
-    }
-
-    /*
-        @brief Hooks Minecraft.runTick so `on_tick` runs on the game thread.
-        @details
-        runTick is the hottest method in the client and certainly JIT-compiled,
-        so it is deoptimised back to the interpreter first or the i2i detour
-        never fires.  vmhook holds NO_COMPILE on a hooked Method, so the route
-        stays put once established.
-    */
-    [[nodiscard]] inline auto install_pump(const tick_callback on_tick) noexcept -> bool
-    {
-        namespace map = chatwire::mapping;
-        namespace d   = chatwire::sdk::detail;
-        try
-        {
-            const auto class_name{ map::resolve(map::minecraft::clazz) };
-            const auto method{ map::resolve(map::minecraft::run_tick) };
-            if (class_name.empty() || method.empty()) { return false; }
-
-            d::g_tick_callback.store(on_tick, std::memory_order_release);
-
-            // No deopt here: deoptimize_hook_targets() did both targets in one
-            // pass before either hook was installed.
-
-            auto handle{ vmhook::scoped_hook<d::pump_target>(
-                method, "()V",
-                [](vmhook::return_value&, vmhook::borrowed<d::pump_target>) noexcept
-                {
-                    const auto cb{ d::g_tick_callback.load(std::memory_order_acquire) };
-                    if (cb) { cb(); }
-                }) };
-
-            if (!handle.installed()) { return false; }
-            d::hooks().push_back(std::move(handle));
-            chatwire::log::info("pump installed on {}.{}", class_name, method);
-            return true;
-        }
-        catch (...) { return false; }
     }
 
     /*
@@ -435,9 +471,9 @@ namespace chatwire::sdk
                    vmhook::borrowed<d::gui_new_chat>,
                    vmhook::borrowed<d::chat_component> line) noexcept
                 {
-                    // ON THE GAME THREAD, inside a detour.  Fully guarded: this
-                    // frame's caller is Minecraft's interpreter, which has no
-                    // handler for a C++ exception.
+                    // Inside a detour.  Fully guarded: this frame's caller is
+                    // Minecraft's interpreter, which has no handler for a C++
+                    // exception, whichever thread is running it.
                     try
                     {
                         const auto cb{ d::g_chat_callback.load(std::memory_order_acquire) };
@@ -463,22 +499,68 @@ namespace chatwire::sdk
     }
 
     /*
-        @brief sendChatMessage(String) — goes to the SERVER.  GAME THREAD ONLY.
+        @brief sendChatMessage(String) — goes to the SERVER.  ANY THREAD.
         @details
         Exactly as if the player typed it, so a leading '/' runs a command.
+
+        Callable from any thread, and that is true of Minecraft as well as of the
+        VM.  `EntityPlayerSP.sendChatMessage` reaches `NetworkManager.sendPacket`,
+        which is one of the few parts of the 1.8.9 client written to be called
+        from anywhere: it guards its outbound queue with a ReentrantReadWriteLock
+        and, when the caller is not the channel's event loop, hands the write to
+        that event loop rather than doing it inline.  The game's own network
+        threads depend on that, which is why it is there.
+
         Re-resolves the player every call rather than caching it: the local
         player is replaced on world change and on respawn, and a cached handle
-        would be a stale oop by the time a queued task ran.
+        would be a stale oop the moment either happened.
+
+        The resolve and the call are INSIDE ONE java_thread_scope, and that is not
+        tidiness — it is the correctness property.  The scope is what stops a
+        collection from starting between reading the player's address and
+        invoking on it.
     */
     [[nodiscard]] inline auto send_chat(const std::string& text) noexcept -> bool
     {
         namespace map = chatwire::mapping;
         try
         {
-            auto p{ chatwire::sdk::detail::player() };
-            if (!p) { return false; }
+            // Outside the scope: string work and table lookups, which touch no
+            // Java at all.  Everything done out here is time the VM does not
+            // spend waiting for this thread.
             const auto method{ map::resolve(map::entity_player_sp::send_chat_message) };
             if (method.empty()) { return false; }
+
+            // OFF A HOOK -> JNI.  This is the whole reason the bridge exists:
+            // on a JVM that publishes no safepoint signal the transition cannot
+            // be reproduced from outside, and JNI's own entry does it correctly.
+            // No raw oop is held anywhere below -- every reference is one the
+            // collector tracks -- so nothing can move out from under the call.
+            if (!chatwire::sdk::attach_thread()) { return false; }
+            if (vmhook::jni_available())
+            {
+                void* const player{ chatwire::sdk::detail::jni_player() };
+                if (!player) { return false; }
+
+                void* const message{ vmhook::jni_string(text) };
+                if (!message) { return false; }
+
+                const bool sent{ vmhook::jni_call_void(
+                    player, method.c_str(), "(Ljava/lang/String;)V", { message }) };
+                vmhook::jni_release(message);
+                vmhook::jni_release(player);
+                return sent;
+            }
+
+            // INSIDE A HOOK (or a JVM old enough to gate soundly): the pure
+            // VMStructs path, unchanged.  One scope around resolve AND call, so
+            // no collection can start between finding the player and invoking on
+            // it -- the property a detour has for free.
+            const vmhook::java_thread_scope java{};
+            if (!java) { return false; }
+
+            auto p{ chatwire::sdk::detail::player() };
+            if (!p) { return false; }
             auto proxy{ p->get_method(method.c_str()) };
             if (!proxy.has_value()) { return false; }
             return !proxy->call(text).threw();
@@ -487,13 +569,48 @@ namespace chatwire::sdk
     }
 
     /*
-        @brief addChatMessage(IChatComponent) — CLIENT-side.  GAME THREAD ONLY.
+        @brief addChatMessage(IChatComponent) — CLIENT-side.  ANY THREAD.
         @details
         Never transmitted; only this player sees it.  Builds a ChatComponentText
         from `text` first — allocate, then run <init> on the raw object, which is
         what `new` compiles to in Java.  The two steps stay adjacent because the
         object is UNROOTED between them: anything that could trigger a collection
         in the gap would move it out from under the constructor call.
+
+        WHAT THIS ONE TOUCHES, OFF ITS OWN THREAD.  Unlike send_chat, the code
+        this reaches was never written to be called from anywhere:
+        `EntityPlayerSP.addChatMessage` ends in `GuiNewChat.setChatLine`, which
+        inserts at the front of the two ArrayLists the client thread renders
+        from.  Off-thread it is a data race, so it is worth being exact about
+        what the race can actually do rather than waving at it:
+
+          * `ArrayList.add(0, e)` grows into a NEW array (fully populated before
+            the field is repointed), shifts with arraycopy, stores the element,
+            and only THEN increments `size`.  A reader indexing below `size`
+            therefore never sees a null or an out-of-range index; the worst it
+            observes is one element duplicated for the microseconds the shift is
+            in flight — a chat line drawn twice for a single frame.
+          * The 100-line trim removes from the TAIL.  `drawChat` reads from the
+            head and stops at the visible line count, roughly twenty, so the
+            reader's indices and the trim's are never near each other.
+          * The line-splitting on the way in only READS the font renderer's
+            width tables.
+
+        So this races, and the failure mode is a cosmetic one-frame artefact.
+        That is a MINECRAFT-level race and a separate question from the VM-level
+        one the scope closes; the scope keeps the heap sound, and this
+        paragraph is about the game's own unguarded lists.  At one call per
+        client request a flicker is not worth a detour in the client's main loop.
+        If it ever needs to be exact, the way to do it without a hook is to hand
+        Minecraft an S02PacketChat and let `PacketThreadUtil` schedule it — the
+        client already marshals its own inbound chat that way.
+
+        THE ALLOCATION IS INSIDE THE SCOPE, and has to be.  A TLAB is a lockless
+        bump pointer and `new_object` writes one; worse, the object is UNROOTED
+        between the allocation and <init>.  A collection landing anywhere in
+        allocate → construct → call would move it out from under the next step.
+        Holding the gate across all three is what makes them one indivisible
+        piece of Java work, exactly as they would be inside a detour.
     */
     [[nodiscard]] inline auto add_chat(const std::string& text) noexcept -> bool
     {
@@ -501,13 +618,17 @@ namespace chatwire::sdk
         namespace d   = chatwire::sdk::detail;
         try
         {
+            // Everything resolvable is resolved BEFORE the gate is taken.  These
+            // are metaspace and table lookups -- no oop is touched, so no
+            // collection can invalidate them -- and find_class walks the whole
+            // ClassLoaderDataGraph on a miss, which on a modded client is
+            // seconds.  Doing that with the gate held would stop the game dead.
+            // warm_up() pays the first one at start-up, where nothing waits.
             const auto class_name{ map::resolve(map::chat_component_text::clazz) };
-            if (class_name.empty()) { return false; }
+            const auto method{ map::resolve(map::entity_player_sp::add_chat_message) };
+            if (class_name.empty() || method.empty()) { return false; }
             vmhook::hotspot::klass* const k{ vmhook::find_class(class_name) };
             if (!k) { return false; }
-
-            auto component{ vmhook::new_object<d::chat_component>(k, k->get_instance_size()) };
-            if (!component) { return false; }
 
             // <init> is spelled <init> under every mapping — the JVM reserves
             // the name, so no remapper touches it.  That is why this one lookup
@@ -517,24 +638,60 @@ namespace chatwire::sdk
             const std::int32_t count{ k->get_methods_count() };
             if (!methods || count <= 0) { return false; }
 
-            bool constructed{ false };
+            vmhook::hotspot::method* ctor_method{ nullptr };
             for (std::int32_t i{ 0 }; i < count; ++i)
             {
                 vmhook::hotspot::method* const m{ methods[i] };
                 if (!m || !vmhook::hotspot::is_valid_pointer(m)) { continue; }
                 if (std::string{ m->get_name() } != "<init>") { continue; }
                 if (std::string{ m->get_signature() } != ctor_descriptor) { continue; }
-                const vmhook::method_proxy ctor{ component.raw_unsafe(), m, ctor_descriptor };
-                if (ctor.call(text).threw()) { return false; }
-                constructed = true;
+                ctor_method = m;
                 break;
             }
-            if (!constructed) { return false; }
+            if (!ctor_method) { return false; }
+
+            // OFF A HOOK -> JNI, for the reason given in send_chat.  It also
+            // disposes of two hazards the pure path had here: the component is
+            // allocated BY THE VM rather than by bumping someone else's TLAB,
+            // and it is held in a tracked reference across <init>, so a
+            // collection triggered by the constructor cannot move it out from
+            // under the call that follows.
+            if (!chatwire::sdk::attach_thread()) { return false; }
+            if (vmhook::jni_available())
+            {
+                void* const message{ vmhook::jni_string(text) };
+                if (!message) { return false; }
+
+                void* const component{ vmhook::jni_new_object(
+                    k, "(Ljava/lang/String;)V", { message }) };
+                vmhook::jni_release(message);
+                if (!component) { return false; }
+
+                void* const player{ chatwire::sdk::detail::jni_player() };
+                if (!player) { vmhook::jni_release(component); return false; }
+
+                const std::string descriptor{ "(L" + map::resolve(map::i_chat_component::clazz)
+                                              + ";)V" };
+                const bool added{ vmhook::jni_call_void(
+                    player, method.c_str(), descriptor.c_str(), { component }) };
+                vmhook::jni_release(component);
+                vmhook::jni_release(player);
+                return added;
+            }
+
+            // INSIDE A HOOK: the pure VMStructs path, unchanged.
+            const vmhook::java_thread_scope java{};
+            if (!java) { return false; }
+
+            auto component{ vmhook::new_object<d::chat_component>(k, k->get_instance_size()) };
+            if (!component) { return false; }
+
+            const vmhook::method_proxy ctor{ component.raw_unsafe(), ctor_method,
+                                             ctor_descriptor };
+            if (ctor.call(text).threw()) { return false; }
 
             auto p{ d::player() };
             if (!p) { return false; }
-            const auto method{ map::resolve(map::entity_player_sp::add_chat_message) };
-            if (method.empty()) { return false; }
             auto proxy{ p->get_method(method.c_str()) };
             if (!proxy.has_value()) { return false; }
             return !proxy->call(component).threw();
@@ -542,14 +699,169 @@ namespace chatwire::sdk
         catch (...) { return false; }
     }
 
-    /* @brief True when the local player exists, i.e. we are in a world. */
+    /* @brief One entry of the player list: who they are, twice. */
+    struct player_identity
+    {
+        std::string name{};
+        std::string uuid{};
+    };
+
+    /*
+        @brief Everyone the client currently knows about.  ANY THREAD.
+        @details
+        Reads `Minecraft.theWorld.playerEntities` and, for each entry, calls
+        `getName()` and `getUniqueID().toString()`.  Both come from the same
+        object in the same pass, so a name and a UUID in one entry always belong
+        together -- which they would not if a caller had to ask twice.
+
+        WHY THIS IS THE LIST IT IS.  `playerEntities` is what the CLIENT has
+        loaded, so it is the players near enough to be entities: it is not the
+        server's full roster, and on a big server it is a small fraction of the
+        tab list.  That is a property of Minecraft rather than a limitation here,
+        and the honest name for the command is the field it reads.
+
+        Entirely JNI on the off-hook path, so every intermediate is a reference
+        the collector tracks -- there is no raw oop held across the many calls
+        this makes, which matters more here than anywhere else in the sdk because
+        the loop is long enough for a collection to be likely rather than
+        possible.
+
+        @return the players, or an empty vector when not in a world.
+    */
+    [[nodiscard]] inline auto players() noexcept -> std::vector<player_identity>
+    {
+        namespace map = chatwire::mapping;
+        std::vector<player_identity> out;
+        try
+        {
+            if (!chatwire::sdk::attach_thread() || !vmhook::jni_available()) { return out; }
+
+            const auto mc_class{ map::resolve(map::minecraft::clazz) };
+            const auto mc_field{ map::resolve(map::minecraft::the_minecraft) };
+            const auto world_field{ map::resolve(map::minecraft::the_world) };
+            const auto list_field{ map::resolve(map::world::player_entities) };
+            const auto name_method{ map::resolve(map::entity::get_name) };
+            const auto uuid_method{ map::resolve(map::entity::get_unique_id) };
+            const auto world_class{ map::resolve(map::world_client::clazz) };
+            if (mc_class.empty() || mc_field.empty() || world_field.empty()
+                || list_field.empty() || name_method.empty() || uuid_method.empty())
+            {
+                return out;
+            }
+
+            vmhook::hotspot::klass* const k{ vmhook::find_class(mc_class) };
+            if (!k) { return out; }
+
+            void* const mc{ vmhook::jni_static_object(k, mc_field.c_str(),
+                                                      ("L" + mc_class + ";").c_str()) };
+            if (!mc) { return out; }
+
+            void* const world{ vmhook::jni_object_field(mc, world_field.c_str(),
+                                                        ("L" + world_class + ";").c_str()) };
+            vmhook::jni_release(mc);
+            if (!world) { return out; }          // title screen: no world, no players
+
+            void* const list{ vmhook::jni_object_field(world, list_field.c_str(),
+                                                       "Ljava/util/List;") };
+            vmhook::jni_release(world);
+            if (!list) { return out; }
+
+            const std::int32_t count{ vmhook::jni_call_int(list, "size", "()I") };
+            for (std::int32_t i{ 0 }; i < count && i < 1024; ++i)
+            {
+                // jvalue is a union whose first member is the 32-bit int, so an
+                // index rides in the low half of one 8-byte slot.
+                void* const index{ reinterpret_cast<void*>(static_cast<std::intptr_t>(i)) };
+                void* const entry{ vmhook::jni_call_object(
+                    list, "get", "(I)Ljava/lang/Object;", { index }) };
+                if (!entry) { continue; }
+
+                player_identity who{};
+
+                if (void* const name{ vmhook::jni_call_object(
+                        entry, name_method.c_str(), "()Ljava/lang/String;") })
+                {
+                    who.name = vmhook::jni_to_string(name);
+                    vmhook::jni_release(name);
+                }
+
+                if (void* const uuid{ vmhook::jni_call_object(
+                        entry, uuid_method.c_str(), "()Ljava/util/UUID;") })
+                {
+                    if (void* const text{ vmhook::jni_call_object(
+                            uuid, "toString", "()Ljava/lang/String;") })
+                    {
+                        who.uuid = vmhook::jni_to_string(text);
+                        vmhook::jni_release(text);
+                    }
+                    vmhook::jni_release(uuid);
+                }
+
+                vmhook::jni_release(entry);
+                if (!who.name.empty() || !who.uuid.empty()) { out.push_back(std::move(who)); }
+            }
+
+            vmhook::jni_release(list);
+        }
+        catch (...) { }
+        return out;
+    }
+
+    /*
+        @brief True when the local player exists, i.e. we are in a world.
+        @details
+        ANY THREAD, and with no gate.  Resolving the player is a static-field
+        read followed by an instance-field read, and reading Java has never
+        needed the VM's permission — only calling does.  The answer is a
+        null test, and a collection moving the player changes its address but
+        never makes it null, so the result cannot be wrong in a way that
+        matters.  Deliberately NOT taking the gate: this is polled, and the gate
+        is a thing the whole VM waits on.
+    */
     [[nodiscard]] inline auto in_world() noexcept -> bool
     {
         return static_cast<bool>(chatwire::sdk::detail::player());
     }
 
     /*
-        @brief Removes every installed hook.  GAME THREAD ONLY.
+        @brief Pays every first-time resolution cost up front.
+        @details
+        Call once at start-up, on a thread with nothing waiting on it.
+
+        This exists because of what a java_thread_scope costs while it is open: the VM
+        cannot reach a safepoint, so every microsecond inside one is a
+        microsecond the game is not running.  vmhook's class, field and method
+        lookups are cached, but the FIRST of each walks the ClassLoaderDataGraph
+        — every loaded class, tens of thousands of them on a modded client,
+        seconds of work.  That must never happen inside a scope, and the way to
+        guarantee it never does is to have already done it out here.
+
+        Every lookup below is a read; nothing is called, so no gate is needed and
+        the game is not disturbed.  Failures are not reported: a name that will
+        not resolve now will fail the same way at call time, where there is a
+        client to tell about it.
+    */
+    inline auto warm_up() noexcept -> void
+    {
+        namespace map = chatwire::mapping;
+        try
+        {
+            // vmhook's capability probe walks the JVM flag table once (~1 ms);
+            // paying it here keeps it out of the first java_thread_scope, where
+            // the whole VM would be waiting for it.
+            (void)vmhook::vm_capabilities();
+
+            // The static + instance field chain behind player(), and the klass
+            // and <init> behind add_chat.
+            (void)chatwire::sdk::in_world();
+            const auto component{ map::resolve(map::chat_component_text::clazz) };
+            if (!component.empty()) { (void)vmhook::find_class(component); }
+        }
+        catch (...) { }
+    }
+
+    /*
+        @brief Removes every installed hook.
         @details
         Explicit rather than destructor-driven: unhooking touches the JVM, and
         doing that from static destruction or DLL unload would reach a VM that
@@ -559,7 +871,6 @@ namespace chatwire::sdk
     {
         namespace d = chatwire::sdk::detail;
         d::g_chat_callback.store(nullptr, std::memory_order_release);
-        d::g_tick_callback.store(nullptr, std::memory_order_release);
         try { d::hooks().clear(); } catch (...) { }
     }
 }

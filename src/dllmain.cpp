@@ -121,7 +121,29 @@ namespace
         chatwire::console::release();
         g_started.store(false, std::memory_order_release);
 
-        if (g_module != nullptr) { ::FreeLibraryAndExitThread(g_module, 0); }
+        /*
+            THE MODULE IS DELIBERATELY NOT UNLOADED.
+
+            Detaching used to end in FreeLibraryAndExitThread, and that killed
+            the game: MEASURED as EXCEPTION_ACCESS_VIOLATION with "data execution
+            prevention violation", on Minecraft's own Server thread, in
+            `_thread_in_Java`, jumping to an address that was no longer
+            executable.  That is a thread which was inside a detour trampoline
+            when the pages under it went away.
+
+            Removing a hook stops new threads ENTERING it.  It cannot evict a
+            thread that is already inside, and vmhook keeps no in-flight count to
+            wait on, so there is no instant at which unloading is provably safe
+            while the game is running.  Waiting first only shrinks the window.
+
+            So chatwire stops but stays mapped.  What that costs is about a
+            megabyte of address space until the game exits.  What it buys is that
+            `system.detach` cannot kill the process it is detaching from, which
+            is the only property that actually matters here -- a bridge whose
+            shutdown is a coin flip is worse than one that leaves a module
+            behind.  Everything observable is gone either way: the socket is
+            closed, the hooks are out, and start() can be called again.
+        */
         return 0u;
     }
 
@@ -153,14 +175,12 @@ namespace
 
         if (!chatwire::start(settings.port))
         {
-            chatwire::log::error("chatwire could not start; unloading");
+            // The module stays mapped even on failure, for the same reason
+            // detach_worker leaves it mapped: unloading a DLL whose code a game
+            // thread may be inside is what kills the game.  chatwire_restart()
+            // is how a retry gets back in.
+            chatwire::log::error("chatwire could not start");
             chatwire::console::release();
-            if (g_module != nullptr)
-            {
-                // Unload ourselves, so a failed injection leaves nothing behind
-                // and the user can simply try again.
-                ::FreeLibraryAndExitThread(g_module, 1);
-            }
             return 1u;
         }
 
@@ -170,6 +190,59 @@ namespace
 }
 
 /*
+    @brief The name of the restart event for a given process.
+    @details
+    Per-process, in the Local namespace, so two games do not share one and no
+    privilege is needed to open it.
+*/
+auto restart_event_name(const DWORD pid) -> std::string
+{
+    return "Local\\chatwire.restart." + std::to_string(pid);
+}
+
+namespace
+{
+    /*
+        @brief Waits to be told to start chatwire again, forever.
+        @details
+        Detaching leaves the module MAPPED (see detach_worker), so a second
+        `chatwire-inject` cannot use LoadLibrary to wake us -- the loader sees the
+        module already present and never runs DllMain again.
+
+        The obvious fix, exporting a thread procedure for the injector to call
+        with CreateRemoteThread, is a TRAP: the injector would have to compute the
+        export's address, and the only cheap way is to read the RVA out of the DLL
+        ON DISK.  After a rebuild that file is no longer the module that is
+        mapped, so the computed address lands in the middle of unrelated code and
+        takes the game with it.  It would work right up until the first rebuild.
+
+        An event has no addresses in it.  The injector opens it by name and sets
+        it; this thread, which is already inside the correct module, does the
+        work.  Nothing crosses the process boundary except a signal.
+
+        The thread is resident for the life of the process, which is only
+        acceptable because chatwire no longer unloads -- a thread parked in a
+        module that can be freed is the bug the module is kept mapped to avoid.
+    */
+    auto WINAPI supervisor_worker(LPVOID) noexcept -> DWORD
+    {
+        const std::string name{ restart_event_name(::GetCurrentProcessId()) };
+        const HANDLE signal{ ::CreateEventA(nullptr, FALSE, FALSE, name.c_str()) };
+        if (signal == nullptr) { return 1u; }
+
+        for (;;)
+        {
+            if (::WaitForSingleObject(signal, INFINITE) != WAIT_OBJECT_0) { break; }
+            if (g_started.load(std::memory_order_acquire)) { continue; }
+            (void)startup_worker(nullptr);
+        }
+        ::CloseHandle(signal);
+        return 0u;
+    }
+}
+
+/*
+    @brief Stops chatwire and unloads the DLL./*
     @brief Stops chatwire and unloads the DLL.
     @details
     Exported so an injector, or any other tool, can shut chatwire down without
@@ -195,12 +268,29 @@ BOOL WINAPI DllMain(const HINSTANCE module_handle, const DWORD reason, LPVOID)
     {
         g_module = static_cast<HMODULE>(module_handle);
 
-        // Thread attach/detach notifications are useless to us and cost a
-        // callback on every JVM thread — and Minecraft makes a lot of threads.
-        ::DisableThreadLibraryCalls(module_handle);
+        // DisableThreadLibraryCalls USED TO BE HERE, and removing it is load
+        // bearing.  It suppresses DLL_THREAD_DETACH, which is what this
+        // toolchain's thread_local teardown rides on: MEASURED, chatwire.dll has
+        // 31 __emutls symbols and no PE TLS directory, so GCC is using EMULATED
+        // TLS and the destructors are driven by the DllMain notification rather
+        // than by a TLS callback.
+        //
+        // vmhook releases a thread from the VM in exactly such a destructor.
+        // Suppress the notification and every thread that ever called Java stays
+        // registered as a JavaThread after its OS thread has died -- and the JVM
+        // walks that list.  The symptom was a game that died a few seconds after
+        // a detach that had reported success.
+        //
+        // The cost is a callback per thread, and Minecraft makes a lot of
+        // threads.  It is a few instructions each; correctness is worth more.
 
         const HANDLE thread{ ::CreateThread(nullptr, 0, &startup_worker, nullptr, 0, nullptr) };
         if (thread != nullptr) { ::CloseHandle(thread); }
+
+        // Listens for "start again" after a detach.  See supervisor_worker.
+        const HANDLE supervisor{ ::CreateThread(nullptr, 0, &supervisor_worker,
+                                                nullptr, 0, nullptr) };
+        if (supervisor != nullptr) { ::CloseHandle(supervisor); }
         break;
     }
 

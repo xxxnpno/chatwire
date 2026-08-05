@@ -3,13 +3,17 @@
 A live WebSocket API into a running **Minecraft 1.8.9** client. Inject it, connect a WebSocket,
 and read and drive the game from any language over a socket.
 
-Built on [vmhook](https://github.com/xxxnpno/vmhook): pure HotSpot introspection, **no JNI, no
-JVMTI, no Forge, no mod loader**. It attaches to a vanilla client the same way it attaches to a
-modded one.
+Feature-based and extensible; chat is the first one, not the shape of the project. C++23, built on
+[vmhook](https://github.com/xxxnpno/vmhook): HotSpot introspection, **no JVMTI, no mod loader,
+minimal JNI**. Handles all three 1.8.9 mappings (MCP/SRG/OBF). It attaches to a vanilla client the
+same way it attaches to a modded one, and to Lunar the same way it attaches to either.
+
+Works on **Minecraft 1.8.9 whatever JVM it runs on** — Java 8 through 26. That distinction matters
+more than it sounds: 1.8.9 is the *game* version, and Lunar Client runs it on Java 17.
 
 **Chat is the first feature, not the shape of the project.** The protocol is `feature.verb`; a
 feature is one file that declares a name and a handler, and everything else — routing, the
-socket, the game-thread marshalling, the lifecycle — already exists. Player list, inventory,
+socket, getting onto the game thread, the lifecycle — already exists. Player list, inventory,
 world state and the rest land as new features, not as new plumbing. See
 [Adding a feature](#adding-a-feature).
 
@@ -17,8 +21,8 @@ world state and the rest land as new features, not as new plumbing. See
 ┌──────────────┐   ws://127.0.0.1:24455    ┌───────────────────────────────┐
 │  your tool   │ ◄─────────────────────────►│  chatwire (injected)          │
 │  any lang    │   events out               │   ├─ feature registry         │
-│              │   commands in              │   ├─ pumps on Minecraft.runTick│
-└──────────────┘                            │   └─ speaks to the game       │
+│              │   commands in              │   ├─ runs work on the game    │
+└──────────────┘                            │   └─ thread, and waits for it  │
                                             └───────────────────────────────┘
 ```
 
@@ -29,8 +33,26 @@ world state and the rest land as new features, not as new plumbing. See
 | **game → you** | every line that reaches the chat box, with and without colour codes |
 | **you → game** | `chat.sendChatMessage` — say it to the server, exactly as if typed |
 | **you → game** | `chat.addChatMessage` — show it only to this client, never transmitted |
+| **you → game** | `world.playerEntities` — every player the client has loaded, with name and UUID |
 
-Everything above is the `chat` feature. `system` adds `status`, `ping` and `detach`.
+`chat` and `world` are features; `system` adds `status`, `ping` and `detach`. Adding another is a
+new file and one line — `world` was added exactly that way, and nothing in the server, the
+dispatcher or the protocol changed to make it work.
+
+### Commands carry the Java names they call
+
+Every command works in two spellings — a short one and the fully-qualified Java member it reaches:
+
+```
+chat.addChatMessage     ==  net.minecraft.client.entity.EntityPlayerSP.addChatMessage
+chat.sendChatMessage    ==  net.minecraft.client.entity.EntityPlayerSP.sendChatMessage
+world.playerEntities    ==  net.minecraft.world.World.playerEntities
+```
+
+The long form is not decoration. It names the exact field or method, so you can check what you are
+getting against Minecraft's source instead of trusting a summary — including *which* overload on
+*which* type. Commands therefore split at the **last** dot, since a class name has dots of its own.
+Use the deobfuscated names whatever mapping the target runs; chatwire translates.
 
 ## chatwire is not a proxy
 
@@ -184,7 +206,8 @@ Every message is one flat JSON object. Commands are `feature.verb`.
 | `chat.sendChatMessage` | `text` (≤100 chars) | Sends to the server. A leading `/` runs a command. | `EntityPlayerSP.sendChatMessage(String)` |
 | `chat.addChatMessage` | `text` | Client-side only. Nobody else sees it. | `EntityPlayerSP.addChatMessage(IChatComponent)` |
 | `chat.stats` | — | Counters: lines seen, messages sent, messages added. | — |
-| `system.status` | — | Mapping, bound port, and pump counters. | — |
+| `world.playerEntities` | — | Every player the client has loaded, each with `name` and `uuid`. | `World.playerEntities` + `Entity.getName()` / `getUniqueID()` |
+| `system.status` | — | Version, mapping, bound port, connected clients, and `can_call` (whether this JVM lets chatwire reach the game). | — |
 | `system.ping` | — | Liveness. | — |
 | `system.detach` | — | **Unloads chatwire from the game.** | — |
 
@@ -196,6 +219,14 @@ short spellings `chat.send`, `chat.add` and `type: "chat"` still work.
 `system.detach` replies *before* it acts, so you get the acknowledgement and then the
 connection closes — that is the detach working, not a failure.
 
+**It stops chatwire but leaves the DLL mapped**, and that is deliberate. Removing a hook stops
+threads *entering* it; it cannot evict one already inside, and vmhook keeps no in-flight count —
+so there is no instant at which unloading is provably safe while the game runs. Unloading anyway
+produced a DEP violation on Minecraft's own thread, twice. Detaching costs about a megabyte of
+address space until the game exits, and in exchange it cannot kill the process it is detaching
+from. Everything observable is gone either way: socket closed, hooks out. Re-running
+`chatwire-inject` starts the resident copy again.
+
 It cannot run on the requesting client's own thread: shutdown joins every client thread, so a
 detach handled inline would join itself and deadlock. It is handed to a thread of its own, which
 waits long enough for the reply to be written, stops chatwire, and unloads.
@@ -206,15 +237,32 @@ still executing code in the DLL when it runs is left on freed pages and dies at 
 unpredictable later moment. So the detach path spawns exactly one thread and that thread is the
 one that unloads; nothing is left behind mid-call.
 
+`world.playerEntities` answers with the players the **client** has loaded — those near enough to
+exist as entities. It is not the server's roster, and on a large server it is a small fraction of
+the tab list. That is a property of Minecraft, and the command is named after the field it reads so
+the answer cannot be mistaken for something else:
+
+```json
+{"count":2,"players":[{"name":"Steve","uuid":"8667ba71-..."},{"name":"Alex","uuid":"ec561538-..."}]}
+```
+
+Name and UUID come from the same object in one pass, so an entry's two halves always belong
+together.
+
 **Every command gets a reply:**
 
 ```json
-{"ok":true,"result":{"queued":true}}
+{"ok":true,"result":{"sent":true}}
 {"ok":false,"error":"'text' exceeds the 100-character chat limit"}
 ```
 
-`chat.sendChatMessage` and `chat.addChatMessage` are **asynchronous**: `queued: true` means the message reached the
-game thread's queue, not that Minecraft has processed it. It runs on the next client tick.
+`chat.sendChatMessage` and `chat.addChatMessage` are **synchronous**: `sent` / `added` means the
+call into Minecraft has already happened, not that it was accepted for later. If you are not in
+a world, or the call failed, you get `{"ok":false,"error":"not in a world"}` instead of a
+success you would have had to disbelieve.
+
+Until 0.3.0 these answered `{"queued":true}` and ran on the next client tick. That reply is
+gone, along with the queue and the tick — see below.
 
 ### sendChatMessage vs addChatMessage
 
@@ -227,37 +275,67 @@ they are separate verbs rather than a flag:
 
 ## Design
 
-### Everything that touches the game happens on the game thread
+### Calling the game from a socket thread
 
-This is a rule about **Minecraft**, not about the JVM, and the difference matters because it is
-easy to go and fix the wrong one.
+A Java call needs a **JavaThread** — the VM-side object holding the frame anchor a GC stack-walk
+follows and the state a safepoint reads. A native thread HotSpot has never seen has none of that,
+and calling on one corrupts the heap the first time a collection runs mid-call. That is why the
+old rule was "only call Java from inside a hook", and why chatwire used to carry a pump: a detour
+on `Minecraft.runTick` that queued work onto the game thread.
 
-vmhook reads Java state from any thread, and since it grew `vmhook::attach_current_thread()` it
-can *call* Java from any thread too — it asks the VM to adopt the calling thread, so the thread
-gets the frame anchor a GC stack-walk needs. The VM is not what stops you.
+There is no pump any more. `sdk::send_chat` and `sdk::add_chat` are plain synchronous functions a
+WebSocket thread calls directly and gets a real `true`/`false` back from. vmhook makes that safe,
+by one of two routes it picks from what the JVM publishes:
 
-Minecraft is. The client is single-threaded by construction: the world, the entity list, the
-chat GUI and the network channel are each owned by one thread and none of them are guarded.
-Calling `sendChatMessage` from a socket thread is perfectly legal as far as HotSpot is concerned
-and still corrupts the game's own state. Attaching the thread does not fix that; only running on
-the owning thread does.
+| Route | When | How |
+|---|---|---|
+| pure VMStructs | the VM publishes a usable `os::_polling_page` — Java 8–20 | claim a state the VM must wait for, verify no safepoint has begun, then enter Java |
+| minimal JNI | everything else, including **Java 17, which Lunar uses** | JNI's own entry performs the real safepoint-checked transition, and its references are GC-tracked |
 
-So chatwire's WebSocket threads **never touch game state**. They hand a task to a pump, and the
-pump runs it from inside a detour on Minecraft's own thread:
+**On the JNI part, precisely.** chatwire itself contains no JNI. vmhook uses exactly two JNI
+functions on the off-hook path — `NewStringUTF` to build a String argument and `Call<T>MethodA` to
+make the call — plus a few id lookups, reached by index into the function table rather than by
+including `jni.h`. Inside a hook none of it is used: there the thread is already `_thread_in_Java`
+and the pure call stub applies. The reason it cannot be avoided on a modern JVM is documented at
+length in vmhook's README, with the measurements behind it; the short version is that the one bit
+required — *has a safepoint begun?* — is published nowhere on JDK 21+, and a thread the VM has
+already counted as safe cannot be un-counted.
 
-```
-websocket thread              minecraft client thread
-────────────────              ───────────────────────
-submit(task)     ────────►    Minecraft.runTick() fires
-(returns at once)             detour drains the queue and runs the task
-```
+#### What the VM permits is not what Minecraft permits
 
-`Minecraft.runTick` is the natural pump: called every client tick, on the thread that owns the
-world. Latency is a fraction of a tick.
+Being legal for the VM is not the same as being safe for Minecraft, and the honest answer is
+per-method rather than global:
+
+- **`sendChatMessage` is genuinely thread-safe.** It reaches `NetworkManager.sendPacket`, which
+  is one of the few parts of the 1.8.9 client written to be called from anywhere: it guards its
+  outbound queue with a `ReentrantReadWriteLock` and, when the caller is not the channel's event
+  loop, hands the write to that event loop instead of doing it inline. The game's own network
+  threads depend on this.
+- **`addChatMessage` races, cosmetically.** It ends in `GuiNewChat.setChatLine`, which inserts
+  at the front of the two `ArrayList`s the client thread renders from. `ArrayList.add(0, e)`
+  populates the new array, shifts, stores, and increments `size` *last*, so a reader indexing
+  below `size` never sees a null or an out-of-range index — the worst it observes is one line
+  drawn twice for a single frame. The 100-line trim removes from the tail; `drawChat` reads from
+  the head and stops around twenty lines in, so the two never meet. It is a data race whose
+  failure mode is a flicker, at one call per client request, and it is not worth a detour in the
+  client's main loop.
+
+If it ever has to be exact, the way to do it without a hook is to hand Minecraft an
+`S02PacketChat` and let `PacketThreadUtil` schedule it — the client already marshals its own
+inbound chat that way.
+
+Two VM-level hazards used to sit here as well — an oop held across a call that the callee's own
+allocation could move, and vmhook bump-allocating out of another thread's TLAB. **Both are closed
+on the JNI path**, and closing them is most of why it is worth having: a JNI reference is one the
+collector tracks and updates, so an object cannot move out from under a call, and objects are
+allocated by the VM rather than by writing into a lockless bump pointer somebody else owns.
+
+The reads are unaffected by any of this: a field get is a load from an address and has always
+worked from any thread. Only calling ever needed permission.
 
 This is also what keeps the next feature cheap. A player list, an inventory read or a world
-query has the same shape as a chat send — submit a task, get an answer — so a new feature
-inherits the threading model instead of having to re-decide it.
+query has the same shape as a chat send — attach, call, answer — so a new feature inherits the
+threading model instead of having to re-decide it.
 
 ### Stability
 
@@ -265,9 +343,19 @@ It runs inside someone's game. The rules that follow from that:
 
 - **No exception ever reaches the JVM.** Every detour body is `noexcept` and catch-all
   guarded. An exception unwinding into Minecraft's interpreter frame has no handler.
-- **Bounded queues.** A client spamming faster than the game ticks drops the *oldest* task and
-  counts it. Dropping is a bounded, visible failure; growing is an out-of-memory in a game.
+- **A client's own thread pays for its own commands.** A client spamming chat blocks itself,
+  not the game and not the other clients. This replaced a bounded queue that dropped the oldest
+  task under load — backpressure that lands on the peer causing it is better than backpressure
+  that loses someone else's message.
 - **Nothing blocks the game thread.** A client that stops reading gets dropped, not waited on.
+- **Threads let go of the VM.** An attached thread is released when it exits, and explicitly
+  before the DLL unloads — the VM must not be left holding a JavaThread for a thread that is
+  about to vanish, whose stack a later safepoint would try to walk.
+- **Unhooking waits before unloading.** `remove_hooks()` stops threads *entering* a trampoline;
+  it cannot evict one already inside, and vmhook keeps no in-flight count. The game thread is
+  inside the pump detour twenty times a second and is never joined — it is Minecraft's. So
+  teardown unpatches, waits several ticks, and only then lets the DLL unload. Skipping that wait
+  killed a game during testing.
 - **Threads are joined before anything unloads.** `stop()` closes the listener first (which
   wakes `accept`), shuts down client sockets (which wakes their readers), *then* joins.
 - **Objects that own JVM state are never destroyed implicitly.** Hook handles and the server
@@ -285,7 +373,7 @@ include/chatwire/
   chatwire.hpp          the public surface; includes neither heavyweight header
   features/*.hpp        behaviour; knows nothing about vmhook
   feature.hpp           the extension point
-  pump.hpp              the game-thread queue
+  pump.hpp              the game-thread queue and the synchronous wait on it
   json.hpp  log.hpp     helpers
   ws/*.hpp              RFC 6455 by hand, Winsock only
   sdk.hpp               ◄── THE ONLY HEADER THAT INCLUDES vmhook.hpp
@@ -352,6 +440,12 @@ registry::add(features::inventory::instance());          // 2
 
 `inventory.list` now routes to it. Nothing else changes — not the server, not the dispatcher,
 not the protocol.
+
+`handle()` runs on the asking client's own socket thread and may call Java straight from it —
+the sdk attaches the thread to the VM first. There is nothing to marshal onto and no queue to
+feed. What that does *not* give you is a thread-safe Minecraft: check whether the method you are
+about to call tolerates being called off the client thread, the way `sendChatMessage` and
+`addChatMessage` are each argued about above.
 
 Registration is explicit rather than self-registering via a static initialiser. Static
 initialisation order across translation units is unspecified, and a registry populated that way

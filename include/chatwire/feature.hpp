@@ -14,8 +14,8 @@
 // So a feature is a self-contained object that declares:
 //
 //     name()      what its commands are namespaced under  ("chat")
-//     start()     install hooks, resolve mappings         (on the game thread)
-//     stop()      take them down                          (on the game thread)
+//     start()     install hooks, resolve mappings
+//     stop()      take them down
 //     handle()    respond to one client command
 //
 // and registers itself with one line at namespace scope.  The server discovers
@@ -26,15 +26,23 @@
 // ===========================================================================
 // LIFECYCLE, AND WHY IT IS ORDERED THIS WAY
 // ===========================================================================
-// start() runs ON THE GAME THREAD, inside the pump, because installing a vmhook
-// detour resolves klasses and methods — JVM work that has the same thread
-// requirements as any other JVM work.  Registration happens at static-init time
-// (no JVM yet, so it must not touch one); start() happens later, once a JVM is
-// known to be present and the mapping mode is known.
+// Registration happens at static-init time, so it must not touch a JVM — there
+// may not be one yet.  start() happens later, on chatwire's start-up thread,
+// once a JVM is known to be present and the mapping mode is known.  stop() runs
+// on whichever thread is taking chatwire down.
 //
-// handle() runs ON THE SOCKET THREAD.  A feature that needs Java from there
-// must go through the pump — that is the whole reason the pump exists, and the
-// reason handle() returns a response by value rather than being handed a socket.
+// handle() runs ON THE SOCKET THREAD, one per connected client, and may call
+// Java directly from it: chatwire::sdk attaches the calling thread to the VM
+// first (see sdk::attach_thread).  It used to have to hand work to a pump and
+// answer "queued"; it does not any more, which is why every verb can report
+// what actually happened.
+//
+// NONE of that makes a feature thread-safe.  Two clients are two threads in
+// handle() at once, and a feature holding state of its own has to say how that
+// is guarded.  It also does not make MINECRAFT thread-safe: the VM permits the
+// call, the game may still not, and which game state tolerates it is a
+// per-method question — see the notes on send_chat and add_chat in sdk.hpp for
+// the shape of that argument.
 #include "chatwire/common.hpp"
 
 #include "chatwire/log.hpp"
@@ -103,18 +111,35 @@ namespace chatwire
         [[nodiscard]] virtual auto name() const noexcept -> std::string_view = 0;
 
         /*
-            @brief Installs whatever this feature needs.  ON THE GAME THREAD.
+            @brief Whether this feature answers to `prefix`.
+            @details
+            Defaults to "my name and nothing else".  Overriding it lets one
+            feature answer to several spellings -- which is how the Minecraft
+            classes reach the protocol: `chat.addChatMessage` and
+            `net.minecraft.client.entity.EntityPlayerSP.addChatMessage` are the
+            same command, one short and one that says exactly what it calls.
+
+            A prefix is matched WHOLE.  Commands split at the LAST dot, so the
+            prefix is everything before the verb and may itself contain dots.
+        */
+        [[nodiscard]] virtual auto claims(const std::string_view prefix) const noexcept -> bool
+        {
+            return prefix == this->name();
+        }
+
+        /*
+            @brief Installs whatever this feature needs.
             @return false to report the feature unavailable; the rest of
                     chatwire keeps running without it rather than aborting.
         */
         [[nodiscard]] virtual auto start() noexcept -> bool = 0;
 
-        /* @brief Removes everything start() installed.  ON THE GAME THREAD. */
+        /* @brief Removes everything start() installed. */
         virtual auto stop() noexcept -> void = 0;
 
         /*
             @brief Answers one client command.  ON THE SOCKET THREAD.
-            @details Must not touch Java directly — use chatwire::pump::submit.
+            @details May call Java directly; the sdk attaches the thread first.
         */
         [[nodiscard]] virtual auto handle(const command& cmd) noexcept -> response = 0;
     };
@@ -158,13 +183,13 @@ namespace chatwire
         {
             for (feature* const f : detail::storage())
             {
-                if (f && f->name() == name) { return f; }
+                if (f && f->claims(name)) { return f; }
             }
             return nullptr;
         }
 
         /*
-            @brief Starts every registered feature.  ON THE GAME THREAD.
+            @brief Starts every registered feature.
             @details
             One feature failing does not stop the others: a build where the
             inventory mappings went stale should still bridge chat.  Returns how
@@ -192,7 +217,7 @@ namespace chatwire
             return started;
         }
 
-        /* @brief Stops every feature, in reverse order.  ON THE GAME THREAD. */
+        /* @brief Stops every feature, in reverse order. */
         inline auto stop_all() noexcept -> void
         {
             auto& features{ detail::storage() };

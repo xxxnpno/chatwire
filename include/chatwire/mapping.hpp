@@ -105,8 +105,13 @@ namespace chatwire::mapping
         inline constexpr name the_minecraft{ .mcp = "theMinecraft", .obf = "S", .srg = "field_71432_P" };
         inline constexpr name the_player{ .mcp = "thePlayer", .obf = "h", .srg = "field_71439_g" };
         inline constexpr name ingame_gui{ .mcp = "ingameGUI", .obf = "q", .srg = "field_71456_v" };
-        /* Called every client tick — chatwire's pump target. */
-        inline constexpr name run_tick{ .mcp = "runTick", .obf = "s", .srg = "func_71407_l" };
+        /* The world the player is in, or null on the title screen. */
+        inline constexpr name the_world{ .mcp = "theWorld", .obf = "f", .srg = "field_71441_e" };
+        // runTick is deliberately absent.  It was the pump's hook target, and
+        // there is no pump: vmhook can enter Java on any thread now, so nothing
+        // has to be marshalled onto the client's main loop.  This table is only
+        // what chatwire touches, so an entry nothing calls does not sit here
+        // going stale.
     }
 
     // net.minecraft.client.entity.EntityPlayerSP — the local player.
@@ -117,6 +122,35 @@ namespace chatwire::mapping
         inline constexpr name send_chat_message{ .mcp = "sendChatMessage", .obf = "e", .srg = "func_71165_d" };
         /* addChatMessage(IChatComponent) — CLIENT-side only, never transmitted. */
         inline constexpr name add_chat_message{ .mcp = "addChatMessage", .obf = "a", .srg = "func_145747_a" };
+    }
+
+    // net.minecraft.client.multiplayer.WorldClient — the client's world.  Only
+    // the DECLARED type of Minecraft.theWorld matters here: a JNI field lookup
+    // is by declared type, not by what the object turns out to be.
+    namespace world_client
+    {
+        inline constexpr name clazz{ .mcp = "net/minecraft/client/multiplayer/WorldClient" };
+    }
+
+    // net.minecraft.world.World — where the player list lives.  `playerEntities`
+    // is declared on World and inherited by WorldClient, which is why a lookup
+    // against the instance finds it.
+    namespace world
+    {
+        inline constexpr name clazz{ .mcp = "net/minecraft/world/World" };
+        /* List<EntityPlayer> — everyone the client currently knows about. */
+        inline constexpr name player_entities{ .mcp = "playerEntities", .srg = "field_73010_i" };
+    }
+
+    // net.minecraft.entity.Entity — the two identity accessors every player has.
+    // Declared on Entity and overridden on EntityPlayer, so a virtual call
+    // against a player instance lands on the player's version.
+    namespace entity
+    {
+        /* getName() — the display name, which is the nickname on most servers. */
+        inline constexpr name get_name{ .mcp = "getName", .srg = "func_70005_c_" };
+        /* getUniqueID() — the account UUID, stable across name changes. */
+        inline constexpr name get_unique_id{ .mcp = "getUniqueID", .srg = "func_110124_au" };
     }
 
     // net.minecraft.client.gui.GuiIngame — holds the chat GUI.

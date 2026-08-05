@@ -115,9 +115,10 @@ namespace chatwire::ws
     /*
         @brief Called when a client connects or disconnects, with the new total.
         @details
-        Runs on that client's own thread, so it must not block.  chatwire uses it
-        to announce the connection in the player's chat, which means it reaches
-        the game the same way everything else does -- through the pump.
+        Runs on that client's own thread, so it must not block for long.
+        chatwire uses it to announce the connection in the player's chat, which
+        it does the same way everything else reaches the game: by calling it
+        from the thread it is already on.
     */
     using presence_handler = void (*)(bool connected, std::size_t total) noexcept;
 

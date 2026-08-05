@@ -9,11 +9,15 @@
 #pragma once
 
 #include "chatwire/common.hpp"
+
+// The root header, for chatwire::version.  Not a layering violation and not a
+// cycle: chatwire.hpp is the PUBLIC surface and includes no feature, so a
+// feature reading a constant out of it depends on nothing that depends back.
+#include "chatwire/chatwire.hpp"
 #include "chatwire/feature.hpp"
 #include "chatwire/json.hpp"
 #include "chatwire/log.hpp"
 #include "chatwire/mapping.hpp"
-#include "chatwire/pump.hpp"
 
 namespace chatwire::features
 {
@@ -29,9 +33,14 @@ namespace chatwire::features
 
     inline std::atomic<detach_request> g_detach{ nullptr };
 
+    /* @brief How many clients are connected.  Supplied by the host. */
+    using client_counter = std::size_t (*)() noexcept;
+
     /* Filled in by chatwire::start() so status has something to report. */
     inline std::atomic<std::uint16_t> g_status_port{ 0 };
-    inline std::atomic<std::size_t> (*g_client_counter)() { nullptr };
+    /* Whether vmhook will let this JVM be called into at all. */
+    inline std::atomic<bool> g_can_call{ false };
+    inline std::atomic<client_counter> g_client_counter{ nullptr };
 
     class system_feature final : public chatwire::feature
     {
@@ -58,20 +67,16 @@ namespace chatwire::features
 
                 if (cmd.verb == "status")
                 {
-                    const auto pump{ chatwire::pump::snapshot() };
+                    const client_counter clients{ g_client_counter.load(std::memory_order_acquire) };
                     return chatwire::response::success(chatwire::json::object(
-                        chatwire::json::field("mapping",
+                        chatwire::json::field("version", chatwire::version)
+                        + "," + chatwire::json::field("mapping",
                             chatwire::mapping::mode_name(chatwire::mapping::current))
                         + "," + chatwire::json::field("port",
                             static_cast<std::int64_t>(g_status_port.load(std::memory_order_relaxed)))
-                        + "," + chatwire::json::field("queued",
-                            static_cast<std::int64_t>(pump.pending))
-                        + "," + chatwire::json::field("tasks_run",
-                            static_cast<std::int64_t>(pump.executed))
-                        + "," + chatwire::json::field("tasks_dropped",
-                            static_cast<std::int64_t>(pump.dropped))
-                        + "," + chatwire::json::field("tasks_failed",
-                            static_cast<std::int64_t>(pump.failed))));
+                        + "," + chatwire::json::field("clients",
+                            static_cast<std::int64_t>(clients ? clients() : 0u))
+                        + "," + chatwire::json::field("can_call", g_can_call.load(std::memory_order_relaxed))));
                 }
 
                 if (cmd.verb == "detach")
@@ -134,6 +139,19 @@ namespace chatwire::features::system
     inline auto set_status_port(const std::uint16_t port) noexcept -> void
     {
         chatwire::features::g_status_port.store(port, std::memory_order_release);
+    }
+
+    /* @brief Tells `system.status` whether calls into the game are possible. */
+    inline auto set_can_call(const bool can_call) noexcept -> void
+    {
+        chatwire::features::g_can_call.store(can_call, std::memory_order_release);
+    }
+
+    /* @brief Tells `system.status` where to ask how many clients are connected. */
+    inline auto set_client_counter(const chatwire::features::client_counter counter) noexcept
+        -> void
+    {
+        chatwire::features::g_client_counter.store(counter, std::memory_order_release);
     }
 
     /* @brief This feature's singleton, for the root module to register. */

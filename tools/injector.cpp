@@ -24,7 +24,7 @@
 // stealthier method gives up one of those and buys nothing here.
 #include "chatwire/config.hpp"
 
-#include <cstdio>
+#include <print>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -48,8 +48,7 @@ namespace
         ::FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
                              | FORMAT_MESSAGE_IGNORE_INSERTS,
                          nullptr, code, 0, reinterpret_cast<LPSTR>(&message), 0, nullptr);
-        std::printf("  [error] %s: %lu%s%s", what, code,
-                    message ? " - " : "", message ? message : "\n");
+        std::print("  [error] {}: {}{}{}", what, code, message ? " - " : "", message ? message : "\n");
         if (message) { ::LocalFree(message); }
     }
 
@@ -164,6 +163,31 @@ namespace
     }
 
     /*
+        @brief Asks an already-loaded chatwire to start again.
+        @details
+        A detach leaves the module mapped, and LoadLibrary on an already-loaded
+        module does not re-run DllMain, so re-injecting has to wake the copy that
+        is already there.
+
+        It is done with a named event rather than by calling into the target,
+        because calling means knowing an address, and the only cheap source of one
+        is the DLL on disk -- which stops matching the mapped module the moment it
+        is rebuilt.  An event carries no addresses, so it cannot be stale.
+
+        @return true when the signal was delivered.  A false here usually means
+                the loaded copy predates this mechanism.
+    */
+    auto signal_restart(const DWORD pid) -> bool
+    {
+        const std::string name{ "Local\\chatwire.restart." + std::to_string(pid) };
+        const HANDLE signal{ ::OpenEventA(EVENT_MODIFY_STATE, FALSE, name.c_str()) };
+        if (signal == nullptr) { return false; }
+        const bool ok{ ::SetEvent(signal) != 0 };
+        ::CloseHandle(signal);
+        return ok;
+    }
+
+    /*
         @brief Injects `dll_path` into `pid` via a LoadLibraryW remote thread.
         @details
         The DLL path is written into the target's address space, then a thread is
@@ -195,9 +219,8 @@ namespace
         (void)::IsWow64Process(::GetCurrentProcess(), &self_is_wow64);
         if (target_is_wow64 != self_is_wow64)
         {
-            std::printf("  [error] architecture mismatch: the target is %s-bit and this "
-                        "injector is %s-bit\n",
-                        target_is_wow64 ? "32" : "64", self_is_wow64 ? "32" : "64");
+            std::println("  [error] architecture mismatch: the target is {}-bit and this "
+                        "injector is {}-bit", target_is_wow64 ? "32" : "64", self_is_wow64 ? "32" : "64");
             ::CloseHandle(process);
             return false;
         }
@@ -246,14 +269,14 @@ namespace
 
                     if (waited == WAIT_TIMEOUT)
                     {
-                        std::printf("  [error] the remote LoadLibraryW did not return in 10s\n");
+                        std::println("  [error] the remote LoadLibraryW did not return in 10s");
                     }
                     else if (module_handle == 0u)
                     {
-                        std::printf("  [error] LoadLibraryW returned NULL in the target - the "
+                        std::println("  [error] LoadLibraryW returned NULL in the target - the "
                                     "DLL exists but could not be loaded.\n"
                                     "          Usually a missing dependency or an "
-                                    "architecture mismatch.\n");
+                                    "architecture mismatch.");
                     }
                     else
                     {
@@ -294,8 +317,7 @@ namespace
 
     auto usage() -> void
     {
-        std::printf(
-            "chatwire-inject - inject chatwire into a running Minecraft\n"
+        std::println("chatwire-inject - inject chatwire into a running Minecraft\n"
             "\n"
             "  chatwire-inject                 find Minecraft and inject chatwire.dll\n"
             "  chatwire-inject --list          list candidate processes and exit\n"
@@ -305,7 +327,7 @@ namespace
             "  chatwire-inject --console       ALSO open a console showing chat\n"
             "  chatwire-inject --verbose       show chatwire's start-up trace\n"
             "\n"
-            "The DLL defaults to chatwire.dll next to this executable.\n");
+            "The DLL defaults to chatwire.dll next to this executable.");
     }
 }
 
@@ -344,13 +366,13 @@ int main(const int argc, char** const argv)
         }
         else
         {
-            std::printf("unknown argument: %s\n\n", arg.c_str());
+            std::println("unknown argument: {}\n", arg);
             usage();
             return 2;
         }
     }
 
-    std::printf("chatwire-inject\n\n");
+    std::println("chatwire-inject\n");
 
     // Resolve the DLL relative to the EXECUTABLE, not the working directory:
     // the normal case is both sitting in the same folder, and a user running
@@ -369,10 +391,10 @@ int main(const int argc, char** const argv)
 
     if (::GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES)
     {
-        std::printf("  [error] no such DLL: %s\n", to_utf8(dll).c_str());
+        std::println("  [error] no such DLL: {}", to_utf8(dll));
         return 1;
     }
-    std::printf("  dll   : %s\n", to_utf8(dll).c_str());
+    std::println("  dll   : {}", to_utf8(dll));
 
     auto candidates{ find_java_processes() };
     annotate_with_titles(candidates);
@@ -381,28 +403,36 @@ int main(const int argc, char** const argv)
     {
         if (candidates.empty())
         {
-            std::printf("\n  no java.exe / javaw.exe is running.  Start Minecraft first.\n");
+            std::println("\n  no java.exe / javaw.exe is running.  Start Minecraft first.");
             return 1;
         }
-        std::printf("\n  candidates:\n");
+        std::println("\n  candidates:");
         for (const candidate& c : candidates)
         {
-            std::printf("    pid %-8lu %-12s %s\n", c.pid, to_utf8(c.exe).c_str(),
-                        c.window_title.empty() ? "(no window yet)"
-                                               : to_utf8(c.window_title).c_str());
+            std::println("    pid {} {} {}", c.pid, to_utf8(c.exe), c.window_title.empty() ? "(no window yet)"
+                                               : to_utf8(c.window_title));
         }
         if (list_only) { return 0; }
-        std::printf("\n  more than one candidate - pick one with --pid <n>\n");
+        std::println("\n  more than one candidate - pick one with --pid <n>");
         return 1;
     }
 
     if (pid == 0) { pid = candidates.front().pid; }
-    std::printf("  target: pid %lu\n", pid);
+    std::println("  target: pid {}", pid);
 
     if (already_injected(pid, L"chatwire.dll"))
     {
-        std::printf("\n  chatwire is already loaded in that process.\n");
-        return 0;
+        // Loaded, but not necessarily RUNNING: a detach stops chatwire and
+        // leaves the module mapped.  So a second injection is a CALL, not a
+        // load -- into the restart entry point the DLL exports for this.
+        std::println("\n  chatwire is already loaded; restarting it in place.");
+        if (signal_restart(pid))
+        {
+            std::println("  restarted.  connect to  ws://127.0.0.1:{}", port);
+            return 0;
+        }
+        std::println("  could not restart it (already running?).");
+        return 1;
     }
 
     // Hand the settings over through a file beside the DLL.  The injector cannot
@@ -420,30 +450,26 @@ int main(const int argc, char** const argv)
                                + "chatwire.cfg" };
         if (!chatwire::config::write(cfg, settings))
         {
-            std::printf("\n  [warn] could not write %s;\n"
-                        "         chatwire will start with its defaults.\n", cfg.c_str());
+            std::println("\n  [warn] could not write {};\n"
+                        "         chatwire will start with its defaults.", cfg);
         }
         else
         {
-            std::printf("  port  : %u%s%s\n",
-                        port != 0u ? port : 24455u,
-                        console ? "   (console)" : "   (no console)",
-                        verbose ? "   (verbose)" : "");
+            std::println("  port  : {}{}{}", port != 0u ? port : 24455u, console ? "   (console)" : "   (no console)", verbose ? "   (verbose)" : "");
         }
     }
 
     (void)enable_debug_privilege();
 
-    std::printf("\n  injecting...\n");
+    std::println("\n  injecting...");
     if (!inject(pid, dll))
     {
-        std::printf("\n  injection FAILED.\n");
+        std::println("\n  injection FAILED.");
         return 1;
     }
 
-    std::printf("\n  injected.  chatwire is starting inside the game;\n"
+    std::println("\n  injected.  chatwire is starting inside the game;\n"
                 "  it waits for Minecraft's classes, so give it a moment.\n"
-                "\n  connect to  ws://127.0.0.1:%u\n",
-                port != 0u ? port : 24455u);
+                "\n  connect to  ws://127.0.0.1:{}", port != 0u ? port : 24455u);
     return 0;
 }

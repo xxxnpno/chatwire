@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(chatwire
-    VERSION      0.2.0
+    VERSION      0.3.0
     DESCRIPTION  "Live WebSocket API for Minecraft 1.8.9, built on vmhook"
     LANGUAGES    CXX)
 
@@ -40,9 +40,11 @@ option(CHATWIRE_BUILD_TESTS        "Build the no-Minecraft test suite"   ON)
 # ---------------------------------------------------------------------------
 # vmhook — vendored, header-only.
 #
-# Pinned rather than fetched: chatwire depends on invocation working pure-VM
-# (vmhook >= 0.6.0), and a floating dependency on a library this project is
-# injected alongside is how a game crashes after an unrelated upgrade.
+# Pinned rather than fetched: chatwire depends on invocation working pure-VM,
+# and on vmhook::attach_current_thread, without which a Java call would once
+# again have to happen inside a detour and the pump would have to come back.  A
+# floating dependency on a library this project is injected alongside is how a
+# game crashes after an unrelated upgrade.
 # ---------------------------------------------------------------------------
 add_library(vmhook INTERFACE)
 add_library(vmhook::vmhook ALIAS vmhook)
@@ -98,6 +100,14 @@ set_target_properties(chatwire PROPERTIES
     OUTPUT_NAME "chatwire")
 chatwire_apply_warnings(chatwire)
 
+# A detached chatwire stays mapped in the game (see dllmain.cpp), which locks
+# chatwire.dll against being overwritten.  Rename the old one out of the way
+# before linking so "rebuild while Minecraft is open" just works.
+add_custom_command(TARGET chatwire PRE_LINK
+    COMMAND ${CMAKE_COMMAND} -DDLL=$<TARGET_FILE:chatwire>
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/unlock_output.cmake"
+    COMMENT "Moving any mapped chatwire.dll aside")
+
 # Self-contained: injected into a process whose PATH we do not control, where a
 # missing libstdc++/libgcc fails the injection with an error that looks nothing
 # like its cause.
@@ -133,6 +143,9 @@ if(CHATWIRE_BUILD_TOOLS)
     if(MINGW)
         foreach(tool chatwire-inject chatwire-mock chatwire-client)
             target_link_options(${tool} PRIVATE -static -static-libgcc -static-libstdc++)
+            # std::println's unicode terminal path lives in stdc++exp on MinGW;
+            # without it the link fails on __open_terminal / __write_to_terminal.
+            target_link_libraries(${tool} PRIVATE stdc++exp)
         endforeach()
     endif()
 endif()

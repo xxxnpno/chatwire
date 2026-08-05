@@ -27,16 +27,16 @@
 // ===========================================================================
 // THREADING
 // ===========================================================================
-// handle() runs on a SOCKET thread and only enqueues.  The actual Java calls run
-// later, inside the pump's detour, on Minecraft's own thread.  Nothing in this
-// file calls Java from a socket thread — that would crash the VM.
+// handle() runs on a SOCKET thread and calls Java from it, directly.  The sdk
+// attaches the calling thread to the VM first, which is what makes that legal —
+// see chatwire::sdk::attach_thread.  There is no queue and no tick to wait for,
+// so a verb answers with what actually happened rather than with "accepted".
 #include "chatwire/common.hpp"
 
 #include "chatwire/feature.hpp"
 #include "chatwire/json.hpp"
 #include "chatwire/log.hpp"
 #include "chatwire/mapping.hpp"
-#include "chatwire/pump.hpp"
 #include "chatwire/sdk.hpp"
 namespace chatwire::features
 {
@@ -70,6 +70,31 @@ namespace chatwire::features
             return "chat";
         }
 
+        /*
+            @brief Answers to "chat" and to the Java classes it actually calls.
+            @details
+            `chat.addChatMessage` and
+            `net.minecraft.client.entity.EntityPlayerSP.addChatMessage` are the
+            same command.  The long spelling is the point of the short one made
+            explicit: the verbs were already named after Minecraft's methods so
+            that a reader who knows the source knows what they do, and naming the
+            CLASS as well removes the last thing they would have to guess -- which
+            of several `addChatMessage` overloads on which type this reaches.
+
+            GuiNewChat is claimed too, because `printChatMessage` is the method
+            the observer hooks, so the event and a future command for it agree.
+
+            Deobfuscated names regardless of the mapping in force: this is what a
+            client author types, and they should not have to know whether the jar
+            they are attached to is MCP, SRG or OBF to write it.
+        */
+        [[nodiscard]] auto claims(const std::string_view prefix) const noexcept -> bool override
+        {
+            return prefix == "chat"
+                || prefix == "net.minecraft.client.entity.EntityPlayerSP"
+                || prefix == "net.minecraft.client.gui.GuiNewChat";
+        }
+
         [[nodiscard]] auto start() noexcept -> bool override
         {
             if (!chatwire::sdk::install_chat_observer(&on_chat_line))
@@ -84,8 +109,9 @@ namespace chatwire::features
         auto stop() noexcept -> void override
         {
             // Hooks are removed centrally by chatwire::stop() -> sdk::remove_hooks(),
-            // because they must come down in one pass on the game thread.  All a
-            // feature has to do is stop producing.
+            // because they must come down in one pass, after every thread that
+            // could be inside one has been joined.  All a feature has to do is
+            // stop producing.
         }
 
         [[nodiscard]] auto handle(const chatwire::command& cmd) noexcept
@@ -122,20 +148,7 @@ namespace chatwire::features
                             "'text' exceeds the 100-character chat limit");
                     }
 
-                    const bool to_server{ send };
-                    const bool queued{ chatwire::pump::submit(
-                        [message = *std::move(text), to_server]() noexcept
-                        {
-                            deliver(message, to_server);
-                        }) };
-
-                    if (!queued)
-                    {
-                        return chatwire::response::failure(
-                            "the game-thread queue is full or closed");
-                    }
-                    return chatwire::response::success(
-                        chatwire::json::object(chatwire::json::field("queued", true)));
+                    return deliver(*text, send);
                 }
 
                 if (cmd.verb == "stats")
@@ -160,10 +173,17 @@ namespace chatwire::features
 
     private:
         /*
-            @brief Receives one chat line.  ON THE GAME THREAD, in a detour.
+            @brief Receives one chat line, inside a detour.
             @details
-            noexcept and fully guarded: the frame above is Minecraft's
-            interpreter, which has no handler for a C++ exception.
+            Usually on the game thread, because that is who normally prints
+            chat — but not always: `addChatMessage` from a client lands in
+            printChatMessage too, so this can also fire on the socket thread that
+            asked for it.  Nothing here cares which, and nothing here may start
+            caring: the counter is atomic and both sinks are safe from any
+            thread.
+
+            noexcept and fully guarded whichever thread it is: the frame above is
+            Minecraft's interpreter, which has no handler for a C++ exception.
         */
         static auto on_chat_line(const char* const formatted, const char* const plain) noexcept
             -> void
@@ -202,37 +222,45 @@ namespace chatwire::features
         }
 
         /*
-            @brief Performs one queued chat action.  ON THE GAME THREAD.
+            @brief Says it, right here, on the caller's thread.
+            @details
+            Synchronous, which is the whole difference from the version that fed
+            a pump: by the time this returns the Java call has happened, so the
+            reply can say `sent` or `added` and mean it.  A client that got
+            `{"ok":true}` back knows the message reached the game rather than
+            knowing it reached a queue.
+
+            Not being in a world is a FAILURE rather than a silent drop.  There
+            is no chat box on the title screen, and a client that asked to say
+            something needs to hear that it did not happen — the queued version
+            could only log it, because by then nobody was listening.
         */
-        static auto deliver(const std::string& text, const bool to_server) noexcept -> void
+        [[nodiscard]] static auto deliver(const std::string& text, const bool to_server) noexcept
+            -> chatwire::response
         {
             if (!chatwire::sdk::in_world())
             {
-                chatwire::log::warn("chat: not in a world; dropping message");
-                return;
+                return chatwire::response::failure("not in a world");
             }
 
             if (to_server)
             {
-                if (chatwire::sdk::send_chat(text))
+                if (!chatwire::sdk::send_chat(text))
                 {
-                    g_sent.fetch_add(1, std::memory_order_relaxed);
+                    return chatwire::response::failure("sendChatMessage failed");
                 }
-                else
-                {
-                    chatwire::log::warn("chat: sendChatMessage failed");
-                }
-                return;
+                g_sent.fetch_add(1, std::memory_order_relaxed);
+                return chatwire::response::success(
+                    chatwire::json::object(chatwire::json::field("sent", true)));
             }
 
-            if (chatwire::sdk::add_chat(text))
+            if (!chatwire::sdk::add_chat(text))
             {
-                g_added.fetch_add(1, std::memory_order_relaxed);
+                return chatwire::response::failure("addChatMessage failed");
             }
-            else
-            {
-                chatwire::log::warn("chat: addChatMessage failed");
-            }
+            g_added.fetch_add(1, std::memory_order_relaxed);
+            return chatwire::response::success(
+                chatwire::json::object(chatwire::json::field("added", true)));
         }
 
     };
