@@ -23,6 +23,7 @@
 #include "chatwire/chatwire.hpp"
 #include "chatwire/config.hpp"
 #include "chatwire/console.hpp"
+#include "chatwire/features/system.hpp"
 
 #include <windows.h>
 
@@ -123,6 +124,11 @@ namespace
 
         chatwire::log::set_level(settings.verbose ? chatwire::log::level::info
                                                   : chatwire::log::level::warning);
+
+        // The same detach path serves the console's `detach` command and the
+        // websocket's `system.detach`.  Both need a thread of their own -- see
+        // request_detach -- and neither may run on the caller's.
+        chatwire::features::system::set_detach_handler(&request_detach);
 
         // The console has to exist BEFORE start(), so the banner and any warning
         // raised during start-up have somewhere to go.

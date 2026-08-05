@@ -12,6 +12,7 @@
 #include "chatwire/ansi.hpp"
 #include "chatwire/console.hpp"
 #include "chatwire/features/chat.hpp"
+#include "chatwire/features/system.hpp"
 #include "chatwire/sdk.hpp"
 #include "chatwire/ws/server.hpp"
 
@@ -212,6 +213,7 @@ namespace chatwire
         //     at the top of this file, and one registry::add here.  Explicit
         //     rather than self-registering — see features/chat.ixx for why.
         registry::add(features::chat::instance());
+        registry::add(features::system::instance());
 
         // 3. Deoptimise BOTH hook targets in one class-graph walk, before either
         //    hook is installed.  Doing it per-hook meant walking every loaded
@@ -268,6 +270,8 @@ namespace chatwire
         }
 
         detail::g_running.store(true, std::memory_order_release);
+
+        features::system::set_status_port(detail::server_instance().port());
 
         chatwire::console::banner(chatwire::version, detail::server_instance().port(),
                                   mapping::mode_name(mode));

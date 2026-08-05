@@ -71,6 +71,34 @@ namespace
                     chatwire::json::field("queued", true)));
             }
 
+            if (*cmd == "system.ping")
+            {
+                return reply(true, chatwire::json::object(
+                    chatwire::json::field("pong", true)));
+            }
+
+            if (*cmd == "system.status")
+            {
+                return reply(true, chatwire::json::object(
+                    chatwire::json::field("mapping", "mock (no game)") + ","
+                    + chatwire::json::field("port", std::int64_t{ 0 }) + ","
+                    + chatwire::json::field("queued", std::int64_t{ 0 }) + ","
+                    + chatwire::json::field("tasks_run", std::int64_t{ 0 }) + ","
+                    + chatwire::json::field("tasks_dropped", std::int64_t{ 0 }) + ","
+                    + chatwire::json::field("tasks_failed", std::int64_t{ 0 })));
+            }
+
+            if (*cmd == "system.detach")
+            {
+                // The mock has nothing to unload, but it must ANSWER the way the
+                // real thing does -- a consumer testing its detach path against
+                // this should see the same envelope.
+                std::printf("  \x1b[96m<- system.detach\x1b[0m (mock: nothing to unload)\n");
+                std::fflush(stdout);
+                return reply(true, chatwire::json::object(
+                    chatwire::json::field("detaching", true)));
+            }
+
             if (*cmd == "chat.stats")
             {
                 return reply(true, chatwire::json::object(

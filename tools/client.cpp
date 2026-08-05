@@ -12,7 +12,9 @@
 //   any text            -> chat.send   (goes to the SERVER, as if typed)
 //   /add <text>         -> chat.add    (CLIENT-side only, nobody else sees it)
 //   /stats              -> chat.stats
-//   /quit               -> disconnect
+//   /status             -> system.status
+//   /detach             -> system.detach  (UNLOADS chatwire from the game)
+//   /quit               -> disconnect (leaves chatwire running)
 //
 // The default is `send` rather than `add` because that is what a chat client
 // does when you type into it.  `add` is the deliberate one, so it gets a prefix.
@@ -395,7 +397,9 @@ int main(const int argc, char** const argv)
         return wait_before_exit(1);
     }
 
-    std::printf("\x1b[92mconnected.\x1b[0m  type to chat, /add for client-side, /quit to exit\n\n");
+    std::printf("\x1b[92mconnected.\x1b[0m  type to chat  \x1b[90m|\x1b[0m  "
+                "/add client-side  \x1b[90m|\x1b[0m  /status  \x1b[90m|\x1b[0m  "
+                "/detach unloads  \x1b[90m|\x1b[0m  /quit\n\n");
 
     std::thread reader{ &reader_thread };
 
@@ -410,6 +414,18 @@ int main(const int argc, char** const argv)
         else if (line == "/stats")
         {
             request = R"({"cmd":"chat.stats"})";
+        }
+        else if (line == "/status")
+        {
+            request = R"({"cmd":"system.status"})";
+        }
+        else if (line == "/detach")
+        {
+            // The connection will close as a consequence; that is the point, not
+            // a failure, so say so before it happens.
+            std::printf("  \x1b[93mrequesting detach - chatwire will unload and this\n"
+                        "  connection will close.\x1b[0m\n");
+            request = R"({"cmd":"system.detach"})";
         }
         else if (line.rfind("/add ", 0) == 0)
         {

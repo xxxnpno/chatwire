@@ -142,6 +142,16 @@ Every message is one flat JSON object. Commands are `feature.verb`.
 | `chat.send` | `text` (≤100 chars) | Sends to the server. A leading `/` runs a command. |
 | `chat.add` | `text` | Client-side only. Nobody else sees it. |
 | `chat.stats` | — | Counters: lines seen, messages sent, messages added. |
+| `system.status` | — | Mapping, bound port, and pump counters. |
+| `system.ping` | — | Liveness. |
+| `system.detach` | — | **Unloads chatwire from the game.** |
+
+`system.detach` replies *before* it acts, so you get the acknowledgement and then the
+connection closes — that is the detach working, not a failure.
+
+It cannot run on the requesting client's own thread: shutdown joins every client thread, so a
+detach handled inline would join itself and deadlock. It is handed to a separate thread that
+pauses long enough for the reply to be written, then unloads.
 
 **Every command gets a reply:**
 
