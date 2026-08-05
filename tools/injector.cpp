@@ -17,6 +17,8 @@
 // from — and LoadLibraryW is the one technique the loader itself performs, which
 // means the DLL gets a real module handle, real TLS, and a real DllMain.  Every
 // stealthier method gives up one of those and buys nothing here.
+#include "chatwire/config.hpp"
+
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -295,6 +297,8 @@ namespace
             "  chatwire-inject --pid <n>       inject into a specific process\n"
             "  chatwire-inject --dll <path>    inject a different DLL\n"
             "  chatwire-inject --port <n>      port for chatwire to listen on\n"
+            "  chatwire-inject --background    inject with no console window\n"
+            "  chatwire-inject --verbose       show chatwire's start-up trace\n"
             "\n"
             "The DLL defaults to chatwire.dll next to this executable.\n");
     }
@@ -306,6 +310,8 @@ int main(const int argc, char** const argv)
     DWORD        pid{ 0 };
     bool         list_only{ false };
     unsigned     port{ 0 };
+    bool         background{ false };
+    bool         verbose{ false };
 
     for (int i{ 1 }; i < argc; ++i)
     {
@@ -314,6 +320,8 @@ int main(const int argc, char** const argv)
 
         if (arg == "--help" || arg == "-h") { usage(); return 0; }
         else if (arg == "--list") { list_only = true; }
+        else if (arg == "--background") { background = true; }
+        else if (arg == "--verbose") { verbose = true; }
         else if (arg == "--pid")  { if (const char* v{ next() }) { pid = std::strtoul(v, nullptr, 10); } }
         else if (arg == "--port") { if (const char* v{ next() }) { port = std::strtoul(v, nullptr, 10); } }
         else if (arg == "--dll")
@@ -388,15 +396,31 @@ int main(const int argc, char** const argv)
         return 0;
     }
 
-    // The port is read by chatwire from its own environment at start-up, so it
-    // has to be set in the TARGET.  We cannot change another process's
-    // environment, so this only works when the injector started the game -- which
-    // it does not.  Report honestly rather than pretending.
-    if (port != 0u)
+    // Hand the settings over through a file beside the DLL.  The injector cannot
+    // change an already-running process's environment -- that is fixed when the
+    // process is created -- so a flag has to reach chatwire some other way.  The
+    // DLL reads this during start-up and DELETES it, so nothing is left behind
+    // to apply to a later injection.
     {
-        std::printf("\n  [note] --port cannot be applied to an already-running game:\n"
-                    "         chatwire reads CHATWIRE_PORT from the JVM's own environment.\n"
-                    "         Set it before launching Minecraft, then inject.\n");
+        chatwire::config::settings settings{};
+        settings.port    = static_cast<std::uint16_t>(port);
+        settings.console = !background;
+        settings.verbose = verbose;
+
+        const std::string cfg{ to_utf8(dll.substr(0, dll.find_last_of(L"\\/") + 1u))
+                               + "chatwire.cfg" };
+        if (!chatwire::config::write(cfg, settings))
+        {
+            std::printf("\n  [warn] could not write %s;\n"
+                        "         chatwire will start with its defaults.\n", cfg.c_str());
+        }
+        else
+        {
+            std::printf("  port  : %u%s%s\n",
+                        port != 0u ? port : 24455u,
+                        background ? "   (no console)" : "",
+                        verbose ? "   (verbose)" : "");
+        }
     }
 
     (void)enable_debug_privilege();

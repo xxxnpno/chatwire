@@ -327,6 +327,47 @@ namespace chatwire::sdk
     }
 
     /*
+        @brief Deoptimises every method chatwire hooks, in ONE pass.
+        @details
+        vmhook's deoptimize_methods_if walks EVERY loaded class.  On a modded
+        client that is tens of thousands of them, and it takes seconds -- doing
+        it once per hook meant the chat observer landed about five seconds after
+        the pump, which is exactly the gap that showed up in the logs.
+
+        One walk, one predicate covering both targets.
+
+        The deopt is necessary at all because both targets are hot: runTick is
+        the client's main loop and printChatMessage runs on every message, so
+        both are JIT-compiled long before anything injects.  A compiled dispatch
+        bypasses the i2i interpreter entry a vmhook detour patches, so without
+        this the hooks install successfully and simply never fire.  vmhook holds
+        NO_COMPILE on a hooked Method, so the route stays put once established.
+    */
+    inline auto deoptimize_hook_targets() noexcept -> void
+    {
+        namespace map = chatwire::mapping;
+        try
+        {
+            const std::string mc_class{ map::resolve(map::minecraft::clazz) };
+            const std::string tick{ map::resolve(map::minecraft::run_tick) };
+            const std::string chat_class{ map::resolve(map::gui_new_chat::clazz) };
+            const std::string print{ map::resolve(map::gui_new_chat::print_chat_message) };
+
+            (void)vmhook::deoptimize_methods_if(
+                [&](const std::string& class_name, vmhook::hotspot::method* m) -> bool
+                {
+                    if (!m) { return false; }
+                    if (class_name == mc_class && !tick.empty()
+                        && m->get_name() == tick) { return true; }
+                    if (class_name == chat_class && !print.empty()
+                        && m->get_name() == print) { return true; }
+                    return false;
+                });
+        }
+        catch (...) { }
+    }
+
+    /*
         @brief Hooks Minecraft.runTick so `on_tick` runs on the game thread.
         @details
         runTick is the hottest method in the client and certainly JIT-compiled,
@@ -346,11 +387,8 @@ namespace chatwire::sdk
 
             d::g_tick_callback.store(on_tick, std::memory_order_release);
 
-            (void)vmhook::deoptimize_methods_if(
-                [&class_name, &method](const std::string& cn, vmhook::hotspot::method* m)
-                {
-                    return cn == class_name && m && m->get_name() == method;
-                });
+            // No deopt here: deoptimize_hook_targets() did both targets in one
+            // pass before either hook was installed.
 
             auto handle{ vmhook::scoped_hook<d::pump_target>(
                 method, "()V",
@@ -388,11 +426,7 @@ namespace chatwire::sdk
 
             d::g_chat_callback.store(on_chat, std::memory_order_release);
 
-            (void)vmhook::deoptimize_methods_if(
-                [&class_name, &method](const std::string& cn, vmhook::hotspot::method* m)
-                {
-                    return cn == class_name && m && m->get_name() == method;
-                });
+            // Deopt already done -- see deoptimize_hook_targets().
 
             const std::string descriptor{ "(L" + component + ";)V" };
             auto handle{ vmhook::scoped_hook<d::gui_new_chat>(

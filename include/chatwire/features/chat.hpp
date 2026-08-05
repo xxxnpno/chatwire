@@ -49,6 +49,12 @@ namespace chatwire::features
     using chat_sink = void (*)(std::string_view json_line) noexcept;
 
     inline std::atomic<chat_sink> g_sink{ nullptr };
+
+    /* The console sink is SEPARATE from the broadcast sink on purpose: watching
+       chat in the console is a use on its own, and it must keep working when
+       nothing is connected to the socket. */
+    using console_sink = void (*)(std::string_view formatted) noexcept;
+    inline std::atomic<console_sink> g_console_sink{ nullptr };
     inline std::atomic<std::uint64_t> g_lines_seen{ 0 };
     inline std::atomic<std::uint64_t> g_sent{ 0 };
     inline std::atomic<std::uint64_t> g_added{ 0 };
@@ -153,12 +159,19 @@ namespace chatwire::features
             {
                 g_lines_seen.fetch_add(1, std::memory_order_relaxed);
 
-                const chat_sink sink{ g_sink.load(std::memory_order_acquire) };
-                if (!sink) { return; }              // nobody listening; do no work
+                const chat_sink    sink{ g_sink.load(std::memory_order_acquire) };
+                const console_sink console{ g_console_sink.load(std::memory_order_acquire) };
+                if (!sink && !console) { return; }   // nobody watching; do no work
 
                 const std::string_view formatted_view{ formatted ? formatted : "" };
                 const std::string_view plain_view{ plain ? plain : "" };
                 if (formatted_view.empty() && plain_view.empty()) { return; }
+
+                if (console)
+                {
+                    console(formatted_view.empty() ? plain_view : formatted_view);
+                }
+                if (!sink) { return; }
 
                 const std::string payload{ chatwire::json::object(
                     chatwire::json::field("type", "chat") + ","
@@ -216,6 +229,12 @@ namespace chatwire::features::chat
     inline auto set_sink(const chatwire::features::chat_sink sink) noexcept -> void
     {
         chatwire::features::g_sink.store(sink, std::memory_order_release);
+    }
+
+    /* @brief Installs the sink that shows chat in chatwire's own console. */
+    inline auto set_console_sink(const chatwire::features::console_sink sink) noexcept -> void
+    {
+        chatwire::features::g_console_sink.store(sink, std::memory_order_release);
     }
 
     /*

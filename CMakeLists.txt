@@ -109,8 +109,11 @@ endif()
 # Tools.
 # ---------------------------------------------------------------------------
 if(CHATWIRE_BUILD_TOOLS)
-    # The injector talks to the OS, not to chatwire, so it links nothing of ours.
+    # The injector talks to the OS, not to chatwire -- but it does share the
+    # config format, so it needs the include path (header-only, no link).
     add_executable(chatwire-inject tools/injector.cpp)
+    target_include_directories(chatwire-inject PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include")
     chatwire_apply_warnings(chatwire-inject)
 
     # The mock serves chatwire's protocol with synthetic chat, so a consumer can

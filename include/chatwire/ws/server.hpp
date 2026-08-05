@@ -112,6 +112,15 @@ namespace chatwire::ws
     */
     using message_handler = std::string (*)(std::string_view request) noexcept;
 
+    /*
+        @brief Called when a client connects or disconnects, with the new total.
+        @details
+        Runs on that client's own thread, so it must not block.  chatwire uses it
+        to announce the connection in the player's chat, which means it reaches
+        the game the same way everything else does -- through the pump.
+    */
+    using presence_handler = void (*)(bool connected, std::size_t total) noexcept;
+
     class server
     {
     public:
@@ -130,11 +139,13 @@ namespace chatwire::ws
                     caller reports it and keeps running (chat hooks still work,
                     there is simply nothing to talk to).
         */
-        [[nodiscard]] auto start(const std::uint16_t port, const message_handler handler) noexcept
+        [[nodiscard]] auto start(const std::uint16_t port, const message_handler handler,
+                                 const presence_handler on_presence = nullptr) noexcept
             -> bool
         {
             if (this->running_.load(std::memory_order_acquire)) { return true; }
-            this->handler_ = handler;
+            this->handler_  = handler;
+            this->presence_ = on_presence;
 
             WSADATA wsa{};
             if (::WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
@@ -445,6 +456,7 @@ namespace chatwire::ws
                 return;
             }
             chatwire::log::info("client connected ({} total)", this->client_count());
+            if (this->presence_) { this->presence_(true, this->client_count()); }
 
             std::vector<std::uint8_t> buffer;
             std::string               fragment;      // reassembled fragmented text
@@ -489,6 +501,7 @@ namespace chatwire::ws
 
             this->drop(c);
             chatwire::log::info("client disconnected ({} remain)", this->client_count());
+            if (this->presence_) { this->presence_(false, this->client_count()); }
         }
 
         /* @return false to close the connection. */
@@ -623,6 +636,7 @@ namespace chatwire::ws
         bool                            wsa_started_{ false };
         std::atomic<bool>               running_{ false };
         message_handler                 handler_{ nullptr };
+        presence_handler                presence_{ nullptr };
         std::thread                     accept_thread_{};
         mutable std::mutex              clients_mutex_{};
         std::vector<detail::client_ptr> clients_{};

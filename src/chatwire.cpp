@@ -9,6 +9,8 @@
 // The startup ORDER is not arbitrary -- see the header of chatwire/chatwire.hpp.
 #include "chatwire/chatwire.hpp"
 
+#include "chatwire/ansi.hpp"
+#include "chatwire/console.hpp"
 #include "chatwire/features/chat.hpp"
 #include "chatwire/sdk.hpp"
 #include "chatwire/ws/server.hpp"
@@ -43,6 +45,63 @@ namespace chatwire::detail
     inline auto broadcast_line(const std::string_view json_line) noexcept -> void
     {
         server_instance().broadcast(json_line);
+    }
+
+    /*
+        @brief Shows one chat line in chatwire's own console.
+        @details
+        Separate from the broadcast so the console keeps working when nothing is
+        connected -- watching chat scroll past is a use on its own, not just a
+        debugging aid for the socket.
+    */
+    inline auto console_line(const std::string_view formatted) noexcept -> void
+    {
+        chatwire::console::chat_line(formatted);
+    }
+
+    /*
+        @brief Says something in the player's own chat box.
+        @details
+        Client-side only (addChatMessage), so nothing is transmitted and no
+        server sees it.  Queued onto the pump because it has to run on the game
+        thread, and skipped entirely when the player is not in a world -- there
+        is no chat box on the title screen, and the message would be lost rather
+        than delayed.
+
+        Prefixed so it is obviously chatwire talking and not another player.
+    */
+    inline auto notify_in_game(std::string text) noexcept -> void
+    {
+        (void)pump::submit([message = std::move(text)]() noexcept
+        {
+            if (!sdk::in_world()) { return; }
+            (void)sdk::add_chat("Â§""8[Â§""bchatwireÂ§""8] Â§""7" + message);
+        });
+    }
+
+    /*
+        @brief Announces a client connecting or disconnecting.
+        @details
+        Both in the console and in the player's own chat, because the person
+        playing is the one who wants to know that something just attached to
+        their game.
+    */
+    inline auto on_presence(const bool connected, const std::size_t total) noexcept -> void
+    {
+        try
+        {
+            if (connected)
+            {
+                chatwire::console::event(std::format("client connected ({} total)", total));
+                notify_in_game(std::format("a client connected ({} total)", total));
+            }
+            else
+            {
+                chatwire::console::event(std::format("client disconnected ({} left)", total));
+                notify_in_game(std::format("a client disconnected ({} left)", total));
+            }
+        }
+        catch (...) { }
     }
 
     /*
@@ -154,7 +213,12 @@ namespace chatwire
         //     rather than self-registering — see features/chat.ixx for why.
         registry::add(features::chat::instance());
 
-        // 3. The pump.  Everything after this needs a way onto the game thread.
+        // 3. Deoptimise BOTH hook targets in one class-graph walk, before either
+        //    hook is installed.  Doing it per-hook meant walking every loaded
+        //    class twice, which on a modded client is seconds each time.
+        sdk::deoptimize_hook_targets();
+
+        // 4. The pump.  Everything after this needs a way onto the game thread.
         pump::reopen();
         if (!sdk::install_pump(&pump::drain))
         {
@@ -163,7 +227,7 @@ namespace chatwire
             return false;
         }
 
-        // 4. Features, on the game thread.  Hooking resolves klasses, which has
+        // 5. Features, on the game thread.  Hooking resolves klasses, which has
         //    the same thread requirements as any other JVM work.
         {
             std::atomic<bool> done{ false };
@@ -191,9 +255,10 @@ namespace chatwire
             }
         }
 
-        // 5. The server, last, so an instant client finds a working API.
+        // 6. The server, last, so an instant client finds a working API.
         features::chat::set_sink(&detail::broadcast_line);
-        if (!detail::server_instance().start(bind_port, &detail::dispatch))
+        features::chat::set_console_sink(&detail::console_line);
+        if (!detail::server_instance().start(bind_port, &detail::dispatch, &detail::on_presence))
         {
             log::error("websocket server failed to start; shutting down");
             (void)pump::submit([]() noexcept { registry::stop_all(); });
@@ -203,7 +268,11 @@ namespace chatwire
         }
 
         detail::g_running.store(true, std::memory_order_release);
-        log::info("chatwire ready on ws://127.0.0.1:{}", detail::server_instance().port());
+
+        chatwire::console::banner(chatwire::version, detail::server_instance().port(),
+                                  mapping::mode_name(mode));
+        detail::notify_in_game("connected - listening on 127.0.0.1:"
+                               + std::to_string(detail::server_instance().port()));
         return true;
     }
 
@@ -225,8 +294,23 @@ namespace chatwire
 
         log::info("chatwire stopping");
 
+        // Say goodbye while the hooks are still up -- afterwards there is no way
+        // onto the game thread to say anything at all.  Bounded wait: if the
+        // game is not ticking, shutdown must not hang on a courtesy message.
+        detail::notify_in_game("detaching - goodbye");
+        {
+            const auto deadline{ std::chrono::steady_clock::now()
+                                 + std::chrono::milliseconds{ 500 } };
+            while (pump::snapshot().pending > 0u
+                   && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds{ 25 });
+            }
+        }
+
         detail::server_instance().stop();
         features::chat::set_sink(nullptr);
+        features::chat::set_console_sink(nullptr);
 
         {
             std::atomic<bool> done{ false };
