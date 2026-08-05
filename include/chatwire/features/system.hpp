@@ -83,29 +83,27 @@ namespace chatwire::features
                             "this build has no detach handler installed");
                     }
 
-                    // The reply has to reach the client BEFORE the server that
-                    // would deliver it is torn down, and the teardown cannot run
-                    // on THIS thread at all: chatwire::stop() joins every client
-                    // thread, and the thread asking to detach is one of them --
-                    // it would join itself and deadlock.
+                    // The teardown cannot run on THIS thread: chatwire::stop()
+                    // joins every client thread, and the thread asking to detach
+                    // is one of them -- it would join itself and deadlock.  So
+                    // the handler starts a thread of its own and returns at once.
                     //
-                    // So: hand the request to a detached thread that pauses long
-                    // enough for this response to be written, then unloads.  The
-                    // pause is generous rather than precise; there is nothing
-                    // waiting on it.
-                    try
-                    {
-                        std::thread{ [request]() noexcept
-                        {
-                            std::this_thread::sleep_for(std::chrono::milliseconds{ 300 });
-                            request();
-                        } }.detach();
-                    }
-                    catch (...)
-                    {
-                        return chatwire::response::failure(
-                            "could not start the detach thread");
-                    }
+                    // What it must NOT do is start a thread HERE that outlives
+                    // the call.  The unload ends in FreeLibraryAndExitThread,
+                    // which makes the unload safe for the thread CALLING it and
+                    // for no other: any thread still executing code in this
+                    // module when it runs -- a lambda body, std::thread's
+                    // trampoline, the CRT's thread-exit path, all of which live
+                    // in the DLL -- is running on freed pages, and dies at some
+                    // unpredictable later moment.  An earlier version spawned a
+                    // detached std::thread here that slept and then called
+                    // request(); it crashed the game minutes after a detach that
+                    // had appeared to work.
+                    //
+                    // The delay that lets this reply reach the client now lives
+                    // at the top of the detach worker instead, where the thread
+                    // waiting it out is the same one that unloads.
+                    request();
 
                     chatwire::log::warn("detach requested over the websocket");
                     return chatwire::response::success(chatwire::json::object(

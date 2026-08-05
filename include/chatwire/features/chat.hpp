@@ -12,14 +12,17 @@
 //
 // CLIENTS -> GAME.  Two verbs:
 //
-//   chat.send   -> EntityPlayerSP.sendChatMessage(String)
+//   chat.sendChatMessage -> EntityPlayerSP.sendChatMessage(String)
 //                  Goes to the SERVER, exactly as if typed.  A leading '/' runs
 //                  a command.  Other players see it.
-//   chat.add    -> EntityPlayerSP.addChatMessage(IChatComponent)
+//   chat.addChatMessage  -> EntityPlayerSP.addChatMessage(IChatComponent)
 //                  CLIENT-side only.  Never transmitted.  Nobody else sees it.
 //
 // The distinction is the single most important thing about this API and the
-// easiest to get wrong, so the two are separate verbs rather than a flag.
+// easiest to get wrong, so the two are separate verbs rather than a flag -- and
+// the verbs carry the game's own method names, so that a reader who knows
+// Minecraft's source needs no explanation and one who does not can go and read
+// it.  `chat.send` and `chat.add` remain as aliases for the earlier spelling.
 //
 // ===========================================================================
 // THREADING
@@ -90,7 +93,16 @@ namespace chatwire::features
         {
             try
             {
-                if (cmd.verb == "send" || cmd.verb == "add")
+                // The verbs are named after the Minecraft methods they reach:
+                // EntityPlayerSP.sendChatMessage and EntityPlayerSP.addChatMessage.
+                // Anyone who has read the game's source already knows what these
+                // do and, more usefully, knows the difference between them --
+                // which "send" and "add" leave you guessing at.  The short forms
+                // still work, because they are what the first clients were
+                // written against.
+                const bool send{ cmd.verb == "sendChatMessage" || cmd.verb == "send" };
+                const bool add{ cmd.verb == "addChatMessage" || cmd.verb == "add" };
+                if (send || add)
                 {
                     auto text{ chatwire::json::get_string(cmd.body, "text") };
                     if (!text)
@@ -104,13 +116,13 @@ namespace chatwire::features
                     // Minecraft 1.8.9 refuses chat longer than 100 characters and
                     // kicks the player for trying, so refusing here is friendlier
                     // than letting the server do it.
-                    if (cmd.verb == "send" && text->size() > 100u)
+                    if (send && text->size() > 100u)
                     {
                         return chatwire::response::failure(
                             "'text' exceeds the 100-character chat limit");
                     }
 
-                    const bool to_server{ cmd.verb == "send" };
+                    const bool to_server{ send };
                     const bool queued{ chatwire::pump::submit(
                         [message = *std::move(text), to_server]() noexcept
                         {
@@ -137,7 +149,8 @@ namespace chatwire::features
                             static_cast<std::int64_t>(g_added.load(std::memory_order_relaxed)))));
                 }
 
-                return chatwire::response::failure("unknown verb; try send, add or stats");
+                return chatwire::response::failure(
+                    "unknown verb; try sendChatMessage, addChatMessage or stats");
             }
             catch (...)
             {
@@ -173,8 +186,10 @@ namespace chatwire::features
                 }
                 if (!sink) { return; }
 
+                // Named for the method it comes out of, GuiNewChat.printChatMessage,
+                // so the event and the source agree.
                 const std::string payload{ chatwire::json::object(
-                    chatwire::json::field("type", "chat") + ","
+                    chatwire::json::field("type", "printChatMessage") + ","
                     + chatwire::json::field("formatted", formatted_view) + ","
                     + chatwire::json::field("plain", plain_view)) };
 

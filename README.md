@@ -21,11 +21,48 @@ modded one.
 | Direction | What |
 |---|---|
 | **game → you** | every line that reaches the chat box, with and without colour codes |
-| **you → game** | `chat.send` — say it to the server, exactly as if typed |
-| **you → game** | `chat.add` — show it only to this client, never transmitted |
+| **you → game** | `chat.sendChatMessage` — say it to the server, exactly as if typed |
+| **you → game** | `chat.addChatMessage` — show it only to this client, never transmitted |
 
 Chat is the first feature, not the only one. The architecture is built around adding more —
 see [Adding a feature](#adding-a-feature).
+
+## chatwire is not a proxy
+
+The usual way to automate Minecraft chat is a proxy — [prismarine](https://prismarinejs.github.io/)
+/ `node-minecraft-protocol`, or a plugin on the server. Those speak the **network protocol**.
+chatwire runs **inside the game client**, and the difference is not a matter of taste.
+
+|  | proxy / protocol library | chatwire |
+|---|---|---|
+| Where it sits | between client and server, or on the server | inside the running client's JVM |
+| What it sees | packets on the wire | what the player sees on screen |
+| Client-only chat | invisible — it never crossed the network | visible |
+| Needs the real game running | no (a proxy works headless) | yes |
+| Server can tell | a proxy is a second connection | nothing on the wire changes |
+| Versions | many, via protocol definitions | 1.8.9, Windows, HotSpot |
+| Language | usually JS/Python | anything that speaks WebSocket |
+
+The line that matters is the third one. A proxy can only ever see what was **transmitted**.
+A large share of what appears in a Minecraft chat box was never transmitted at all: mod output,
+client-side command replies, `[CHAT]` lines a mod drew itself, warnings the client generated.
+Those are `addChatMessage` calls that begin and end inside the client, and no proxy — however
+well written — can observe them, because there is nothing to observe.
+
+chatwire hooks the method that **renders** chat, so it sees the rendered truth: everything from
+the network *and* everything generated locally, in the order the player actually saw it, with the
+colour codes intact.
+
+The trade runs both ways, and honestly:
+
+- **Use a proxy** for headless bots, multi-version support, anything that must run without a
+  game window, or anything where you would rather not touch the client's memory.
+- **Use chatwire** when you care what the *player* saw, when you need client-side-only messages,
+  when you want to inject chat that only the local player sees, or when you are working with a
+  client (Lunar, Forge, a private mod) whose behaviour is not visible on the wire.
+
+They also compose: nothing stops a proxy and chatwire running at once, and they answer different
+questions.
 
 ## All three mappings
 
@@ -111,14 +148,14 @@ const ws = new WebSocket("ws://127.0.0.1:24455");
 
 ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
-    if (msg.type === "chat") console.log(msg.plain);   // every line in chat
+    if (msg.type === "printChatMessage") console.log(msg.plain);   // every line in chat
 };
 
 // say it to the server, as if typed
-ws.send(JSON.stringify({ cmd: "chat.send", text: "hello world" }));
+ws.send(JSON.stringify({ cmd: "chat.sendChatMessage", text: "hello world" }));
 
 // show it only to me
-ws.send(JSON.stringify({ cmd: "chat.add", text: "§athis is client-side only" }));
+ws.send(JSON.stringify({ cmd: "chat.addChatMessage", text: "§athis is client-side only" }));
 ```
 
 The port is `24455` by default, or set `CHATWIRE_PORT` in the game's environment.
@@ -130,28 +167,39 @@ Every message is one flat JSON object. Commands are `feature.verb`.
 **Pushed to you, unprompted:**
 
 ```json
-{"type":"chat","formatted":"§b[Team] §fhi","plain":"[Team] hi"}
+{"type":"printChatMessage","formatted":"§b[Team] §fhi","plain":"[Team] hi"}
 ```
 
 `formatted` keeps the `§` colour codes; `plain` has them stripped. Use whichever suits.
 
 **Sent by you:**
 
-| Command | Arguments | Effect |
-|---|---|---|
-| `chat.send` | `text` (≤100 chars) | Sends to the server. A leading `/` runs a command. |
-| `chat.add` | `text` | Client-side only. Nobody else sees it. |
-| `chat.stats` | — | Counters: lines seen, messages sent, messages added. |
-| `system.status` | — | Mapping, bound port, and pump counters. |
-| `system.ping` | — | Liveness. |
-| `system.detach` | — | **Unloads chatwire from the game.** |
+| Command | Arguments | Effect | Minecraft method |
+|---|---|---|---|
+| `chat.sendChatMessage` | `text` (≤100 chars) | Sends to the server. A leading `/` runs a command. | `EntityPlayerSP.sendChatMessage(String)` |
+| `chat.addChatMessage` | `text` | Client-side only. Nobody else sees it. | `EntityPlayerSP.addChatMessage(IChatComponent)` |
+| `chat.stats` | — | Counters: lines seen, messages sent, messages added. | — |
+| `system.status` | — | Mapping, bound port, and pump counters. | — |
+| `system.ping` | — | Liveness. | — |
+| `system.detach` | — | **Unloads chatwire from the game.** | — |
+
+The chat verbs are named after the methods they call, and the pushed event after the method it
+comes out of (`GuiNewChat.printChatMessage`). If you have read Minecraft's source, you already
+know what each one does — and, more usefully, you know the difference between the two. The older
+short spellings `chat.send`, `chat.add` and `type: "chat"` still work.
 
 `system.detach` replies *before* it acts, so you get the acknowledgement and then the
 connection closes — that is the detach working, not a failure.
 
 It cannot run on the requesting client's own thread: shutdown joins every client thread, so a
-detach handled inline would join itself and deadlock. It is handed to a separate thread that
-pauses long enough for the reply to be written, then unloads.
+detach handled inline would join itself and deadlock. It is handed to a thread of its own, which
+waits long enough for the reply to be written, stops chatwire, and unloads.
+
+That single thread does all of it deliberately. Unloading ends in `FreeLibraryAndExitThread`,
+which makes the unload safe for **the thread that calls it and no other** — any other thread
+still executing code in the DLL when it runs is left on freed pages and dies at some
+unpredictable later moment. So the detach path spawns exactly one thread and that thread is the
+one that unloads; nothing is left behind mid-call.
 
 **Every command gets a reply:**
 
@@ -160,17 +208,17 @@ pauses long enough for the reply to be written, then unloads.
 {"ok":false,"error":"'text' exceeds the 100-character chat limit"}
 ```
 
-`chat.send` and `chat.add` are **asynchronous**: `queued: true` means the message reached the
+`chat.sendChatMessage` and `chat.addChatMessage` are **asynchronous**: `queued: true` means the message reached the
 game thread's queue, not that Minecraft has processed it. It runs on the next client tick.
 
-### send vs add
+### sendChatMessage vs addChatMessage
 
 This is the most important distinction in the API and the easiest to get wrong, which is why
 they are separate verbs rather than a flag:
 
-- **`chat.send`** goes to the server. Other players see it. `/` commands execute. You are
+- **`sendChatMessage`** goes to the server. Other players see it. `/` commands execute. You are
   talking.
-- **`chat.add`** only draws in your own chat box. Nothing is transmitted. You are annotating.
+- **`addChatMessage`** only draws in your own chat box. Nothing is transmitted. You are annotating.
 
 ## Design
 

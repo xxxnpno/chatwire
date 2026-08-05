@@ -109,6 +109,14 @@ namespace
     */
     auto WINAPI detach_worker(LPVOID) noexcept -> DWORD
     {
+        // A moment first, so a `system.detach` reply still has a live server to
+        // travel over.  The wait lives HERE, on the thread that will do the
+        // unloading, rather than on the websocket thread that asked for it: this
+        // thread ends in FreeLibraryAndExitThread and so may safely be inside
+        // chatwire's code when the module goes; a thread that merely called us
+        // and then had to return through it may not.
+        ::Sleep(300u);
+
         chatwire::stop();
         chatwire::console::release();
         g_started.store(false, std::memory_order_release);

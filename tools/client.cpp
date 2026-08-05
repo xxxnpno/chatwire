@@ -9,8 +9,8 @@
 //   chatwire-client --raw            print the raw JSON instead of the text
 //
 // AT THE PROMPT
-//   any text            -> chat.send   (goes to the SERVER, as if typed)
-//   /add <text>         -> chat.add    (CLIENT-side only, nobody else sees it)
+//   any text            -> chat.sendChatMessage  (to the SERVER, as if typed)
+//   /add <text>         -> chat.addChatMessage   (CLIENT-side only)
 //   /stats              -> chat.stats
 //   /status             -> system.status
 //   /detach             -> system.detach  (UNLOADS chatwire from the game)
@@ -252,7 +252,10 @@ namespace
             }
 
             const std::string type{ json_string(payload, "type") };
-            if (type == "chat")
+            // "chat" was the event's name before it was renamed after the method
+            // it comes from; still accepted so a new client can talk to a DLL
+            // someone has not got round to replacing.
+            if (type == "printChatMessage" || type == "chat")
             {
                 const std::string formatted{ json_string(payload, "formatted") };
                 const std::string plain{ json_string(payload, "plain") };
@@ -429,11 +432,13 @@ int main(const int argc, char** const argv)
         }
         else if (line.rfind("/add ", 0) == 0)
         {
-            request = R"({"cmd":"chat.add","text":")" + json_escape(line.substr(5)) + R"("})";
+            request = R"({"cmd":"chat.addChatMessage","text":")"
+                      + json_escape(line.substr(5)) + R"("})";
         }
         else
         {
-            request = R"({"cmd":"chat.send","text":")" + json_escape(line) + R"("})";
+            request = R"({"cmd":"chat.sendChatMessage","text":")"
+                      + json_escape(line) + R"("})";
         }
 
         if (!send_text(g_sock, request))

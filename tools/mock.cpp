@@ -55,12 +55,14 @@ namespace
             const auto cmd{ chatwire::json::get_string(request, "cmd") };
             if (!cmd) { return reply(false, "missing or non-string 'cmd'"); }
 
-            if (*cmd == "chat.send" || *cmd == "chat.add")
+            const bool send{ *cmd == "chat.sendChatMessage" || *cmd == "chat.send" };
+            const bool add{ *cmd == "chat.addChatMessage" || *cmd == "chat.add" };
+            if (send || add)
             {
                 const auto text{ chatwire::json::get_string(request, "text") };
                 if (!text)         { return reply(false, "missing or non-string 'text'"); }
                 if (text->empty()) { return reply(false, "'text' is empty"); }
-                if (*cmd == "chat.send" && text->size() > 100u)
+                if (send && text->size() > 100u)
                 {
                     return reply(false, "'text' exceeds the 100-character chat limit");
                 }
@@ -209,7 +211,7 @@ int main(const int argc, char** const argv)
         const std::string plain{ strip(formatted) };
 
         server.broadcast(chatwire::json::object(
-            chatwire::json::field("type", "chat") + ","
+            chatwire::json::field("type", "printChatMessage") + ","
             + chatwire::json::field("formatted", formatted) + ","
             + chatwire::json::field("plain", plain)));
 
