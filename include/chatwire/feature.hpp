@@ -13,13 +13,15 @@
 //
 // So a feature is a self-contained object that declares:
 //
-//     name()      what its commands are namespaced under  ("chat")
+//     name()      what it is called in the log  ("chat")
+//     claims()    which command prefixes it answers to
 //     start()     install hooks, resolve mappings
 //     stop()      take them down
 //     handle()    respond to one client command
 //
 // and registers itself with one line at namespace scope.  The server discovers
-// it, routes `chat.send` to it, and nothing else in the project knows it exists.
+// it, routes `net.minecraft.client.entity.EntityPlayerSP.sendChatMessage` to it,
+// and nothing else in the project knows it exists.
 //
 // A second feature is literally: new module, implement the interface, register.
 //
@@ -51,8 +53,9 @@ namespace chatwire
     /*
         @brief One command from a client, already parsed.
         @details
-        `verb` is the part after the feature name: a client sending
-        `{"cmd":"chat.send", ...}` reaches the "chat" feature with verb "send".
+        `verb` is the part after the LAST dot: a client sending
+        `{"cmd":"net.minecraft.world.World.playerEntities"}` reaches the feature
+        that claims `net.minecraft.world.World`, with verb "playerEntities".
         Splitting here rather than in each feature keeps the namespacing rule in
         one place.
     */
@@ -107,17 +110,25 @@ namespace chatwire
         feature(feature&&)                         = delete;
         auto operator=(feature&&) -> feature&      = delete;
 
-        /* @brief The command namespace, e.g. "chat" for `chat.send`. */
+        /*
+            @brief What this feature is called, for the log and for diagnostics.
+            @details
+            NOT necessarily a command prefix.  "chat" names the chat feature
+            everywhere a human reads about it, and is not a command: `chat.*`
+            was withdrawn so that every command names the Java member it
+            reaches.  What a feature answers to is claims(), below.
+        */
         [[nodiscard]] virtual auto name() const noexcept -> std::string_view = 0;
 
         /*
             @brief Whether this feature answers to `prefix`.
             @details
-            Defaults to "my name and nothing else".  Overriding it lets one
-            feature answer to several spellings -- which is how the Minecraft
-            classes reach the protocol: `chat.addChatMessage` and
-            `net.minecraft.client.entity.EntityPlayerSP.addChatMessage` are the
-            same command, one short and one that says exactly what it calls.
+            Defaults to "my name and nothing else", which is right for a feature
+            that reaches nothing in the game and therefore has no Java name to
+            take -- `system` is the only one.  Every feature that DOES call into
+            Minecraft overrides this to claim the classes it calls, one per
+            class, so a command is the fully-qualified member and a reader can
+            check it against the game's source.
 
             A prefix is matched WHOLE.  Commands split at the LAST dot, so the
             prefix is everything before the verb and may itself contain dots.

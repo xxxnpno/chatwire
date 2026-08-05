@@ -1,0 +1,133 @@
+#!/usr/bin/env sh
+# chatwire-preload — start a game with chatwire already inside it.
+#
+# This is the Linux and macOS counterpart to chatwire-inject, and it is
+# deliberately a different shape, because the platforms are.
+#
+# chatwire-inject attaches to a game that is ALREADY RUNNING: on Windows that is
+# CreateRemoteThread plus LoadLibrary, which is a documented, supported thing to
+# do to another process.  There is no equivalent here that is worth shipping:
+#
+#   Linux    needs ptrace, which means either running as root or a system where
+#            /proc/sys/kernel/yama/ptrace_scope has been turned down, and then
+#            hand-written per-architecture code to hijack a thread into calling
+#            dlopen.  It is possible.  It is also a debugger attaching to a
+#            game, with the failure mode of a corrupted process.
+#   macOS    needs task_for_pid, which a hardened-runtime binary refuses no
+#            matter who is asking.  Every JVM a person actually plays Minecraft
+#            on is signed that way.  Root does not help; only turning SIP off
+#            does, and nobody should turn SIP off to read chat.
+#
+# So chatwire goes in at launch instead, through the dynamic loader itself.  The
+# library's initialiser starts it and then WAITS for Minecraft's classes to show
+# up (see src/soload.cpp), so being present before the JVM exists is fine -- it
+# is the case it was written for.
+#
+# USAGE
+#   chatwire-preload [--port N] [--console] [--verbose] [--timeout SECONDS] \
+#                    -- <command to launch the game>
+#
+# EXAMPLES
+#   chatwire-preload -- java -jar launcher.jar
+#   chatwire-preload --port 9000 --console -- ./minecraft-launcher
+#
+# The settings are passed through the environment rather than through a file,
+# which is the one thing that is EASIER here: unlike an injector, this program
+# creates the process, so it can set its environment.
+set -eu
+
+port=""
+console=""
+verbose=""
+timeout=""
+
+usage() {
+    cat >&2 <<'EOF'
+chatwire-preload [options] -- <command...>
+
+  --port N          port to serve on (default 24455)
+  --console         print chat to the game's own stdout (default: off)
+  --verbose         show the start-up trace as well as chat
+  --timeout N       seconds to wait for Minecraft's classes (default 120)
+  -h, --help        this
+
+Everything after -- is the command that starts the game, run with chatwire
+preloaded into it.
+EOF
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --port)    [ $# -ge 2 ] || usage; port="$2";    shift 2 ;;
+        --timeout) [ $# -ge 2 ] || usage; timeout="$2"; shift 2 ;;
+        --console) console=1; shift ;;
+        --verbose) verbose=1; shift ;;
+        -h|--help) usage ;;
+        --)        shift; break ;;
+        *)         printf '%s: unknown option: %s\n' "$0" "$1" >&2; usage ;;
+    esac
+done
+
+[ $# -gt 0 ] || usage
+
+# The library sits beside this script in a build tree and beside it in an
+# install tree, so "next to me" is the answer in both.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+case "$(uname -s)" in
+    Darwin)
+        library="$here/chatwire.dylib"
+        # DYLD_INSERT_LIBRARIES, and the caveat that goes with it: dyld strips
+        # every DYLD_* variable when it execs a binary with the hardened runtime
+        # or a restricted entitlement.  A JDK you unpacked yourself is fine; the
+        # java inside a signed launcher bundle is not, and the symptom is
+        # chatwire simply never appearing with no error anywhere.
+        preload_var="DYLD_INSERT_LIBRARIES"
+        ;;
+    *)
+        library="$here/chatwire.so"
+        preload_var="LD_PRELOAD"
+        ;;
+esac
+
+if [ ! -f "$library" ]; then
+    printf '%s: cannot find %s\n' "$0" "$library" >&2
+    printf '  Build it first:  cmake --build build\n' >&2
+    exit 1
+fi
+
+# Appended rather than assigned: a user may already be preloading something
+# else, and silently dropping it would be a rude thing for this to do.  The eval
+# is how POSIX sh reads a variable whose NAME is in another variable; ${!x} is a
+# bashism and this script runs under whatever /bin/sh happens to be.
+existing=$(eval "printf '%s' \"\${$preload_var:-}\"")
+if [ -n "$existing" ]; then
+    new="$existing:$library"
+else
+    new="$library"
+fi
+
+# Written as `if`, not as `[ ... ] && ...`.  Under `set -e` a bare false
+# && -list at the top level exits the script, so the short form would have made
+# "no --port given" a silent early exit -- which is exactly the sort of thing
+# that works in every test you write and fails for the first real user.
+if [ -n "$port" ];    then export CHATWIRE_PORT="$port"; fi
+if [ -n "$timeout" ]; then export CHATWIRE_TIMEOUT="$timeout"; fi
+if [ -n "$verbose" ]; then export CHATWIRE_VERBOSE=1; fi
+# The console is opt-in, matching chatwire-inject's default: chatwire's
+# interface is the websocket, and printing into the game's own stdout tangles
+# chatwire's output with the launcher's.
+if [ -n "$console" ]; then
+    export CHATWIRE_CONSOLE=1
+else
+    export CHATWIRE_BACKGROUND=1
+fi
+
+export "$preload_var=$new"
+
+printf 'chatwire: preloading %s\n' "$library" >&2
+printf 'chatwire: connect to ws://127.0.0.1:%s once the game is in a world\n' \
+       "${port:-24455}" >&2
+
+exec "$@"

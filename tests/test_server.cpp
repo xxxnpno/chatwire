@@ -14,8 +14,7 @@
 #include "chatwire/ws/server.hpp"
 #include "chatwire/ws/websocket.hpp"
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include "chatwire/net.hpp"
 
 #include <cstdio>
 
@@ -49,7 +48,8 @@ namespace
         [[nodiscard]] auto connect(const std::uint16_t port) -> bool
         {
             sock_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-            if (sock_ == INVALID_SOCKET) { return false; }
+            if (sock_ == chatwire::net::invalid_socket) { return false; }
+            chatwire::net::prepare(sock_);
 
             sockaddr_in addr{};
             addr.sin_family      = AF_INET;
@@ -69,16 +69,14 @@ namespace
                 "Connection: Upgrade\r\n"
                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
                 "Sec-WebSocket-Version: 13\r\n\r\n" };
-            if (::send(sock_, request.data(), static_cast<int>(request.size()), 0) <= 0)
-            {
-                return false;
-            }
+            if (!write_all(request.data(), request.size())) { return false; }
 
             std::string response;
             char        chunk[1024]{};
             while (response.find("\r\n\r\n") == std::string::npos)
             {
-                const int n{ ::recv(sock_, chunk, sizeof(chunk), 0) };
+                const std::ptrdiff_t n{ chatwire::net::recv_some(sock_, chunk,
+                                                                 sizeof(chunk)) };
                 if (n <= 0) { return false; }
                 response.append(chunk, static_cast<std::size_t>(n));
                 if (response.size() > 8192u) { return false; }
@@ -126,16 +124,7 @@ namespace
                 frame.push_back(static_cast<std::uint8_t>(payload[i]) ^ mask[i % 4u]);
             }
 
-            std::size_t sent{ 0 };
-            while (sent < frame.size())
-            {
-                const int written{ ::send(sock_,
-                                          reinterpret_cast<const char*>(frame.data() + sent),
-                                          static_cast<int>(frame.size() - sent), 0) };
-                if (written <= 0) { return false; }
-                sent += static_cast<std::size_t>(written);
-            }
-            return true;
+            return write_all(frame.data(), frame.size());
         }
 
         /* Sends a frame with the mask bit CLEAR, which a server must reject. */
@@ -145,8 +134,7 @@ namespace
             frame.push_back(0x81u);
             frame.push_back(static_cast<std::uint8_t>(payload.size()));  // no mask bit
             for (const char c : payload) { frame.push_back(static_cast<std::uint8_t>(c)); }
-            return ::send(sock_, reinterpret_cast<const char*>(frame.data()),
-                          static_cast<int>(frame.size()), 0) > 0;
+            return write_all(frame.data(), frame.size());
         }
 
         /* Reads one server frame's payload.  Server frames are never masked. */
@@ -179,34 +167,47 @@ namespace
 
         auto close() -> void
         {
-            if (sock_ != INVALID_SOCKET) { ::closesocket(sock_); sock_ = INVALID_SOCKET; }
+            chatwire::net::close_socket(sock_);
+            sock_ = chatwire::net::invalid_socket;
         }
 
         ~test_client() { close(); }
 
     private:
+        [[nodiscard]] auto write_all(const void* const data, std::size_t n) -> bool
+        {
+            const auto* cursor{ static_cast<const std::uint8_t*>(data) };
+            while (n > 0)
+            {
+                const std::ptrdiff_t written{ chatwire::net::send_some(sock_, cursor, n) };
+                if (written <= 0) { return false; }
+                cursor += written;
+                n      -= static_cast<std::size_t>(written);
+            }
+            return true;
+        }
+
         [[nodiscard]] auto read_exact(std::uint8_t* const buffer, const std::size_t n) -> bool
         {
             std::size_t got{ 0 };
             while (got < n)
             {
-                const int r{ ::recv(sock_, reinterpret_cast<char*>(buffer + got),
-                                    static_cast<int>(n - got), 0) };
+                const std::ptrdiff_t r{ chatwire::net::recv_some(sock_, buffer + got,
+                                                                 n - got) };
                 if (r <= 0) { return false; }
                 got += static_cast<std::size_t>(r);
             }
             return true;
         }
 
-        SOCKET      sock_{ INVALID_SOCKET };
-        std::string handshake_response_{};
+        chatwire::net::socket_t sock_{ chatwire::net::invalid_socket };
+        std::string             handshake_response_{};
     };
 }
 
 int main()
 {
-    WSADATA wsa{};
-    (void)::WSAStartup(MAKEWORD(2, 2), &wsa);
+    (void)chatwire::net::startup();
 
     // ── framing unit checks, no socket needed ───────────────────────────────
     {
@@ -262,8 +263,9 @@ int main()
     // ── JSON: the hostile-input cases ──────────────────────────────────────
     {
         check("json_reads_top_level_string",
-              chatwire::json::get_string(R"({"cmd":"chat.send","text":"hi"})", "text")
-                  .value_or("") == "hi");
+              chatwire::json::get_string(
+                  R"({"cmd":"net.minecraft.client.entity.EntityPlayerSP.sendChatMessage",)"
+                  R"("text":"hi"})", "text").value_or("") == "hi");
         check("json_unescapes",
               chatwire::json::get_string(R"({"text":"a\"b\nc"})", "text").value_or("")
               == "a\"b\nc");
@@ -319,10 +321,13 @@ int main()
             std::this_thread::sleep_for(std::chrono::milliseconds{ 200 });
             check("server_counts_the_client", server.client_count() == 1u);
 
-            check("client_sends_a_frame", client.send_text(R"({"cmd":"chat.send"})"));
+            check("client_sends_a_frame",
+                  client.send_text(R"({"cmd":"net.minecraft.world.World.playerEntities"})"));
             std::string reply;
             check("client_reads_the_reply", client.read_text(reply));
-            check("handler_saw_the_command", reply.find("chat.send") != std::string::npos);
+            check("handler_saw_the_command",
+                  reply.find("net.minecraft.world.World.playerEntities")
+                  != std::string::npos);
 
             // A payload spanning the 126-byte boundary exercises the extended
             // length path in BOTH directions.
@@ -335,7 +340,9 @@ int main()
                   long_reply.find(long_cmd) != std::string::npos);
 
             // Broadcast is the path chat lines take out of the game.
-            server.broadcast(R"({"type":"chat","plain":"hello"})");
+            server.broadcast(
+                R"({"type":"net.minecraft.client.gui.GuiNewChat.printChatMessage",)"
+                R"("plain":"hello"})");
             std::string pushed;
             check("client_receives_a_broadcast", client.read_text(pushed));
             check("broadcast_payload_intact", pushed.find("hello") != std::string::npos);
@@ -371,7 +378,7 @@ int main()
         restarted.stop();
     }
 
-    ::WSACleanup();
+    chatwire::net::cleanup();
     std::printf("\n%s\n", failures == 0 ? "ALL PASSED" : "FAILURES PRESENT");
     return failures == 0 ? 0 : 1;
 }

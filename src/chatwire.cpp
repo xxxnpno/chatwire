@@ -153,10 +153,12 @@ namespace chatwire::detail
     /*
         @brief Routes one client message to the feature that owns it.
         @details
-        `{"cmd":"chat.send","text":"hi"}` splits into feature "chat", verb
-        "send".  Unknown features and malformed messages get a shaped error
-        rather than silence, because a client that gets nothing back cannot tell
-        a typo from a hang.
+        `{"cmd":"net.minecraft.client.entity.EntityPlayerSP.sendChatMessage",
+        "text":"hi"}` splits into the prefix
+        `net.minecraft.client.entity.EntityPlayerSP` -- which the chat feature
+        claims -- and the verb `sendChatMessage`.  Unknown prefixes and
+        malformed messages get a shaped error rather than silence, because a
+        client that gets nothing back cannot tell a typo from a hang.
     */
     inline auto dispatch(const std::string_view request) noexcept -> std::string
     {
@@ -179,15 +181,17 @@ namespace chatwire::detail
             const auto cmd{ json::get_string(request, "cmd") };
             if (!cmd) { return reply(false, "missing or non-string 'cmd'"); }
 
-            // The LAST dot, not the first.  A command is <prefix>.<verb>, and the
-            // prefix may be a bare feature name ("chat") or a fully-qualified
-            // Java class ("net.minecraft.client.entity.EntityPlayerSP") -- which
-            // has dots of its own.  Splitting at the first would make "net" the
-            // feature name and the rest nonsense.
+            // The LAST dot, not the first.  A command is <prefix>.<verb>, and
+            // the prefix is normally a fully-qualified Java class
+            // ("net.minecraft.client.entity.EntityPlayerSP") -- which has dots
+            // of its own.  Splitting at the first would make "net" the prefix
+            // and the rest nonsense.  ("system" is the one bare prefix left,
+            // and it works under the same rule.)
             const std::size_t dot{ cmd->rfind('.') };
             if (dot == std::string::npos || dot == 0u || dot + 1u >= cmd->size())
             {
-                return reply(false, "'cmd' must look like feature.verb");
+                return reply(false, "'cmd' must look like <class>.<member>, e.g. "
+                                    "net.minecraft.world.World.playerEntities");
             }
 
             const std::string feature_name{ cmd->substr(0, dot) };
@@ -335,6 +339,11 @@ namespace chatwire
         features::system::set_status_port(detail::server_instance().port());
         features::system::set_can_call(sdk::can_call_into_game());
         features::system::set_client_counter(&chatwire::client_count);
+        // `system.stats` answers with the chat feature's counters.  The host
+        // wires the two together so that neither feature includes the other --
+        // the numbers live where they are counted, and are reported where the
+        // rest of chatwire's self-reporting is.
+        features::system::set_stats_source(&features::chat::stats_json);
 
         chatwire::console::banner(chatwire::version, detail::server_instance().port(),
                                   mapping::mode_name(mode));
@@ -414,6 +423,7 @@ namespace chatwire
         features::chat::set_sink(nullptr);
         features::chat::set_console_sink(nullptr);
         features::system::set_client_counter(nullptr);
+        features::system::set_stats_source(nullptr);
 
         registry::stop_all();
 

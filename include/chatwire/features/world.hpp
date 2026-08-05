@@ -9,16 +9,21 @@
 // ===========================================================================
 // WHAT IT DOES
 // ===========================================================================
-//   world.playerEntities -> every player the client currently has loaded, with
+//   net.minecraft.world.World.playerEntities
+//                        -> every player the client currently has loaded, with
 //                           the name and the UUID of each.
 //
-// The verb is the FIELD IT READS, `net.minecraft.world.World.playerEntities`,
-// and that is a promise about the answer rather than a naming style.  A command
-// called `players` or `list` would suggest the server's roster; this is the
-// client's entity list, which is the players close enough to exist as entities.
-// On a large server that is a small fraction of the tab list.  Naming it after
-// the field means the answer cannot be mistaken for something it is not, and a
-// reader who knows Minecraft's source already knows the difference.
+// The command IS the field it reads, and that is a promise about the answer
+// rather than a naming style.  A command called `players` or `world.list` would
+// suggest the server's roster; this is the client's entity list, which is the
+// players close enough to exist as entities.  On a large server that is a small
+// fraction of the tab list.  Naming it after the field means the answer cannot
+// be mistaken for something it is not, and a reader who knows Minecraft's source
+// already knows the difference.
+//
+// Which is exactly why the short spellings `world.playerEntities` and
+// `world.players` are gone rather than kept as conveniences: the short name is
+// the misleading one, and leaving it available meant most callers would type it.
 //
 // Name and UUID come from the SAME object in the same pass, so an entry's two
 // halves always belong together — which is not true if a caller has to ask for
@@ -44,17 +49,18 @@ namespace chatwire::features
         }
 
         /*
-            @brief Answers to the short name and to the Java class it reads.
+            @brief Answers to the Java class it reads, and to nothing else.
             @details
-            `world.playerEntities` and
-            `net.minecraft.world.World.playerEntities` are the same command.  The
-            long one is not decoration: it names the exact field, so a client
+            `net.minecraft.world.World.playerEntities` is the whole command.  The
+            length is not decoration: it names the exact field, so a client
             author can check what they are getting against Minecraft's source
-            without trusting this file's summary of it.
+            without trusting this file's summary of it.  `world` used to be
+            accepted as a short prefix and no longer is -- see the note at the
+            top of this file for why that one is worth losing.
         */
         [[nodiscard]] auto claims(const std::string_view prefix) const noexcept -> bool override
         {
-            return prefix == "world" || prefix == "net.minecraft.world.World";
+            return prefix == "net.minecraft.world.World";
         }
 
         /* Nothing to install: this feature reads, it does not hook. */
@@ -66,7 +72,7 @@ namespace chatwire::features
         {
             try
             {
-                if (cmd.verb == "playerEntities" || cmd.verb == "players")
+                if (cmd.verb == "playerEntities")
                 {
                     if (!chatwire::sdk::in_world())
                     {
@@ -92,7 +98,7 @@ namespace chatwire::features
                 }
 
                 return chatwire::response::failure(
-                    "unknown verb; try playerEntities");
+                    "unknown member; try playerEntities");
             }
             catch (...)
             {

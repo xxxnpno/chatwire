@@ -12,10 +12,14 @@
 //   SRG  net/minecraft/client/Minecraft . field_71439_g    (Searge intermediate)
 //   OBF  ave                            . h                (vanilla, shipped)
 //
-// A vanilla launcher runs OBF.  A Forge/MCP development environment runs MCP.
-// Something built against Searge mappings runs SRG.  All three are live in the
-// wild for 1.8.9, so an API that only handles one of them works for a third of
-// its users and fails confusingly for the rest.
+// A vanilla launcher runs OBF.  An INSTALLED Forge client runs SRG -- Forge
+// reobfuscates to Searge names for release, so the client a player actually
+// launches has field_71439_g, not thePlayer.  MCP is the DEVELOPMENT case: a
+// ForgeGradle `runClient` or an MCP workspace, where the mod author is running
+// from decompiled sources.  Getting that backwards is easy and expensive: the
+// two are indistinguishable at the class level, which is why detection probes a
+// FIELD.  All three are live in the wild for 1.8.9, so an API that only handles
+// one of them works for a third of its users and fails confusingly for the rest.
 //
 // So every name in this file is a TRIPLE, and `resolve()` picks the member that
 // matches whatever the attached JVM turned out to be.

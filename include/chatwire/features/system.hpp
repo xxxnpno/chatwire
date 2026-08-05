@@ -1,7 +1,14 @@
 // chatwire.features.system — chatwire talking about itself.
 //
 // Everything here is about the bridge rather than about the game: what version
-// is running, who is connected, and how to make it let go.
+// is running, who is connected, how much has gone through it, and how to make
+// it let go.
+//
+// It is therefore the one feature whose commands are NOT named after Minecraft
+// members, and the only one that keeps a short prefix.  Every other command
+// spells out the Java member it reaches, because that name can be checked
+// against the game's source; `system.status` reaches nothing in the game, so
+// there is nothing to spell out and nothing to check.
 //
 // It is also the second feature, which is the point at which "adding one is a
 // new file and two lines" stops being a claim and starts being a fact.  Nothing
@@ -35,6 +42,20 @@ namespace chatwire::features
 
     /* @brief How many clients are connected.  Supplied by the host. */
     using client_counter = std::size_t (*)() noexcept;
+
+    /*
+        @brief Where `system.stats` gets its numbers.
+        @details
+        Returns a ready-made JSON object.  The counters belong to whichever
+        feature keeps them -- today the chat feature's lines/sent/added -- and
+        `system` is where they are ANSWERED, because they are chatwire's own
+        bookkeeping rather than anything the game has a name for.  A function
+        pointer the host installs keeps that from becoming an include from one
+        feature into another.
+    */
+    using stats_source = std::string (*)();
+
+    inline std::atomic<stats_source> g_stats{ nullptr };
 
     /* Filled in by chatwire::start() so status has something to report. */
     inline std::atomic<std::uint16_t> g_status_port{ 0 };
@@ -79,6 +100,17 @@ namespace chatwire::features
                         + "," + chatwire::json::field("can_call", g_can_call.load(std::memory_order_relaxed))));
                 }
 
+                if (cmd.verb == "stats")
+                {
+                    const stats_source source{ g_stats.load(std::memory_order_acquire) };
+                    if (!source)
+                    {
+                        return chatwire::response::failure(
+                            "no stats source is installed in this build");
+                    }
+                    return chatwire::response::success(source());
+                }
+
                 if (cmd.verb == "detach")
                 {
                     const detach_request request{ g_detach.load(std::memory_order_acquire) };
@@ -116,7 +148,7 @@ namespace chatwire::features
                 }
 
                 return chatwire::response::failure(
-                    "unknown verb; try status, ping or detach");
+                    "unknown verb; try status, stats, ping or detach");
             }
             catch (...)
             {
@@ -145,6 +177,12 @@ namespace chatwire::features::system
     inline auto set_can_call(const bool can_call) noexcept -> void
     {
         chatwire::features::g_can_call.store(can_call, std::memory_order_release);
+    }
+
+    /* @brief Tells `system.stats` where to get its counters.  See stats_source. */
+    inline auto set_stats_source(const chatwire::features::stats_source source) noexcept -> void
+    {
+        chatwire::features::g_stats.store(source, std::memory_order_release);
     }
 
     /* @brief Tells `system.status` where to ask how many clients are connected. */

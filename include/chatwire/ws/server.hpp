@@ -27,23 +27,29 @@
 // The failure mode for an injected DLL is a thread that outlives the code it is
 // running.  Every rule here exists for that:
 //
-//   * stop() closes the listener FIRST, which wakes the accept thread out of
-//     accept() with an error rather than leaving it blocked forever;
-//   * it then shuts down every client socket, waking their readers the same way;
+//   * every thread has a way OUT that does not involve another thread closing a
+//     descriptor it is blocked on.  The accept thread polls with a timeout and
+//     re-reads the running flag; the client readers are woken by shutdown(),
+//     which leaves the descriptor valid and owned by its reader.  See stop();
+//   * a client is registered the moment it is accepted, BEFORE its handshake, so
+//     that stop() can reach it.  One that was still reading its HTTP request
+//     used to be on no list at all, and its thread was joined with nothing left
+//     to wake it;
 //   * it JOINS every thread before returning, so no thread can still be inside
-//     this module when the DLL unloads;
+//     this module when the library unloads;
 //   * client threads never touch the client list except through the mutex, and
 //     they remove themselves before exiting;
 //   * a client that stops reading cannot stall the game: writes are best-effort
 //     and a failed write closes that client rather than blocking the broadcaster.
+//
+// Sockets themselves are Winsock on Windows and BSD everywhere else; every
+// difference between them is resolved in chatwire/net.hpp and none of it leaks
+// into this file.
 #include "chatwire/common.hpp"
 
 #include "chatwire/log.hpp"
+#include "chatwire/net.hpp"
 #include "chatwire/ws/websocket.hpp"
-
-// Platform headers strictly after the standard ones.
-#include <winsock2.h>
-#include <ws2tcpip.h>
 namespace chatwire::ws::detail
 {
     /*
@@ -55,13 +61,13 @@ namespace chatwire::ws::detail
     */
     struct client
     {
-        SOCKET     sock{ INVALID_SOCKET };
+        chatwire::net::socket_t sock{ chatwire::net::invalid_socket };
         std::mutex write_mutex{};              // serialises frames on this socket
         std::atomic<bool> alive{ true };
 
         ~client()
         {
-            if (sock != INVALID_SOCKET) { ::closesocket(sock); }
+            chatwire::net::close_socket(sock);
         }
 
         client() = default;
@@ -82,10 +88,21 @@ namespace chatwire::ws::detail
                 std::size_t sent{ 0 };
                 while (sent < frame.size())
                 {
-                    const int n{ ::send(sock,
-                                        reinterpret_cast<const char*>(frame.data() + sent),
-                                        static_cast<int>(frame.size() - sent), 0) };
-                    if (n <= 0) { alive.store(false, std::memory_order_release); return false; }
+                    const std::ptrdiff_t n{ chatwire::net::send_some(
+                        sock, frame.data() + sent, frame.size() - sent) };
+                    if (n <= 0)
+                    {
+                        // Retryable means a signal landed mid-write, not that the
+                        // peer is gone -- and a JVM raises plenty of its own.
+                        // Dropping the client here would disconnect somebody every
+                        // time the collector ran.
+                        if (n < 0 && chatwire::net::retryable(chatwire::net::last_error()))
+                        {
+                            continue;
+                        }
+                        alive.store(false, std::memory_order_release);
+                        return false;
+                    }
                     sent += static_cast<std::size_t>(n);
                 }
                 return true;
@@ -148,27 +165,25 @@ namespace chatwire::ws
             this->handler_  = handler;
             this->presence_ = on_presence;
 
-            WSADATA wsa{};
-            if (::WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+            if (!chatwire::net::startup())
             {
-                chatwire::log::error("WSAStartup failed");
+                chatwire::log::error("could not initialise the socket library");
                 return false;
             }
-            this->wsa_started_ = true;
+            this->net_started_ = true;
 
             this->listener_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-            if (this->listener_ == INVALID_SOCKET)
+            if (this->listener_ == chatwire::net::invalid_socket)
             {
-                chatwire::log::error("socket() failed: {}", ::WSAGetLastError());
-                this->cleanup_winsock();
+                chatwire::log::error("socket() failed: {}", chatwire::net::last_error());
+                this->cleanup_net();
                 return false;
             }
 
             // Without this, a restart inside the same game session hits
             // TIME_WAIT and fails to bind for ~2 minutes.
-            BOOL reuse{ TRUE };
-            (void)::setsockopt(this->listener_, SOL_SOCKET, SO_REUSEADDR,
-                               reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+            chatwire::net::set_reuse_addr(this->listener_);
+            chatwire::net::prepare(this->listener_);
 
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
@@ -176,18 +191,19 @@ namespace chatwire::ws
             // Loopback ONLY.  See the file header.
             addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
 
-            if (::bind(this->listener_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR)
+            if (::bind(this->listener_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
             {
-                chatwire::log::error("bind(127.0.0.1:{}) failed: {}", port, ::WSAGetLastError());
+                chatwire::log::error("bind(127.0.0.1:{}) failed: {}", port,
+                                     chatwire::net::last_error());
                 this->close_listener();
-                this->cleanup_winsock();
+                this->cleanup_net();
                 return false;
             }
-            if (::listen(this->listener_, SOMAXCONN) == SOCKET_ERROR)
+            if (::listen(this->listener_, SOMAXCONN) != 0)
             {
-                chatwire::log::error("listen() failed: {}", ::WSAGetLastError());
+                chatwire::log::error("listen() failed: {}", chatwire::net::last_error());
                 this->close_listener();
-                this->cleanup_winsock();
+                this->cleanup_net();
                 return false;
             }
 
@@ -201,7 +217,7 @@ namespace chatwire::ws
                 chatwire::log::error("could not start the accept thread");
                 this->running_.store(false, std::memory_order_release);
                 this->close_listener();
-                this->cleanup_winsock();
+                this->cleanup_net();
                 return false;
             }
 
@@ -211,8 +227,8 @@ namespace chatwire::ws
             // a one-line bug into a puzzle: the log said 0, the server was
             // listening on something else entirely, and no client could find it.
             this->bound_port_ = port;
-            sockaddr_in actual{};
-            int actual_size{ sizeof(actual) };
+            sockaddr_in            actual{};
+            chatwire::net::addr_len actual_size{ sizeof(actual) };
             if (::getsockname(this->listener_, reinterpret_cast<sockaddr*>(&actual),
                               &actual_size) == 0)
             {
@@ -228,9 +244,25 @@ namespace chatwire::ws
             @brief Stops accepting, drops every client, joins every thread.
             @details
             Idempotent, and safe to call from the destructor.  The ORDER is the
-            point: closing the listener and shutting down client sockets is what
-            wakes threads blocked in accept()/recv(); without that, join() would
-            hang forever and the game would freeze on unload.
+            point: nothing may join a thread that has not been given a way out,
+            or join() hangs forever and the game freezes on unload.
+
+            The two waking mechanisms are NOT the same, and assuming they were is
+            what made the first version of this Windows-only:
+
+              * the ACCEPT thread leaves on its own.  It polls the listener with
+                a timeout and re-reads `running_` between polls, so clearing the
+                flag is enough.  Closing the listener under it -- which is what
+                this used to do, and which does wake accept() on Windows -- is on
+                POSIX both a hang and a use-after-free: the descriptor number is
+                handed back to the OS while a thread is still blocked on it, free
+                to be reused by any other thread that opens a file.  So the
+                listener is closed AFTER that thread is joined, never before.
+
+              * the CLIENT readers are woken by shutdown(), which does return a
+                blocked recv() on all three platforms.  shutdown() rather than
+                close(): the reader still owns the descriptor and closes it on
+                the way out, so again nobody frees a number somebody else holds.
         */
         auto stop() noexcept -> void
         {
@@ -239,14 +271,16 @@ namespace chatwire::ws
                 // Never started, or already stopped.  Still join in case start()
                 // failed halfway.
                 if (this->accept_thread_.joinable()) { this->accept_thread_.join(); }
+                this->close_listener();
                 return;
             }
 
+            // `running_` is already false, so the accept thread exits at its next
+            // poll.  Join it FIRST: after this returns, no new client can appear
+            // and the listener is nobody's business but ours.
+            if (this->accept_thread_.joinable()) { this->accept_thread_.join(); }
             this->close_listener();
 
-            // Wake every client reader.  shutdown() rather than closesocket():
-            // the reader still owns the handle and will close it on the way out,
-            // and closing it here would risk the handle being reused underneath.
             {
                 const std::lock_guard<std::mutex> guard{ this->clients_mutex_ };
                 for (auto& c : this->clients_)
@@ -254,12 +288,10 @@ namespace chatwire::ws
                     if (c)
                     {
                         c->alive.store(false, std::memory_order_release);
-                        (void)::shutdown(c->sock, SD_BOTH);
+                        chatwire::net::shutdown_both(c->sock);
                     }
                 }
             }
-
-            if (this->accept_thread_.joinable()) { this->accept_thread_.join(); }
 
             {
                 const std::lock_guard<std::mutex> guard{ this->threads_mutex_ };
@@ -275,7 +307,7 @@ namespace chatwire::ws
                 this->clients_.clear();
             }
 
-            this->cleanup_winsock();
+            this->cleanup_net();
             this->bound_port_ = 0u;
             chatwire::log::info("websocket server stopped");
         }
@@ -337,21 +369,19 @@ namespace chatwire::ws
         }
 
     private:
+        /* Only ever called with the accept thread joined or never started. */
         auto close_listener() noexcept -> void
         {
-            if (this->listener_ != INVALID_SOCKET)
-            {
-                ::closesocket(this->listener_);
-                this->listener_ = INVALID_SOCKET;
-            }
+            chatwire::net::close_socket(this->listener_);
+            this->listener_ = chatwire::net::invalid_socket;
         }
 
-        auto cleanup_winsock() noexcept -> void
+        auto cleanup_net() noexcept -> void
         {
-            if (this->wsa_started_)
+            if (this->net_started_)
             {
-                ::WSACleanup();
-                this->wsa_started_ = false;
+                chatwire::net::cleanup();
+                this->net_started_ = false;
             }
         }
 
@@ -372,16 +402,43 @@ namespace chatwire::ws
             }
         }
 
+        /*
+            @brief Accepts connections until stop() clears `running_`.
+            @details
+            Polled rather than blocked, with a timeout, so this thread owns its
+            own exit: it never has to be woken by another thread closing the
+            descriptor out from under it.  See stop() for why that mattered
+            enough to restructure around.
+
+            The interval is the worst-case delay added to shutdown, and shutdown
+            is already waiting several ticks for hooks to drain, so a fifth of a
+            second is invisible.  The cost of polling at that rate is one
+            syscall every 200 ms on a thread that is otherwise asleep.
+        */
         auto accept_loop() noexcept -> void
         {
+            constexpr int poll_interval_ms{ 200 };
+
             while (this->running_.load(std::memory_order_acquire))
             {
-                const SOCKET sock{ ::accept(this->listener_, nullptr, nullptr) };
-                if (sock == INVALID_SOCKET)
+                const int ready{ chatwire::net::wait_readable(this->listener_,
+                                                              poll_interval_ms) };
+                if (ready == 0) { continue; }               // nobody knocked
+                if (ready < 0)
                 {
-                    // stop() closed the listener; that is the normal exit.
-                    if (!this->running_.load(std::memory_order_acquire)) { break; }
-                    continue;
+                    if (chatwire::net::retryable(chatwire::net::last_error())) { continue; }
+                    break;                                  // the listener is broken
+                }
+
+                const chatwire::net::socket_t sock{ ::accept(this->listener_, nullptr, nullptr) };
+                if (sock == chatwire::net::invalid_socket) { continue; }
+
+                // Between the poll and here, stop() may have run.  Refuse rather
+                // than spawn a thread nothing is left to join us out of.
+                if (!this->running_.load(std::memory_order_acquire))
+                {
+                    chatwire::net::close_socket(sock);
+                    break;
                 }
 
                 detail::client_ptr c;
@@ -391,10 +448,24 @@ namespace chatwire::ws
                 }
                 catch (...)
                 {
-                    ::closesocket(sock);
+                    chatwire::net::close_socket(sock);
                     continue;
                 }
                 c->sock = sock;
+                chatwire::net::prepare(sock);
+
+                // Registered BEFORE the handshake, not after it.  stop() wakes
+                // readers by walking this list, and a client that was still
+                // reading its HTTP request would not have been on it -- so its
+                // thread sat in recv() with nothing to wake it and the join
+                // below never returned.  A game that will not close is a worse
+                // bug than a connection counted a few milliseconds early.
+                try
+                {
+                    const std::lock_guard<std::mutex> guard{ this->clients_mutex_ };
+                    this->clients_.push_back(c);
+                }
+                catch (...) { continue; }         // ~client closes the socket
 
                 try
                 {
@@ -405,6 +476,7 @@ namespace chatwire::ws
                 catch (...)
                 {
                     chatwire::log::warn("could not start a client thread; dropping connection");
+                    this->drop(c);
                     continue;                     // ~client closes the socket
                 }
             }
@@ -446,16 +518,9 @@ namespace chatwire::ws
                 return;
             }
 
-            try
-            {
-                const std::lock_guard<std::mutex> guard{ this->clients_mutex_ };
-                this->clients_.push_back(c);
-            }
-            catch (...)
-            {
-                this->drop(c);
-                return;
-            }
+            // Already in `clients_`: accept_loop put it there so that stop()
+            // could wake it out of the handshake.  Only the announcement waits
+            // for the handshake to have succeeded.
             chatwire::log::info("client connected ({} total)", this->client_count());
             if (this->presence_) { this->presence_(true, this->client_count()); }
 
@@ -466,8 +531,14 @@ namespace chatwire::ws
             while (this->running_.load(std::memory_order_acquire)
                    && c->alive.load(std::memory_order_acquire))
             {
-                const int n{ ::recv(c->sock, chunk.data(), static_cast<int>(chunk.size()), 0) };
-                if (n <= 0) { break; }               // peer closed, or stop() shut us down
+                const std::ptrdiff_t n{ chatwire::net::recv_some(c->sock, chunk.data(),
+                                                                 chunk.size()) };
+                if (n == 0) { break; }               // peer closed, or stop() shut us down
+                if (n < 0)
+                {
+                    if (chatwire::net::retryable(chatwire::net::last_error())) { continue; }
+                    break;
+                }
 
                 try
                 {
@@ -567,8 +638,15 @@ namespace chatwire::ws
             while (request.find("\r\n\r\n") == std::string::npos)
             {
                 if (request.size() > 16u * 1024u) { return false; }
-                const int n{ ::recv(c->sock, chunk.data(), static_cast<int>(chunk.size()), 0) };
-                if (n <= 0) { return false; }
+                if (!c->alive.load(std::memory_order_acquire)) { return false; }
+                const std::ptrdiff_t n{ chatwire::net::recv_some(c->sock, chunk.data(),
+                                                                 chunk.size()) };
+                if (n == 0) { return false; }
+                if (n < 0)
+                {
+                    if (chatwire::net::retryable(chatwire::net::last_error())) { continue; }
+                    return false;
+                }
                 try { request.append(chunk.data(), static_cast<std::size_t>(n)); }
                 catch (...) { return false; }
             }
@@ -578,7 +656,7 @@ namespace chatwire::ws
             {
                 static constexpr std::string_view bad{
                     "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n" };
-                (void)::send(c->sock, bad.data(), static_cast<int>(bad.size()), 0);
+                (void)chatwire::net::send_some(c->sock, bad.data(), bad.size());
                 return false;
             }
 
@@ -598,9 +676,16 @@ namespace chatwire::ws
             std::size_t sent{ 0 };
             while (sent < reply.size())
             {
-                const int n{ ::send(c->sock, reply.data() + sent,
-                                    static_cast<int>(reply.size() - sent), 0) };
-                if (n <= 0) { return false; }
+                const std::ptrdiff_t n{ chatwire::net::send_some(
+                    c->sock, reply.data() + sent, reply.size() - sent) };
+                if (n <= 0)
+                {
+                    if (n < 0 && chatwire::net::retryable(chatwire::net::last_error()))
+                    {
+                        continue;
+                    }
+                    return false;
+                }
                 sent += static_cast<std::size_t>(n);
             }
             return true;
@@ -632,9 +717,9 @@ namespace chatwire::ws
             return std::string{ request.substr(start, end - start) };
         }
 
-        SOCKET                          listener_{ INVALID_SOCKET };
+        chatwire::net::socket_t         listener_{ chatwire::net::invalid_socket };
         std::uint16_t                   bound_port_{ 0 };
-        bool                            wsa_started_{ false };
+        bool                            net_started_{ false };
         std::atomic<bool>               running_{ false };
         message_handler                 handler_{ nullptr };
         presence_handler                presence_{ nullptr };

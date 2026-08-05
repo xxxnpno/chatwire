@@ -20,7 +20,9 @@
 
 #include "chatwire/common.hpp"
 
-#include <windows.h>
+#include "chatwire/module.hpp"
+
+#include <cstdio>
 
 namespace chatwire::config
 {
@@ -39,28 +41,30 @@ namespace chatwire::config
         bool console{ false };
         /* @brief Show the start-up trace, not just chat and problems. */
         bool verbose{ false };
+        /*
+            @brief Seconds to wait for Minecraft's classes.  0 means "unset".
+            @details
+            Matters much more when chatwire arrives through LD_PRELOAD than when
+            it is injected: preloading puts it in the process before the JVM
+            exists, so the wait covers the whole of start-up rather than the
+            moment between "the game is running" and "the classes are loaded".
+            A launcher that sits on a login screen can outlast any fixed default,
+            which is why this is reachable from the environment.
+        */
+        std::uint32_t timeout_seconds{ 0 };
     };
 
-    namespace detail
+    /*
+        @brief The config file beside the chatwire library that is asking.
+        @details
+        Beside the LIBRARY, not beside the game and not in the working
+        directory: the injector knows where it put the library and nothing else
+        about the process it is injecting into.  Empty when the path cannot be
+        determined, which consume() reads as "no file" -- defaults, not failure.
+    */
+    [[nodiscard]] inline auto path_for_self() -> std::string
     {
-        /* @brief `<folder of this module>\chatwire.cfg`. */
-        inline auto path_beside(const HMODULE module_handle) -> std::string
-        {
-            char buffer[MAX_PATH]{};
-            const DWORD n{ ::GetModuleFileNameA(module_handle, buffer, MAX_PATH) };
-            if (n == 0u || n >= MAX_PATH) { return {}; }
-
-            std::string path{ buffer, n };
-            const std::size_t slash{ path.find_last_of("\\/") };
-            if (slash == std::string::npos) { return {}; }
-            return path.substr(0, slash + 1u) + "chatwire.cfg";
-        }
-    }
-
-    /* @brief The config file that belongs to `module_handle`'s directory. */
-    [[nodiscard]] inline auto path_for(const HMODULE module_handle) -> std::string
-    {
-        return detail::path_beside(module_handle);
+        return chatwire::module::sibling("chatwire.cfg");
     }
 
     /*
@@ -78,18 +82,24 @@ namespace chatwire::config
 
         try
         {
-            const HANDLE file{ ::CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                                             nullptr, OPEN_EXISTING,
-                                             FILE_ATTRIBUTE_NORMAL, nullptr) };
-            if (file == INVALID_HANDLE_VALUE) { return out; }
-
             std::array<char, 1024> buffer{};
-            DWORD read{ 0 };
-            const BOOL ok{ ::ReadFile(file, buffer.data(),
-                                      static_cast<DWORD>(buffer.size() - 1u), &read, nullptr) };
-            ::CloseHandle(file);
-            (void)::DeleteFileA(path.c_str());
-            if (!ok || read == 0u) { return out; }
+            std::size_t            read{ 0 };
+
+            // Plain stdio rather than each platform's file API.  This is a
+            // kilobyte of key=value written by us and read by us seconds later;
+            // there is nothing here that CreateFile bought over fopen.
+            if (std::FILE* const file{ std::fopen(path.c_str(), "rb") })
+            {
+                read = std::fread(buffer.data(), 1u, buffer.size() - 1u, file);
+                (void)std::fclose(file);
+            }
+
+            // Deleted whether or not it parsed, and BEFORE it is used: these are
+            // the settings for THIS injection, and a file left behind would
+            // silently apply them to the next one.  A delete that fails changes
+            // nothing this run.
+            (void)std::remove(path.c_str());
+            if (read == 0u) { return out; }
 
             const std::string_view text{ buffer.data(), read };
             std::size_t line_start{ 0 };
@@ -124,6 +134,18 @@ namespace chatwire::config
                 }
                 else if (key == "console") { out.console = (value != "0"); }
                 else if (key == "verbose") { out.verbose = (value != "0"); }
+                else if (key == "timeout")
+                {
+                    std::uint32_t parsed{ 0 };
+                    bool          digits{ !value.empty() };
+                    for (const char c : value)
+                    {
+                        if (c < '0' || c > '9') { digits = false; break; }
+                        parsed = parsed * 10u + static_cast<std::uint32_t>(c - '0');
+                        if (parsed > 86400u) { digits = false; break; }
+                    }
+                    if (digits) { out.timeout_seconds = parsed; }
+                }
             }
         }
         catch (...)
@@ -142,16 +164,14 @@ namespace chatwire::config
             text += "port=" + std::to_string(s.port) + "\n";
             text += std::string{ "console=" } + (s.console ? "1" : "0") + "\n";
             text += std::string{ "verbose=" } + (s.verbose ? "1" : "0") + "\n";
+            text += "timeout=" + std::to_string(s.timeout_seconds) + "\n";
 
-            const HANDLE file{ ::CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr,
-                                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr) };
-            if (file == INVALID_HANDLE_VALUE) { return false; }
+            std::FILE* const file{ std::fopen(path.c_str(), "wb") };
+            if (file == nullptr) { return false; }
 
-            DWORD written{ 0 };
-            const BOOL ok{ ::WriteFile(file, text.data(),
-                                       static_cast<DWORD>(text.size()), &written, nullptr) };
-            ::CloseHandle(file);
-            return ok != 0 && written == text.size();
+            const std::size_t written{ std::fwrite(text.data(), 1u, text.size(), file) };
+            const bool        flushed{ std::fclose(file) == 0 };
+            return flushed && written == text.size();
         }
         catch (...) { return false; }
     }

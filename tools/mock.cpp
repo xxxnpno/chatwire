@@ -22,8 +22,7 @@
 #include "chatwire/json.hpp"
 #include "chatwire/ws/server.hpp"
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include "chatwire/terminal.hpp"
 
 
 namespace
@@ -67,11 +66,15 @@ namespace
             const std::string verb{ split == std::string::npos
                                         ? *cmd : cmd->substr(split + 1) };
 
-            const bool chat_prefix{ prefix == "chat"
-                || prefix == "net.minecraft.client.entity.EntityPlayerSP"
+            // The fully-qualified member and nothing else.  The short prefixes
+            // (`chat.`, `world.`) and the short verbs (`send`, `add`, `players`)
+            // are not accepted here for the same reason they are not accepted by
+            // the real dispatcher: a consumer that works against the mock and
+            // fails against the game is worse than no mock at all.
+            const bool chat_prefix{ prefix == "net.minecraft.client.entity.EntityPlayerSP"
                 || prefix == "net.minecraft.client.gui.GuiNewChat" };
-            const bool send{ chat_prefix && (verb == "sendChatMessage" || verb == "send") };
-            const bool add{ chat_prefix && (verb == "addChatMessage" || verb == "add") };
+            const bool send{ chat_prefix && verb == "sendChatMessage" };
+            const bool add{ chat_prefix && verb == "addChatMessage" };
             if (send || add)
             {
                 const auto text{ chatwire::json::get_string(request, "text") };
@@ -106,6 +109,17 @@ namespace
                     + chatwire::json::field("clients", std::int64_t{ 0 })));
             }
 
+            // The counters live under `system`, not under a Minecraft class:
+            // they are chatwire's own bookkeeping and there is no game member
+            // to name them after.
+            if (prefix == "system" && verb == "stats")
+            {
+                return reply(true, chatwire::json::object(
+                    chatwire::json::field("lines_seen", std::int64_t{ 0 }) + ","
+                    + chatwire::json::field("sent", std::int64_t{ 0 }) + ","
+                    + chatwire::json::field("added", std::int64_t{ 0 })));
+            }
+
             if (prefix == "system" && verb == "detach")
             {
                 // The mock has nothing to unload, but it must ANSWER the way the
@@ -117,19 +131,10 @@ namespace
                     chatwire::json::field("detaching", true)));
             }
 
-            if (chat_prefix && verb == "stats")
-            {
-                return reply(true, chatwire::json::object(
-                    chatwire::json::field("lines_seen", std::int64_t{ 0 }) + ","
-                    + chatwire::json::field("sent", std::int64_t{ 0 }) + ","
-                    + chatwire::json::field("added", std::int64_t{ 0 })));
-            }
-
             // The world feature, with a fixed roster.  Synthetic, but shaped
             // exactly like the real answer -- a consumer that parses this parses
             // the game's too.
-            if ((prefix == "world" || prefix == "net.minecraft.world.World")
-                && (verb == "playerEntities" || verb == "players"))
+            if (prefix == "net.minecraft.world.World" && verb == "playerEntities")
             {
                 return reply(true, chatwire::json::object(
                     chatwire::json::field("count", std::int64_t{ 2 })
@@ -147,7 +152,8 @@ namespace
 
             if (prefix.empty())
             {
-                return reply(false, "'cmd' must look like feature.verb");
+                return reply(false, "'cmd' must look like <class>.<member>, e.g. "
+                                    "net.minecraft.world.World.playerEntities");
             }
             return reply(false, "no feature named '" + prefix + "'");
         }
@@ -210,15 +216,7 @@ int main(const int argc, char** const argv)
         }
     }
 
-    if (const HANDLE out{ ::GetStdHandle(STD_OUTPUT_HANDLE) }; out != INVALID_HANDLE_VALUE)
-    {
-        DWORD mode{ 0 };
-        if (::GetConsoleMode(out, &mode))
-        {
-            (void)::SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-        }
-    }
-    (void)::SetConsoleOutputCP(CP_UTF8);
+    chatwire::terminal::enable_ansi();
 
     chatwire::ws::server server;
     if (!server.start(port, &handle))
@@ -246,7 +244,8 @@ int main(const int argc, char** const argv)
         const std::string plain{ strip(formatted) };
 
         server.broadcast(chatwire::json::object(
-            chatwire::json::field("type", "printChatMessage") + ","
+            chatwire::json::field(
+                "type", "net.minecraft.client.gui.GuiNewChat.printChatMessage") + ","
             + chatwire::json::field("formatted", formatted) + ","
             + chatwire::json::field("plain", plain)));
 

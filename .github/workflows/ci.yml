@@ -1,0 +1,143 @@
+# chatwire CI.
+#
+# This file exists because chatwire claims to build on three platforms and the
+# author has one.  A claim like that is worth exactly as much as the machine
+# that checks it, so every platform in the README is a job here.
+#
+# What it CANNOT check is the half that needs a running Minecraft: the mappings,
+# the hooks, and every Java call.  Those are verified by injecting into a real
+# game, by hand.  What it does check is the half that runs without a JVM -- the
+# WebSocket server, the RFC 6455 framing, the JSON, and the fact that the whole
+# thing compiles at all on a compiler that is not the author's.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the other two.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-gcc14
+            os: ubuntu-latest
+          - name: macos-clang
+            os: macos-latest
+          - name: windows-mingw
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # GCC 14, not the distribution default: <print> is a C++23 library feature
+      # that GCC 13 does not have, and chatwire's tools use std::println.
+      - name: Install GCC 14 and Ninja (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14 ninja-build
+          echo "CC=gcc-14"  >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+
+      # Homebrew LLVM, not Apple Clang: the system compiler on a current macOS
+      # still ships a libc++ without <print>, and configure refuses rather than
+      # failing later in a wall of template output.  -DCMAKE_CXX_FLAGS points it
+      # at its own headers and libraries instead of the SDK's.
+      - name: Install LLVM and Ninja (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install llvm ninja
+          PREFIX="$(brew --prefix llvm)"
+          echo "CC=$PREFIX/bin/clang"    >> "$GITHUB_ENV"
+          echo "CXX=$PREFIX/bin/clang++" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L$PREFIX/lib/c++ -L$PREFIX/lib -Wl,-rpath,$PREFIX/lib/c++" \
+              >> "$GITHUB_ENV"
+
+      # MSYS2 rather than MSVC: it is the toolchain chatwire is developed
+      # against, so a green Windows job here means the same thing the author's
+      # machine means.
+      - name: Install MSYS2 toolchain (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Configure and build (POSIX)
+        if: matrix.os != 'windows-latest'
+        run: |
+          # Not -DCHATWIRE_WARNINGS_AS_ERRORS=ON.  chatwire's own TUs include
+          # vmhook, and -Werror on a 26k-line third-party header turns somebody
+          # else's diagnostic -- or the standard library's own inlining noise --
+          # into a red build for this project.  Warnings are still printed.
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Configure and build (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: |
+          # Not -DCHATWIRE_WARNINGS_AS_ERRORS=ON.  chatwire's own TUs include
+          # vmhook, and -Werror on a 26k-line third-party header turns somebody
+          # else's diagnostic -- or the standard library's own inlining noise --
+          # into a red build for this project.  Warnings are still printed.
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Test (POSIX)
+        if: matrix.os != 'windows-latest'
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Test (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: ctest --test-dir build --output-on-failure
+
+      # The mock and the client are the two halves of the protocol, and running
+      # them against each other exercises the parts a unit test cannot reach:
+      # the real handshake, real frames, and the shutdown path.  A hang here is
+      # a pass turning into a timeout, which is exactly the failure mode the
+      # accept-loop rewrite was about -- so it is worth a job step.
+      - name: Mock and client talk to each other (POSIX)
+        if: matrix.os != 'windows-latest'
+        timeout-minutes: 2
+        run: |
+          ./build/chatwire-mock --port 24496 --quiet &
+          MOCK=$!
+          sleep 1
+          # Paced, because the client's reader is a separate thread: feeding it
+          # /quit in the same breath as a command would race the reply and make
+          # this step flaky rather than meaningful.
+          { echo 'hello'; sleep 1; \
+            echo '/net.minecraft.world.World.playerEntities'; sleep 1; \
+            echo '/quit'; sleep 1; } \
+              | ./build/chatwire-client --port 24496 | tee out.txt
+          kill "$MOCK" 2>/dev/null || true
+          grep -q "player(s) loaded by this client" out.txt
+
+      # The one check that actually exercises how chatwire GETS INTO a game on
+      # these platforms.  Preloading it into /bin/sh is not a Minecraft, and the
+      # library will sit there waiting for classes that never arrive -- but the
+      # dynamic loader still has to MAP it, resolve every symbol it imports, and
+      # run its initialiser.  A .so with an unresolved symbol fails right here,
+      # loudly, which is the failure this project is most likely to ship: the
+      # Windows build links against a static libstdc++ and would not have told
+      # us.  CHATWIRE_TIMEOUT keeps the doomed start-up poll short.
+      - name: The library actually preloads (POSIX)
+        if: matrix.os != 'windows-latest'
+        timeout-minutes: 2
+        run: |
+          ./build/chatwire-preload --timeout 1 --port 9001 -- \
+              sh -c 'echo "PORT=$CHATWIRE_PORT"' | tee pre.txt
+          grep -q "PORT=9001" pre.txt

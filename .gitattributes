@@ -1,0 +1,14 @@
+# chatwire is developed on Windows and has to run on Linux and macOS, so the
+# two files below must keep LF endings whatever the checkout does.
+#
+# chatwire-preload is a shell script.  A CRLF there puts a carriage return on the
+# end of the shebang, and the kernel then looks for an interpreter literally
+# called "sh\r" -- which fails as `bad interpreter: No such file or directory`,
+# an error naming a file that plainly exists.  It is one of the great
+# time-wasters of cross-platform work and it is entirely preventable here.
+tools/chatwire-preload text eol=lf
+
+# GitHub Actions runs workflow files through a YAML parser that is fine with
+# CRLF, but the `run:` blocks become shell scripts with carriage returns in
+# them, which fails in the same way one line at a time.
+*.yml text eol=lf

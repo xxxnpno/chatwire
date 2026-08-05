@@ -10,19 +10,30 @@
 // client messages, mod output, death messages, join/leave — so one hook catches
 // all of it.  The detour reads the component's text and broadcasts it.
 //
-// CLIENTS -> GAME.  Two verbs:
+// CLIENTS -> GAME.  Two commands, each spelled as the Java member it reaches:
 //
-//   chat.sendChatMessage -> EntityPlayerSP.sendChatMessage(String)
+//   net.minecraft.client.entity.EntityPlayerSP.sendChatMessage(String)
 //                  Goes to the SERVER, exactly as if typed.  A leading '/' runs
 //                  a command.  Other players see it.
-//   chat.addChatMessage  -> EntityPlayerSP.addChatMessage(IChatComponent)
+//   net.minecraft.client.entity.EntityPlayerSP.addChatMessage(IChatComponent)
 //                  CLIENT-side only.  Never transmitted.  Nobody else sees it.
 //
 // The distinction is the single most important thing about this API and the
-// easiest to get wrong, so the two are separate verbs rather than a flag -- and
-// the verbs carry the game's own method names, so that a reader who knows
-// Minecraft's source needs no explanation and one who does not can go and read
-// it.  `chat.send` and `chat.add` remain as aliases for the earlier spelling.
+// easiest to get wrong, so the two are separate commands rather than a flag --
+// and each one carries the game's own class and method name, so that a reader
+// who knows Minecraft's source needs no explanation and one who does not can go
+// and read it.
+//
+// There is exactly ONE spelling, and it is the fully-qualified member.  The
+// short forms (`chat.sendChatMessage`, `chat.send`, `chat.add`) are gone: a
+// short name is a second vocabulary to learn, and unlike the long one it cannot
+// be checked against anything.  `chat` survives only as the feature's own name
+// in the log.
+//
+// The counters this feature keeps are NOT a chat command -- there is no
+// `stats` method in Minecraft to name one after -- so they are answered by
+// `system.stats`, which is where the rest of chatwire's self-reporting lives.
+// See stats_json() at the bottom of this file.
 //
 // ===========================================================================
 // THREADING
@@ -71,15 +82,16 @@ namespace chatwire::features
         }
 
         /*
-            @brief Answers to "chat" and to the Java classes it actually calls.
+            @brief Answers to the Java classes it actually calls, and to nothing
+                   else.
             @details
-            `chat.addChatMessage` and
-            `net.minecraft.client.entity.EntityPlayerSP.addChatMessage` are the
-            same command.  The long spelling is the point of the short one made
-            explicit: the verbs were already named after Minecraft's methods so
-            that a reader who knows the source knows what they do, and naming the
-            CLASS as well removes the last thing they would have to guess -- which
-            of several `addChatMessage` overloads on which type this reaches.
+            A command names the exact member it reaches, so the class is part of
+            it: `net.minecraft.client.entity.EntityPlayerSP.addChatMessage` says
+            which of several `addChatMessage` overloads on which type this is.
+            "chat" used to be accepted as a short prefix and no longer is,
+            because a short name promises nothing -- it cannot be checked against
+            Minecraft's source, which is the entire reason the verbs were named
+            after methods in the first place.
 
             GuiNewChat is claimed too, because `printChatMessage` is the method
             the observer hooks, so the event and a future command for it agree.
@@ -90,8 +102,7 @@ namespace chatwire::features
         */
         [[nodiscard]] auto claims(const std::string_view prefix) const noexcept -> bool override
         {
-            return prefix == "chat"
-                || prefix == "net.minecraft.client.entity.EntityPlayerSP"
+            return prefix == "net.minecraft.client.entity.EntityPlayerSP"
                 || prefix == "net.minecraft.client.gui.GuiNewChat";
         }
 
@@ -119,15 +130,14 @@ namespace chatwire::features
         {
             try
             {
-                // The verbs are named after the Minecraft methods they reach:
+                // The verbs ARE the Minecraft methods they reach:
                 // EntityPlayerSP.sendChatMessage and EntityPlayerSP.addChatMessage.
                 // Anyone who has read the game's source already knows what these
                 // do and, more usefully, knows the difference between them --
-                // which "send" and "add" leave you guessing at.  The short forms
-                // still work, because they are what the first clients were
-                // written against.
-                const bool send{ cmd.verb == "sendChatMessage" || cmd.verb == "send" };
-                const bool add{ cmd.verb == "addChatMessage" || cmd.verb == "add" };
+                // which "send" and "add" left you guessing at, and which is why
+                // those two spellings are no longer accepted.
+                const bool send{ cmd.verb == "sendChatMessage" };
+                const bool add{ cmd.verb == "addChatMessage" };
                 if (send || add)
                 {
                     auto text{ chatwire::json::get_string(cmd.body, "text") };
@@ -151,19 +161,12 @@ namespace chatwire::features
                     return deliver(*text, send);
                 }
 
-                if (cmd.verb == "stats")
-                {
-                    return chatwire::response::success(chatwire::json::object(
-                        chatwire::json::field("lines_seen",
-                            static_cast<std::int64_t>(g_lines_seen.load(std::memory_order_relaxed)))
-                        + "," + chatwire::json::field("sent",
-                            static_cast<std::int64_t>(g_sent.load(std::memory_order_relaxed)))
-                        + "," + chatwire::json::field("added",
-                            static_cast<std::int64_t>(g_added.load(std::memory_order_relaxed)))));
-                }
-
+                // No `stats` here: the counters are chatwire's own bookkeeping,
+                // not a method on this class, so naming one after this class
+                // would be the one thing these names promise never to do.  They
+                // are answered by `system.stats`.
                 return chatwire::response::failure(
-                    "unknown verb; try sendChatMessage, addChatMessage or stats");
+                    "unknown member; try sendChatMessage or addChatMessage");
             }
             catch (...)
             {
@@ -206,10 +209,13 @@ namespace chatwire::features
                 }
                 if (!sink) { return; }
 
-                // Named for the method it comes out of, GuiNewChat.printChatMessage,
-                // so the event and the source agree.
+                // Named for the method it comes out of, in full, so the event
+                // reads like the commands do and can be checked against the same
+                // source.  The short spellings ("printChatMessage", and "chat"
+                // before it) are gone with the short command prefixes.
                 const std::string payload{ chatwire::json::object(
-                    chatwire::json::field("type", "printChatMessage") + ","
+                    chatwire::json::field(
+                        "type", "net.minecraft.client.gui.GuiNewChat.printChatMessage") + ","
                     + chatwire::json::field("formatted", formatted_view) + ","
                     + chatwire::json::field("plain", plain_view)) };
 
@@ -278,6 +284,33 @@ namespace chatwire::features::chat
     inline auto set_console_sink(const chatwire::features::console_sink sink) noexcept -> void
     {
         chatwire::features::g_console_sink.store(sink, std::memory_order_release);
+    }
+
+    /*
+        @brief The counters, as the JSON body `system.stats` answers with.
+        @details
+        Lives here because the numbers do, and is READ from the system feature
+        rather than reachable as a chat command, because there is no Minecraft
+        member called `stats` for such a command to be named after.  The host
+        wires the two together (see chatwire::features::system::set_stats_source)
+        so that neither feature has to include the other.
+
+        Safe from any thread: three relaxed loads.  They are not a consistent
+        snapshot of each other and do not need to be -- nothing here is a
+        difference or a ratio.
+    */
+    [[nodiscard]] inline auto stats_json() -> std::string
+    {
+        return chatwire::json::object(
+            chatwire::json::field("lines_seen",
+                static_cast<std::int64_t>(
+                    chatwire::features::g_lines_seen.load(std::memory_order_relaxed)))
+            + "," + chatwire::json::field("sent",
+                static_cast<std::int64_t>(
+                    chatwire::features::g_sent.load(std::memory_order_relaxed)))
+            + "," + chatwire::json::field("added",
+                static_cast<std::int64_t>(
+                    chatwire::features::g_added.load(std::memory_order_relaxed))));
     }
 
     /*

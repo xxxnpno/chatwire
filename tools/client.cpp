@@ -9,18 +9,28 @@
 //   chatwire-client --raw            print the raw JSON instead of the text
 //
 // AT THE PROMPT
-//   any text                      -> chat.sendChatMessage (to the SERVER, as typed)
-//   /chat.addChatMessage <text>   -> client-side only, nobody else sees it
-//   /chat.stats                   -> counters
+//   any text
+//       -> EntityPlayerSP.sendChatMessage: to the SERVER, exactly as typed
+//   /net.minecraft.client.entity.EntityPlayerSP.addChatMessage <text>
+//       -> client-side only, nobody else sees it
+//   /net.minecraft.world.World.playerEntities
+//       -> every player this client has loaded, with name and UUID
 //   /system.status                -> version, mapping, port, clients
+//   /system.stats                 -> counters
 //   /system.ping                  -> liveness
 //   /system.detach                -> stops chatwire (it stays loaded)
 //   /quit                         -> disconnect, leaving chatwire running
 //
-// The commands ARE the protocol verbs, and any `/feature.verb [text]` is sent
-// through untranslated -- so a feature added to chatwire is reachable from here
-// without touching this file.  The older short forms (/add, /stats, /status,
-// /ping, /detach) still work as aliases.
+// The commands ARE the protocol verbs, typed exactly as they go on the wire,
+// and any `/<prefix>.<member> [text]` is sent through untranslated -- so a
+// feature added to chatwire is reachable from here without touching this file.
+//
+// They are long, and that is the protocol's decision rather than this file's: a
+// command names the Java member it reaches, so you can check what you are
+// getting against Minecraft's source.  This client keeps NO short aliases of its
+// own -- /add, /stats, /status and the rest are gone, along with the `chat.` and
+// `world.` prefixes the server used to accept.  A reference client with a
+// private vocabulary teaches you its vocabulary instead of the API's.
 //
 // The default is `send` rather than `add` because that is what a chat client
 // does when you type into it.  `add` is the deliberate one, so it gets a prefix.
@@ -33,23 +43,41 @@
 #include <thread>
 #include <vector>
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include "chatwire/net.hpp"
+#include "chatwire/terminal.hpp"
 
 namespace
 {
-    std::atomic<bool> g_running{ true };
-    SOCKET            g_sock{ INVALID_SOCKET };
-    bool              g_raw{ false };
+    std::atomic<bool>       g_running{ true };
+    chatwire::net::socket_t g_sock{ chatwire::net::invalid_socket };
+    bool                    g_raw{ false };
+
+    // The protocol's names, spelled once.  Written out in full at the prompt
+    // too: this client does not translate, so what you type here is what a tool
+    // in any other language would put in its `cmd` field.
+    constexpr const char* k_send{
+        "net.minecraft.client.entity.EntityPlayerSP.sendChatMessage" };
+    constexpr const char* k_add{
+        "net.minecraft.client.entity.EntityPlayerSP.addChatMessage" };
+    constexpr const char* k_players{ "net.minecraft.world.World.playerEntities" };
+    constexpr const char* k_chat_event{
+        "net.minecraft.client.gui.GuiNewChat.printChatMessage" };
 
     /* ---- a minimal RFC 6455 client -------------------------------------- */
 
-    auto send_all(const SOCKET sock, const char* data, std::size_t n) -> bool
+    auto send_all(const chatwire::net::socket_t sock, const char* data, std::size_t n) -> bool
     {
         while (n > 0)
         {
-            const int written{ ::send(sock, data, static_cast<int>(n), 0) };
-            if (written <= 0) { return false; }
+            const std::ptrdiff_t written{ chatwire::net::send_some(sock, data, n) };
+            if (written <= 0)
+            {
+                if (written < 0 && chatwire::net::retryable(chatwire::net::last_error()))
+                {
+                    continue;
+                }
+                return false;
+            }
             data += written;
             n    -= static_cast<std::size_t>(written);
         }
@@ -64,7 +92,7 @@ namespace
         page cannot make a proxy see attacker-chosen plaintext — so a fixed mask
         would technically work, but a varying one is what the RFC intends.
     */
-    auto send_text(const SOCKET sock, const std::string_view payload) -> bool
+    auto send_text(const chatwire::net::socket_t sock, const std::string_view payload) -> bool
     {
         std::vector<unsigned char> frame;
         frame.push_back(0x81u);                          // FIN + text
@@ -102,21 +130,27 @@ namespace
         return send_all(sock, reinterpret_cast<const char*>(frame.data()), frame.size());
     }
 
-    auto recv_exact(const SOCKET sock, unsigned char* buffer, const std::size_t n) -> bool
+    auto recv_exact(const chatwire::net::socket_t sock, unsigned char* buffer, const std::size_t n) -> bool
     {
         std::size_t got{ 0 };
         while (got < n)
         {
-            const int r{ ::recv(sock, reinterpret_cast<char*>(buffer + got),
-                                static_cast<int>(n - got), 0) };
-            if (r <= 0) { return false; }
+            const std::ptrdiff_t r{ chatwire::net::recv_some(sock, buffer + got, n - got) };
+            if (r <= 0)
+            {
+                if (r < 0 && chatwire::net::retryable(chatwire::net::last_error()))
+                {
+                    continue;
+                }
+                return false;
+            }
             got += static_cast<std::size_t>(r);
         }
         return true;
     }
 
     /* @brief Reads one server frame.  Server frames are never masked. */
-    auto recv_frame(const SOCKET sock, std::string& out, unsigned char& opcode) -> bool
+    auto recv_frame(const chatwire::net::socket_t sock, std::string& out, unsigned char& opcode) -> bool
     {
         unsigned char header[2]{};
         if (!recv_exact(sock, header, 2u)) { return false; }
@@ -144,7 +178,7 @@ namespace
                              static_cast<std::size_t>(length));
     }
 
-    auto handshake(const SOCKET sock, const unsigned short port) -> bool
+    auto handshake(const chatwire::net::socket_t sock, const unsigned short port) -> bool
     {
         const std::string request{
             "GET / HTTP/1.1\r\n"
@@ -159,8 +193,15 @@ namespace
         char        chunk[1024]{};
         while (response.find("\r\n\r\n") == std::string::npos)
         {
-            const int n{ ::recv(sock, chunk, sizeof(chunk), 0) };
-            if (n <= 0) { return false; }
+            const std::ptrdiff_t n{ chatwire::net::recv_some(sock, chunk, sizeof(chunk)) };
+            if (n <= 0)
+            {
+                if (n < 0 && chatwire::net::retryable(chatwire::net::last_error()))
+                {
+                    continue;
+                }
+                return false;
+            }
             response.append(chunk, static_cast<std::size_t>(n));
             if (response.size() > 16384u) { return false; }
         }
@@ -237,6 +278,54 @@ namespace
         return out;
     }
 
+    /*
+        @brief Prints a playerEntities result as a list rather than as JSON.
+        @details
+        The reader does not know which command a reply belongs to -- the
+        protocol has no correlation id and does not need one for a client with
+        one prompt -- so this recognises the ANSWER instead: a `players` array
+        is a shape only that command produces.
+
+        Entries are flat objects of two string fields, so '}' ends one and ']'
+        ends the list.  That is a parser this reference client can afford to be
+        honest about: it is showing that the API is usable, not shipping a JSON
+        library, and `--raw` is right there for anyone who wants the bytes.
+
+        @return false when this payload is not a player list, so the caller can
+                fall through to its other cases.
+    */
+    auto render_players(const std::string& payload) -> bool
+    {
+        const std::string needle{ "\"players\":[" };
+        const std::size_t at{ payload.find(needle) };
+        if (at == std::string::npos) { return false; }
+
+        std::size_t shown{ 0 };
+        for (std::size_t i{ at + needle.size() }; i < payload.size(); ++i)
+        {
+            if (payload[i] == ']') { break; }
+            if (payload[i] != '{') { continue; }
+
+            const std::size_t end{ payload.find('}', i) };
+            if (end == std::string::npos) { break; }
+
+            const std::string entry{ payload.substr(i, end - i + 1u) };
+            i = end;
+
+            std::println("  \x1b[97m{:<17}\x1b[0m \x1b[90m{}\x1b[0m",
+                        json_string(entry, "name"), json_string(entry, "uuid"));
+            ++shown;
+        }
+
+        // Said every time, including for 0: "the client has loaded none" and
+        // "the command did nothing" look identical otherwise.  This is the
+        // client's entity list, not the server's roster -- on a big server it
+        // is a small fraction of the tab list, and a count with no explanation
+        // is exactly how that gets mistaken for a bug.
+        std::println("\x1b[90m  {} player(s) loaded by this client\x1b[0m", shown);
+        return true;
+    }
+
     auto reader_thread() -> void
     {
         std::string   payload;
@@ -258,10 +347,12 @@ namespace
             }
 
             const std::string type{ json_string(payload, "type") };
-            // "chat" was the event's name before it was renamed after the method
-            // it comes from; still accepted so a new client can talk to a DLL
-            // someone has not got round to replacing.
-            if (type == "printChatMessage" || type == "chat")
+            // The event is named after the method it comes out of, in full, the
+            // same way the commands are.  The earlier short spellings ("chat",
+            // then "printChatMessage") are NOT accepted: this client is the
+            // reference for one vocabulary, and quietly understanding two would
+            // hide a version mismatch that the protocol should report.
+            if (type == k_chat_event)
             {
                 const std::string formatted{ json_string(payload, "formatted") };
                 const std::string plain{ json_string(payload, "plain") };
@@ -270,6 +361,10 @@ namespace
             else if (payload.find("\"ok\":false") != std::string::npos)
             {
                 std::println("\x1b[91m  ! {}\x1b[0m", json_string(payload, "error"));
+            }
+            else if (render_players(payload))
+            {
+                // Already printed as a list.
             }
             else
             {
@@ -297,9 +392,7 @@ namespace
     */
     auto wait_before_exit(const int code) -> int
     {
-        const HANDLE in{ ::GetStdHandle(STD_INPUT_HANDLE) };
-        DWORD        mode{ 0 };
-        if (in != INVALID_HANDLE_VALUE && ::GetConsoleMode(in, &mode))
+        if (chatwire::terminal::stdin_is_interactive())
         {
             std::println("\n  press enter to close.");
             (void)std::getchar();
@@ -344,37 +437,44 @@ int main(const int argc, char** const argv)
         else if (arg == "--help" || arg == "-h")
         {
             std::println("chatwire-client [--port N] [--raw]\n\n"
-                        "  <text>        send to the server, as if typed\n"
-                        "  /add <text>   show only to this client\n"
-                        "  /stats        counters\n"
-                        "  /quit         exit");
+                        "  <text>            send to the server, as if typed\n"
+                        "  /{} <text>\n"
+                        "                    show only to this client\n"
+                        "  /{}\n"
+                        "                    every player this client has loaded\n"
+                        "  /system.status    version, mapping, port, clients\n"
+                        "  /system.stats     counters\n"
+                        "  /system.ping      liveness\n"
+                        "  /system.detach    stop chatwire (it stays loaded)\n"
+                        "  /quit             exit\n\n"
+                        "Commands are the protocol's own, typed in full: each one names the\n"
+                        "Java member it reaches.  There are no short aliases.",
+                        k_add, k_players);
             return 0;
         }
     }
 
-    // Enable ANSI colour on the Windows console; without this the escape codes
-    // print as literal garbage on older consoles.
-    if (const HANDLE out{ ::GetStdHandle(STD_OUTPUT_HANDLE) }; out != INVALID_HANDLE_VALUE)
-    {
-        DWORD mode{ 0 };
-        if (::GetConsoleMode(out, &mode))
-        {
-            (void)::SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-        }
-    }
-    // The game sends UTF-8; without this the section signs and any non-ASCII
-    // player name print as mojibake.
-    (void)::SetConsoleOutputCP(CP_UTF8);
+    // Colour and UTF-8.  Nothing to do off Windows, where a terminal has
+    // understood both for decades; on Windows, without this the escape codes
+    // print as literal garbage and every section sign arrives as mojibake.
+    chatwire::terminal::enable_ansi();
 
-    WSADATA wsa{};
-    if (::WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+    if (!chatwire::net::startup())
     {
-        std::println("WSAStartup failed");
+        std::println("could not initialise the socket library");
         return 1;
     }
 
     g_sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (g_sock == INVALID_SOCKET) { std::println("socket() failed"); return 1; }
+    if (g_sock == chatwire::net::invalid_socket)
+    {
+        std::println("socket() failed");
+        return 1;
+    }
+    // Suppresses SIGPIPE on macOS: writing to a socket chatwire has closed would
+    // otherwise kill this process outright instead of returning an error, which
+    // is exactly what happens on the /system.detach path.
+    chatwire::net::prepare(g_sock);
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
@@ -391,16 +491,16 @@ int main(const int argc, char** const argv)
                     "    1. Minecraft is running and chatwire has been injected\n"
                     "    2. the game's console says \"chatwire ready on ws://127.0.0.1:<port>\"\n"
                     "    3. that port is the one you are dialling - pass --port if it is not", port);
-        ::closesocket(g_sock);
-        ::WSACleanup();
+        chatwire::net::close_socket(g_sock);
+        chatwire::net::cleanup();
         return wait_before_exit(1);
     }
     if (!handshake(g_sock, port))
     {
         std::println("\n\x1b[91m  something is listening on port {}, but it is not "
                     "chatwire.\x1b[0m\n  The websocket handshake was refused.", port);
-        ::closesocket(g_sock);
-        ::WSACleanup();
+        chatwire::net::close_socket(g_sock);
+        chatwire::net::cleanup();
         return wait_before_exit(1);
     }
 
@@ -408,14 +508,18 @@ int main(const int argc, char** const argv)
     // what it shows you is what you would put in a `cmd` field yourself -- a
     // client with its own private vocabulary teaches you its vocabulary instead
     // of the API's.
-    std::println("\x1b[92mconnected.\x1b[0m  anything you type goes to "
-                "\x1b[96mchat.sendChatMessage\x1b[0m\n"
-                "  \x1b[96m/chat.addChatMessage \x1b[90m<text>\x1b[0m  "
-                "\x1b[96m/chat.stats\x1b[0m  "
-                "\x1b[96m/system.status\x1b[0m  "
+    std::println("\x1b[92mconnected.\x1b[0m  anything you type goes to\n"
+                "  \x1b[96m{}\x1b[0m\n\n"
+                "  \x1b[96m/{} \x1b[90m<text>\x1b[0m\n"
+                "      \x1b[90mclient-side only; nobody else sees it\x1b[0m\n"
+                "  \x1b[96m/{}\x1b[0m\n"
+                "      \x1b[90mevery player this client has loaded, with name and UUID\x1b[0m\n"
+                "  \x1b[96m/system.status\x1b[0m  "
+                "\x1b[96m/system.stats\x1b[0m  "
                 "\x1b[96m/system.ping\x1b[0m  "
                 "\x1b[96m/system.detach\x1b[0m  "
-                "\x1b[90m/quit\x1b[0m\n");
+                "\x1b[90m/quit\x1b[0m\n",
+                k_send, k_add, k_players);
 
     std::thread reader{ &reader_thread };
 
@@ -429,21 +533,15 @@ int main(const int argc, char** const argv)
         if (line == "/quit") { break; }
         else if (line[0] == '/')
         {
-            // The short spellings the first version of this client used.  Kept
-            // as aliases so muscle memory and old notes still work, but they are
-            // rewritten to the real verb immediately -- there is exactly one
-            // vocabulary past this point.
-            std::string command{ line.substr(1) };
-            if (command.rfind("add ", 0) == 0) { command = "chat.addChatMessage " + command.substr(4); }
-            else if (command == "stats")       { command = "chat.stats"; }
-            else if (command == "status")      { command = "system.status"; }
-            else if (command == "ping")        { command = "system.ping"; }
-            else if (command == "detach")      { command = "system.detach"; }
-
-            // Everything else is passed through UNINTERPRETED as feature.verb,
-            // with the rest of the line as `text`.  That is what makes this a
-            // reference client rather than a menu: a feature added to chatwire
-            // tomorrow is reachable from here today, with no change to this file.
+            // Everything after the slash is passed through UNINTERPRETED as
+            // <prefix>.<member>, with the rest of the line as `text`.  There are
+            // no aliases to rewrite: /add, /stats, /status, /ping and /detach
+            // are gone, and so is every short server prefix they expanded to.
+            // That is what makes this a reference client rather than a menu --
+            // a feature added to chatwire tomorrow is reachable from here today,
+            // with no change to this file, and what you type is what a tool in
+            // any other language would send.
+            const std::string command{ line.substr(1) };
             const std::size_t space{ command.find(' ') };
             const std::string verb{ command.substr(0, space) };
             const std::string text{ space == std::string::npos
@@ -452,8 +550,9 @@ int main(const int argc, char** const argv)
 
             if (verb.find('.') == std::string::npos)
             {
-                std::println("  \x1b[91mnot a command:\x1b[0m {}"
-                            "  \x1b[90m(commands look like feature.verb)\x1b[0m", verb);
+                std::println("  \x1b[91mnot a command:\x1b[0m {}\n"
+                            "  \x1b[90m(commands look like <class>.<member>, e.g. {})\x1b[0m",
+                            verb, k_players);
                 continue;
             }
 
@@ -477,7 +576,7 @@ int main(const int argc, char** const argv)
         }
         else
         {
-            request = R"({"cmd":"chat.sendChatMessage","text":")"
+            request = R"({"cmd":")" + std::string{ k_send } + R"(","text":")"
                       + json_escape(line) + R"("})";
         }
 
@@ -489,11 +588,13 @@ int main(const int argc, char** const argv)
     }
 
     g_running.store(false, std::memory_order_release);
-    // shutdown() rather than closesocket(): it wakes the reader out of recv()
-    // so the join below cannot hang, and the reader still owns the handle.
-    (void)::shutdown(g_sock, SD_BOTH);
+    // shutdown() rather than close(): it wakes the reader out of recv() on all
+    // three platforms, so the join below cannot hang, and the descriptor stays
+    // valid until after that join rather than being handed back to the OS while
+    // another thread is still blocked on it.
+    chatwire::net::shutdown_both(g_sock);
     if (reader.joinable()) { reader.join(); }
-    ::closesocket(g_sock);
-    ::WSACleanup();
+    chatwire::net::close_socket(g_sock);
+    chatwire::net::cleanup();
     return 0;
 }
