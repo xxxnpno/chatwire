@@ -57,10 +57,54 @@ them — only a field probe can. That is why the order is what it is.
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-# -> build/chatwire.dll
 ```
 
-Inject `chatwire.dll` into the running Minecraft process with any injector. Then:
+You get four binaries:
+
+| Binary | What it is |
+|---|---|
+| `chatwire.dll` | the library, injected into Minecraft |
+| `chatwire-inject.exe` | finds Minecraft and injects the DLL |
+| `chatwire-client.exe` | a terminal chat client — the reference consumer |
+| `chatwire-mock.exe` | serves the protocol with **fake** chat, so you can build against it with no game running |
+
+Start Minecraft, then:
+
+```
+> chatwire-inject
+chatwire-inject
+
+  dll   : C:\...\chatwire.dll
+  target: pid 18244
+
+  injecting...
+
+  injected.  connect to  ws://127.0.0.1:24455
+
+> chatwire-client
+connected.  type to chat, /add for client-side, /quit to exit
+
+[Team] Steve: hello there              ← lines from the game, in colour
+Alex joined the game
+hey everyone                           ← you typed this; it went to the server
+/add just for me                       ← only you see this
+```
+
+### Building a consumer without Minecraft
+
+`chatwire-mock` speaks the identical protocol and emits synthetic chat lines. It links the
+real server and the real JSON, so the wire format cannot drift from production:
+
+```bash
+chatwire-mock --port 24455 --interval 1000
+```
+
+Point your tool at it and develop with no game open. The only thing it cannot catch is a
+mapping problem inside Minecraft itself.
+
+### From code
+
+Inject `chatwire.dll` with `chatwire-inject` (or any injector). Then:
 
 ```js
 const ws = new WebSocket("ws://127.0.0.1:24455");
@@ -171,6 +215,28 @@ chatwire.ixx       start / stop, the public surface
 `sdk.ixx` is a facade exposing only `std::string`, `bool` and function pointers, so no vmhook
 type crosses it. A feature is written in terms of "send this chat message", never in terms of
 klasses, oops and detours.
+
+## Tools
+
+| Command | |
+|---|---|
+| `chatwire-inject` | find Minecraft and inject |
+| `chatwire-inject --list` | list candidate processes without injecting |
+| `chatwire-inject --pid N` | pick a specific process |
+| `chatwire-inject --dll P` | inject a different DLL |
+| `chatwire-client` | connect and chat |
+| `chatwire-client --raw` | print raw JSON instead of rendered text |
+| `chatwire-client --port N` | a different port |
+| `chatwire-mock` | serve the protocol with fake chat |
+| `chatwire-mock --quiet` | echo commands only, emit no chat |
+
+The injector uses a plain `LoadLibraryW` remote thread. Manual mapping and thread hijacking
+exist to avoid detection; chatwire is a tool you run against your own game, so there is nothing
+to hide from — and `LoadLibraryW` is the one method the loader performs itself, which means the
+DLL gets a real module handle, real TLS and a real `DllMain`.
+
+It **waits for the remote thread and checks its exit code**, which is `LoadLibraryW`'s return
+value. Not waiting is how an injector reports success for a DLL that never loaded.
 
 ## Adding a feature
 

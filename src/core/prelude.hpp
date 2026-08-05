@@ -44,6 +44,7 @@
 
 #include <array>
 #include <atomic>
+#include <concepts>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -59,5 +60,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>

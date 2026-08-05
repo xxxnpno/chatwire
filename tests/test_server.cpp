@@ -288,6 +288,23 @@ int main()
               chatwire::json::escape("\xC2\xA7""a") == "\xC2\xA7""a");
     }
 
+        // REGRESSION.  An unconstrained bool overload SWALLOWS string literals:
+        // const char* -> bool is a standard conversion while const char* ->
+        // string_view is user-defined, so bool wins and field("type","chat")
+        // silently emits `"type":true`.  Valid JSON, completely wrong, and
+        // invisible until a consumer wonders why a string field is a boolean.
+        // It shipped exactly that way for one build.  These pin the resolution.
+        check("json_field_literal_is_a_string",
+              chatwire::json::field("type", "chat") == R"("type":"chat")");
+        check("json_field_bool_is_a_bool",
+              chatwire::json::field("ok", true) == R"("ok":true)");
+        check("json_field_string_view_is_a_string",
+              chatwire::json::field("k", std::string_view{ "v" }) == R"("k":"v")");
+        check("json_field_std_string_is_a_string",
+              chatwire::json::field("k", std::string{ "v" }) == R"("k":"v")");
+        check("json_field_int_is_a_number",
+              chatwire::json::field("n", std::int64_t{ 42 }) == R"("n":42)");
+
     // ── the server, over a real socket ─────────────────────────────────────
     {
         chatwire::ws::server server;

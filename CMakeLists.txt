@@ -137,6 +137,48 @@ if(MINGW)
 endif()
 
 # ---------------------------------------------------------------------------
+# Tools: the injector and the reference client.
+#
+# Both are plain Win32 translation units with NO import of the chatwire modules.
+# They talk to chatwire the way any other consumer would -- the injector through
+# the OS, the client through the socket -- which is the point: if the reference
+# client needs privileged access to the library, the API is not really an API.
+#
+# It also sidesteps the compiler limitation that shaped src/entry.ixx: neither
+# GCC 15 nor Clang 19 can compile a TU that both imports a module and includes
+# <windows.h>.
+# ---------------------------------------------------------------------------
+option(CHATWIRE_BUILD_TOOLS "Build the injector and the reference client" ON)
+
+if(CHATWIRE_BUILD_TOOLS)
+    add_executable(chatwire-inject tools/injector.cpp)
+    chatwire_apply_warnings(chatwire-inject)
+
+    # The mock serves chatwire's protocol with synthetic chat, so a consumer can
+    # be built and tested without a Minecraft client open on the next monitor.
+    # It links the library (it uses the real server and JSON), which is what
+    # keeps it honest: the wire format cannot drift from the real one.
+    add_executable(chatwire-mock tools/mock.cpp)
+    target_link_libraries(chatwire-mock PRIVATE chatwire::chatwire)
+    chatwire_apply_warnings(chatwire-mock)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_options(chatwire-mock PRIVATE -Wl,--allow-multiple-definition)
+    endif()
+
+    add_executable(chatwire-client tools/client.cpp)
+    target_link_libraries(chatwire-client PRIVATE ws2_32)
+    chatwire_apply_warnings(chatwire-client)
+
+    # Self-contained, like the DLL: these are handed to users who will not have
+    # a MinGW runtime on PATH.
+    if(MINGW)
+        target_link_options(chatwire-inject PRIVATE -static -static-libgcc -static-libstdc++)
+        target_link_options(chatwire-mock   PRIVATE -static -static-libgcc -static-libstdc++)
+        target_link_options(chatwire-client PRIVATE -static -static-libgcc -static-libstdc++)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Tests.
 #
 # Only the halves that can run without Minecraft: the WebSocket server, the

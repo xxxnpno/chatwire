@@ -92,11 +92,43 @@ export namespace chatwire::json
         return "\"" + escape(key) + "\":" + std::to_string(value);
     }
 
-    /* @brief `"key":true` */
-    [[nodiscard]] inline auto field(const std::string_view key, const bool value)
+    /*
+        @brief `"key":true`
+        @details
+        CONSTRAINED to actual bool, and that constraint is load-bearing.
+
+        Unconstrained, this overload SWALLOWS STRING LITERALS: `const char*` to
+        `bool` is a standard pointer-to-bool conversion, while `const char*` to
+        `std::string_view` is user-defined, so overload resolution prefers bool.
+        `field("type", "chat")` then silently emits `"type":true` — valid JSON,
+        completely wrong, and invisible until a consumer wonders why a string
+        field is a boolean.  It shipped exactly that way for one build here.
+
+        requires std::same_as<bool> removes the overload from consideration for
+        anything that is not already a bool, so a literal has nowhere to go but
+        the string_view overload.
+    */
+    template<typename bool_type>
+        requires std::same_as<std::remove_cvref_t<bool_type>, bool>
+    [[nodiscard]] inline auto field(const std::string_view key, const bool_type value)
         -> std::string
     {
         return "\"" + escape(key) + "\":" + (value ? "true" : "false");
+    }
+
+    /*
+        @brief `"key":"value"` for a string LITERAL.
+        @details
+        Exists so a literal is unambiguously a string even before the constraint
+        above is considered: an exact match beats every conversion, so this is
+        chosen outright.  Belt and braces on the trap described above, because
+        the failure mode is silent.
+    */
+    template<std::size_t n>
+    [[nodiscard]] inline auto field(const std::string_view key, const char (&value)[n])
+        -> std::string
+    {
+        return "\"" + escape(key) + "\":\"" + escape(std::string_view{ value, n - 1u }) + "\"";
     }
 
     /*
