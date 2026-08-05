@@ -1,16 +1,22 @@
 # chatwire
 
-A live WebSocket API for **Minecraft 1.8.9**. Inject it, connect a WebSocket, and you can read
-every chat line as it appears and send chat back — from any language, over a socket.
+A live WebSocket API into a running **Minecraft 1.8.9** client. Inject it, connect a WebSocket,
+and read and drive the game from any language over a socket.
 
 Built on [vmhook](https://github.com/xxxnpno/vmhook): pure HotSpot introspection, **no JNI, no
 JVMTI, no Forge, no mod loader**. It attaches to a vanilla client the same way it attaches to a
 modded one.
 
+**Chat is the first feature, not the shape of the project.** The protocol is `feature.verb`; a
+feature is one file that declares a name and a handler, and everything else — routing, the
+socket, the game-thread marshalling, the lifecycle — already exists. Player list, inventory,
+world state and the rest land as new features, not as new plumbing. See
+[Adding a feature](#adding-a-feature).
+
 ```
 ┌──────────────┐   ws://127.0.0.1:24455    ┌───────────────────────────────┐
 │  your tool   │ ◄─────────────────────────►│  chatwire (injected)          │
-│  any lang    │   chat lines out           │   ├─ hooks GuiNewChat         │
+│  any lang    │   events out               │   ├─ feature registry         │
 │              │   commands in              │   ├─ pumps on Minecraft.runTick│
 └──────────────┘                            │   └─ speaks to the game       │
                                             └───────────────────────────────┘
@@ -24,8 +30,7 @@ modded one.
 | **you → game** | `chat.sendChatMessage` — say it to the server, exactly as if typed |
 | **you → game** | `chat.addChatMessage` — show it only to this client, never transmitted |
 
-Chat is the first feature, not the only one. The architecture is built around adding more —
-see [Adding a feature](#adding-a-feature).
+Everything above is the `chat` feature. `system` adds `status`, `ping` and `detach`.
 
 ## chatwire is not a proxy
 
@@ -222,14 +227,23 @@ they are separate verbs rather than a flag:
 
 ## Design
 
-### Everything Java happens on the game thread
+### Everything that touches the game happens on the game thread
 
-vmhook's contract: you may only call into Java from a real JavaThread *inside an interpreter
-detour*. Calling from a plain native thread crashes the VM — a GC stack-walk faults on the
-missing frame anchor.
+This is a rule about **Minecraft**, not about the JVM, and the difference matters because it is
+easy to go and fix the wrong one.
 
-chatwire's WebSocket threads therefore **never touch Java**. They hand a task to a pump, and
-the pump runs it from inside a detour on Minecraft's own thread:
+vmhook reads Java state from any thread, and since it grew `vmhook::attach_current_thread()` it
+can *call* Java from any thread too — it asks the VM to adopt the calling thread, so the thread
+gets the frame anchor a GC stack-walk needs. The VM is not what stops you.
+
+Minecraft is. The client is single-threaded by construction: the world, the entity list, the
+chat GUI and the network channel are each owned by one thread and none of them are guarded.
+Calling `sendChatMessage` from a socket thread is perfectly legal as far as HotSpot is concerned
+and still corrupts the game's own state. Attaching the thread does not fix that; only running on
+the owning thread does.
+
+So chatwire's WebSocket threads **never touch game state**. They hand a task to a pump, and the
+pump runs it from inside a detour on Minecraft's own thread:
 
 ```
 websocket thread              minecraft client thread
@@ -240,6 +254,10 @@ submit(task)     ────────►    Minecraft.runTick() fires
 
 `Minecraft.runTick` is the natural pump: called every client tick, on the thread that owns the
 world. Latency is a fraction of a tick.
+
+This is also what keeps the next feature cheap. A player list, an inventory read or a world
+query has the same shape as a chat send — submit a task, get an answer — so a new feature
+inherits the threading model instead of having to re-decide it.
 
 ### Stability
 
