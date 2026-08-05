@@ -1,0 +1,271 @@
+# chatwire
+
+A live WebSocket API for **Minecraft 1.8.9**. Inject it, connect a WebSocket, and you can read
+every chat line as it appears and send chat back — from any language, over a socket.
+
+Built on [vmhook](https://github.com/xxxnpno/vmhook): pure HotSpot introspection, **no JNI, no
+JVMTI, no Forge, no mod loader**. It attaches to a vanilla client the same way it attaches to a
+modded one.
+
+```
+┌──────────────┐   ws://127.0.0.1:24455    ┌───────────────────────────────┐
+│  your tool   │ ◄─────────────────────────►│  chatwire (injected)          │
+│  any lang    │   chat lines out           │   ├─ hooks GuiNewChat         │
+│              │   commands in              │   ├─ pumps on Minecraft.runTick│
+└──────────────┘                            │   └─ speaks to the game       │
+                                            └───────────────────────────────┘
+```
+
+## What it does today
+
+| Direction | What |
+|---|---|
+| **game → you** | every line that reaches the chat box, with and without colour codes |
+| **you → game** | `chat.send` — say it to the server, exactly as if typed |
+| **you → game** | `chat.add` — show it only to this client, never transmitted |
+
+Chat is the first feature, not the only one. The architecture is built around adding more —
+see [Adding a feature](#adding-a-feature).
+
+## All three mappings
+
+Minecraft 1.8.9 ships under three different naming schemes, and chatwire handles all of them.
+The same field is:
+
+| Mapping | Class | Field | Seen in |
+|---|---|---|---|
+| **MCP** | `net/minecraft/client/Minecraft` | `thePlayer` | Forge / MCP dev environments |
+| **SRG** | `net/minecraft/client/Minecraft` | `field_71439_g` | Searge-mapped builds |
+| **OBF** | `ave` | `h` | the vanilla jar Mojang ships |
+
+Detection is by **probing the JVM**, never by guessing from a launcher name or a jar hash:
+
+```
+class net/minecraft/client/Minecraft exists?
+├─ yes ─ field theMinecraft exists?  ──► MCP
+│        field field_71432_P exists? ──► SRG
+│        neither                     ──► unsupported build, refuse to inject
+└─ no ── class ave exists?           ──► OBF
+         no                          ──► not Minecraft 1.8.9
+```
+
+MCP and SRG share class names and differ only in members, so the class check cannot separate
+them — only a field probe can. That is why the order is what it is.
+
+## Quick start
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+# -> build/chatwire.dll
+```
+
+Inject `chatwire.dll` into the running Minecraft process with any injector. Then:
+
+```js
+const ws = new WebSocket("ws://127.0.0.1:24455");
+
+ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === "chat") console.log(msg.plain);   // every line in chat
+};
+
+// say it to the server, as if typed
+ws.send(JSON.stringify({ cmd: "chat.send", text: "hello world" }));
+
+// show it only to me
+ws.send(JSON.stringify({ cmd: "chat.add", text: "§athis is client-side only" }));
+```
+
+The port is `24455` by default, or set `CHATWIRE_PORT` in the game's environment.
+
+## Protocol
+
+Every message is one flat JSON object. Commands are `feature.verb`.
+
+**Pushed to you, unprompted:**
+
+```json
+{"type":"chat","formatted":"§b[Team] §fhi","plain":"[Team] hi"}
+```
+
+`formatted` keeps the `§` colour codes; `plain` has them stripped. Use whichever suits.
+
+**Sent by you:**
+
+| Command | Arguments | Effect |
+|---|---|---|
+| `chat.send` | `text` (≤100 chars) | Sends to the server. A leading `/` runs a command. |
+| `chat.add` | `text` | Client-side only. Nobody else sees it. |
+| `chat.stats` | — | Counters: lines seen, messages sent, messages added. |
+
+**Every command gets a reply:**
+
+```json
+{"ok":true,"result":{"queued":true}}
+{"ok":false,"error":"'text' exceeds the 100-character chat limit"}
+```
+
+`chat.send` and `chat.add` are **asynchronous**: `queued: true` means the message reached the
+game thread's queue, not that Minecraft has processed it. It runs on the next client tick.
+
+### send vs add
+
+This is the most important distinction in the API and the easiest to get wrong, which is why
+they are separate verbs rather than a flag:
+
+- **`chat.send`** goes to the server. Other players see it. `/` commands execute. You are
+  talking.
+- **`chat.add`** only draws in your own chat box. Nothing is transmitted. You are annotating.
+
+## Design
+
+### Everything Java happens on the game thread
+
+vmhook's contract: you may only call into Java from a real JavaThread *inside an interpreter
+detour*. Calling from a plain native thread crashes the VM — a GC stack-walk faults on the
+missing frame anchor.
+
+chatwire's WebSocket threads therefore **never touch Java**. They hand a task to a pump, and
+the pump runs it from inside a detour on Minecraft's own thread:
+
+```
+websocket thread              minecraft client thread
+────────────────              ───────────────────────
+submit(task)     ────────►    Minecraft.runTick() fires
+(returns at once)             detour drains the queue and runs the task
+```
+
+`Minecraft.runTick` is the natural pump: called every client tick, on the thread that owns the
+world. Latency is a fraction of a tick.
+
+### Stability
+
+It runs inside someone's game. The rules that follow from that:
+
+- **No exception ever reaches the JVM.** Every detour body is `noexcept` and catch-all
+  guarded. An exception unwinding into Minecraft's interpreter frame has no handler.
+- **Bounded queues.** A client spamming faster than the game ticks drops the *oldest* task and
+  counts it. Dropping is a bounded, visible failure; growing is an out-of-memory in a game.
+- **Nothing blocks the game thread.** A client that stops reading gets dropped, not waited on.
+- **Threads are joined before anything unloads.** `stop()` closes the listener first (which
+  wakes `accept`), shuts down client sockets (which wakes their readers), *then* joins.
+- **Objects that own JVM state are never destroyed implicitly.** Hook handles and the server
+  are leaked on purpose: their destructors join threads and remove detours, and running that
+  during DLL unload — under the loader lock — is a deadlock. `chatwire_stop()` is the explicit,
+  correctly-ordered path.
+- **`DllMain` does nothing but spawn a thread.** Everything else would deadlock the loader lock.
+
+### Layering
+
+```
+dllmain.cpp        Win32 only, no imports  ── C ABI ──►  entry.ixx
+chatwire.ixx       start / stop, the public surface
+  features/*.ixx   behaviour; knows nothing about vmhook
+  core/*.ixx       pump, feature registry, JSON, logging
+  ws/*.ixx         RFC 6455 by hand, Winsock only
+  sdk.ixx          ◄── THE ONLY MODULE THAT INCLUDES vmhook.hpp
+  mapping.ixx      the three name tables; pure data
+```
+
+`sdk.ixx` is a facade exposing only `std::string`, `bool` and function pointers, so no vmhook
+type crosses it. A feature is written in terms of "send this chat message", never in terms of
+klasses, oops and detours.
+
+## Adding a feature
+
+Two files, two lines. Write the module:
+
+```cpp
+export module chatwire.features.inventory;
+import chatwire.core.feature;
+
+class inventory_feature final : public chatwire::feature
+{
+    auto name() const noexcept -> std::string_view override { return "inventory"; }
+    auto start() noexcept -> bool override { /* install hooks */ return true; }
+    auto stop()  noexcept -> void override { }
+    auto handle(const chatwire::command& cmd) noexcept -> chatwire::response override
+    {
+        if (cmd.verb == "list") { return chatwire::response::success(R"({"items":[]})"); }
+        return chatwire::response::failure("unknown verb");
+    }
+};
+
+export namespace chatwire::features::inventory
+{
+    auto instance() noexcept -> chatwire::feature*
+    {
+        static inventory_feature f{};
+        return &f;
+    }
+}
+```
+
+Then in `chatwire.ixx` / `chatwire_impl.cpp`:
+
+```cpp
+import chatwire.features.inventory;                      // 1
+registry::add(features::inventory::instance());          // 2
+```
+
+`inventory.list` now routes to it. Nothing else changes — not the server, not the dispatcher,
+not the protocol.
+
+Registration is explicit rather than self-registering via a static initialiser. Static
+initialisation order across translation units is unspecified, and a registry populated that way
+is a classic "works until you add the fourth feature" bug.
+
+## Security
+
+**The server binds `127.0.0.1` only, and that is not configurable.** This socket can send chat
+as the player and read everything they see. Exposing it to the network would hand that to
+anyone who can reach the machine. There is no authentication, and that is only defensible
+*because* of the bind address.
+
+Chat text is attacker-controlled — any player on the server can say anything — and it flows
+into the JSON chatwire emits. Output is escaped so a quote or a newline in a chat line cannot
+forge a second JSON field.
+
+## Requirements
+
+- **Windows.** It is injected into a running process and uses Winsock directly.
+- **CMake 3.28+** and a generator that scans module dependencies (Ninja, or Visual Studio).
+- **A C++26 compiler with named-module support.** Developed against GCC 15.2 (MSYS2).
+
+### On compilers
+
+chatwire is built as C++26 named modules, and today that is genuinely rough terrain. Two
+compiler bugs shaped the architecture, and both are documented at the point they bite:
+
+- GCC 15 **segfaults** when one translation unit instantiates both `vmhook::register_class` and
+  `vmhook::hook`, and **cannot compile** a TU that both `import`s a module and includes
+  `<windows.h>`.
+- Clang 19 **crashes** compiling a 24k-line header as a module interface unit.
+
+The response was to concentrate vmhook behind a single module (`sdk.ixx`) and to separate the
+Win32 entry point behind a C ABI (`entry.ixx`). Both are better designs than what they replaced,
+so the constraints cost nothing — but they are why the code is shaped this way, and they should
+be revisited when the compilers catch up.
+
+## Tests
+
+```bash
+cmake --build build && ./build/chatwire_test_server
+```
+
+Covers the halves that run without Minecraft: the RFC 6455 handshake (against the worked
+example in the RFC), frame length boundaries at 125/126/65535/65536, rejection of unmasked and
+reserved-bit frames, oversized control frames, JSON parsing of hostile input, client reaping,
+protocol-violation dropping, clean shutdown, and restart on the same port.
+
+The Minecraft side needs a live game and is verified by injecting.
+
+## Status
+
+Chat works end to end and the server half is tested. The game side is verified by injection
+rather than automatically — there is no test harness that runs a Minecraft client.
+
+## Licence
+
+MIT.
