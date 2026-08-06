@@ -3,11 +3,7 @@
 A live WebSocket API into a running **Minecraft 1.8.9** client, on **Windows**. Run one exe,
 connect a socket, and read and drive the game from any language.
 
-C++23, built on [vmhook](https://github.com/xxxnpno/vmhook): HotSpot introspection, no JVMTI, no
-mod loader, minimal JNI. Handles all three 1.8.9 mappings (MCP/SRG/OBF), so it attaches to vanilla,
-Forge and Lunar the same way — and to whatever JVM they run on, Java 8 through 26. It attaches to a
-game that is **already running**, which is what makes it Windows-only: that needs
-`CreateRemoteThread` + `LoadLibrary`.
+Built on [vmhook](https://github.com/xxxnpno/vmhook). Works on any Minecraft 1.8.9 client.
 
 ```
 ┌──────────────┐    ws://127.0.0.1:24455    ┌──────────────────────────────────┐
