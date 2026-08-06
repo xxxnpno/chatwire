@@ -1,0 +1,61 @@
+# clangd configuration.
+#
+# Without this, clangd guesses the compile flags: it looks for
+# compile_commands.json in the source directory and in ./build, and chatwire's
+# lives one level further down -- `cmake -S . -B build/etc` is the layout the
+# README asks for, so that generated files stay out of build/ where the
+# executables land.  A clangd that has not found it reports `'chatwire/
+# common.hpp' file not found` and then several hundred cascading "undeclared
+# identifier 'std'" errors, none of which are real.
+CompileFlags:
+  CompilationDatabase: build/etc
+
+  # -freflection is a GCC flag and clangd is clang.  Left in, it is an "unknown
+  # argument" on every file.
+  #
+  # Taking it out does NOT make the reflective code parse: clangd 22 does not
+  # implement P2996 at all, so chatwire/json.hpp and chatwire/config.hpp report
+  # errors on `^^`, on a splice, and on `template for` no matter which flags it
+  # is given.  Those two files are checked by COMPILING them; clangd is useful
+  # on the rest of the project, which is most of it.
+  Remove: [-freflection]
+
+# chatwire/common.hpp is an UMBRELLA header on purpose: one include, so that the
+# "standard headers before any platform header" rule cannot be got wrong per
+# file (the reasoning is at the top of that file).  clangd's include-cleaner
+# disagrees with that design by construction -- it reports common.hpp as "not
+# used directly" in every file that includes it, and then reports every
+# std::string in those files as missing a header.  Neither is actionable
+# without abandoning the umbrella, so both are off; the real diagnostics stay on.
+#
+# The clang-tidy list is restated here rather than inherited from the user's
+# %LocalAppData%\clangd\config.yaml.  It has to be: naming Diagnostics in a
+# project fragment at all takes the whole section over, and with only the two
+# include-cleaner keys in it every clang-tidy check went quiet -- which looks
+# exactly like a clean codebase and is not one.  Stated here, the checks are
+# also the same for anyone who opens this repo, whatever their own config says.
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
+  ClangTidy:
+    Add:
+      - bugprone-*
+      - performance-*
+      - modernize-*
+      - readability-*
+      - cppcoreguidelines-*
+    Remove:
+      - modernize-use-trailing-return-type
+      - readability-identifier-length
+      - readability-magic-numbers
+      - cppcoreguidelines-avoid-magic-numbers
+      - cppcoreguidelines-pro-bounds-pointer-arithmetic
+      # chatwire's house style: every member is brace-initialised at its
+      # declaration, including the ones whose default the compiler would supply
+      # anyway.  The check reports each of those as redundant; it is a
+      # deliberate and consistent convention, not an oversight.
+      - readability-redundant-member-init
+      # A detour body runs with Minecraft's interpreter in the frame above,
+      # which has no handler for a C++ exception.  Every empty catch in this
+      # codebase is that, and each one says so where it sits.
+      - bugprone-empty-catch
