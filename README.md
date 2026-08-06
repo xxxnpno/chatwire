@@ -6,8 +6,8 @@ connect a socket, and read and drive the game from any language.
 C++23, built on [vmhook](https://github.com/xxxnpno/vmhook): HotSpot introspection, no JVMTI, no
 mod loader, minimal JNI. Handles all three 1.8.9 mappings (MCP/SRG/OBF), so it attaches to vanilla,
 Forge and Lunar the same way — and to whatever JVM they run on, Java 8 through 26. It attaches to a
-game that is **already running**, which is why it is Windows-only — see
-[Why Windows only](#why-windows-only).
+game that is **already running**, which is what makes it Windows-only: that needs
+`CreateRemoteThread` + `LoadLibrary`.
 
 ```
 ┌──────────────┐    ws://127.0.0.1:24455    ┌──────────────────────────────────┐
@@ -218,46 +218,6 @@ you can send; that is not a clash — `type` is what happened, `cmd` is what you
 
 `system` and `commands` are the only short prefixes. They reach nothing in the game, so there is no
 Java member to name them after and nothing for a reader to check.
-
-## Why Windows only
-
-chatwire loads a library into a game that is **already running**. Windows has a supported way to do
-that — `CreateRemoteThread` plus `LoadLibrary` — so you start Minecraft, run `chatwire.exe`, and
-you are attached.
-
-The other two are not a gap in a port:
-
-- **Linux could.** `ptrace` into the process and make it call `dlopen`, which is what `gdb -p` does.
-  It needs ptrace permission and hand-written per-architecture code to hijack a thread, and its
-  failure mode is a corrupted game. Possible, not shipped.
-- **macOS cannot**, for the JVMs anyone actually plays on. It needs `task_for_pid`, which a
-  hardened-runtime binary refuses no matter who is asking, root included. Only disabling SIP
-  changes that, and nobody should disable SIP to read chat.
-
-An earlier version reached the game at launch through `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES`. That
-worked, but it meant starting the game *through* chatwire — a different product from "attach to the
-game you are already playing", and two of them to keep working. It is gone.
-
-`system.detach` stops chatwire but leaves the module mapped; running `chatwire.exe` again wakes the
-resident copy. See [Design notes](#design-notes) for why it does not unload.
-
-## All three mappings
-
-The same field in Minecraft 1.8.9 has three names depending on how the jar was built:
-
-| Mapping | Class | Field | Seen in |
-|---|---|---|---|
-| **MCP** | `net/minecraft/client/Minecraft` | `thePlayer` | a deobfuscated dev workspace |
-| **SRG** | `net/minecraft/client/Minecraft` | `field_71439_g` | **an installed Forge client** |
-| **OBF** | `ave` | `h` | the vanilla jar Mojang ships |
-
-A shipped Forge installation is **SRG**, not MCP — Forge reobfuscates for release. Detection probes
-the JVM rather than guessing from a launcher name, and probes a *field*, because MCP and SRG share
-class names and differ only in members.
-
-`chat`, `commands` and `system` carry all three. `world` carries MCP and SRG but not OBF: the
-obfuscated names for `playerEntities` are not in the table, so on a raw vanilla jar that one command
-fails cleanly rather than guessing.
 
 ## chatwire is not a proxy
 
