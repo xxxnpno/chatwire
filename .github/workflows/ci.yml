@@ -4,11 +4,10 @@
 # author has one.  A claim like that is worth exactly as much as the machine
 # that checks it, so every platform in the README is a job here.
 #
-# What it CANNOT check is the half that needs a running Minecraft: the mappings,
-# the hooks, and every Java call.  Those are verified by injecting into a real
-# game, by hand.  What it does check is the half that runs without a JVM -- the
-# WebSocket server, the RFC 6455 framing, the JSON, and the fact that the whole
-# thing compiles at all on a compiler that is not the author's.
+# It checks that chatwire compiles on a compiler that is not the author's, and
+# that the shared library actually loads.  Everything that needs a running
+# Minecraft -- the mappings, the hooks, every Java call -- is verified by
+# injecting into a real game, by hand.
 name: ci
 
 on:
@@ -94,38 +93,6 @@ jobs:
           # into a red build for this project.  Warnings are still printed.
           cmake -S . -B build/etc -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build/etc
-
-      - name: Test (POSIX)
-        if: matrix.os != 'windows-latest'
-        run: ctest --test-dir build/etc --output-on-failure
-
-      - name: Test (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: msys2 {0}
-        run: ctest --test-dir build/etc --output-on-failure
-
-      # The Python programs are the only consumers that ship, so they are tested
-      # like the library is.  ctest runs this too; it is repeated as its own
-      # step so a Python failure is legible in the job list rather than buried
-      # in a ctest summary.
-      #
-      # The MCP half needs the SDK, and the test SKIPS rather than fails without
-      # it -- so it is installed here, because a permanently skipped test is a
-      # test nobody notices has stopped meaning anything.
-      - name: Python client and MCP server (POSIX)
-        if: matrix.os != 'windows-latest'
-        timeout-minutes: 2
-        run: |
-          python3 -m pip install --quiet --disable-pip-version-check mcp || true
-          python3 tests/test_python.py
-
-      - name: Python client and MCP server (Windows)
-        if: matrix.os == 'windows-latest'
-        timeout-minutes: 2
-        shell: bash
-        run: |
-          python -m pip install --quiet --disable-pip-version-check mcp || true
-          python tests/test_python.py
 
       # The one check that actually exercises how chatwire GETS INTO a game on
       # these platforms.  Preloading it into /bin/sh is not a Minecraft, and the

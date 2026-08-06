@@ -419,6 +419,10 @@ def say(text: str) -> str:
     It cannot be taken back.  If you only want the person playing to see
     something, use `tell` instead.
 
+    PLAIN TEXT ONLY.  Colour codes do not work here and are not merely ignored:
+    a '§' goes out on the wire, where a vanilla server treats it as an illegal
+    chat character and KICKS the player.  Colours belong in `tell`.
+
     Limited to 100 characters, which is Minecraft's own limit.
     """
     GAME.call(SEND, text=text)
@@ -433,7 +437,8 @@ def tell(text: str) -> str:
     local client and nothing more.  This is the safe one, and the right choice
     for anything addressed to the person playing.
 
-    Minecraft colour codes work: "§ahello" is green.
+    Minecraft colour codes work HERE, because the local client renders them and
+    nothing goes on the wire: "§ahello" is green.
     """
     GAME.call(ADD, text=text)
     return f"Shown to the player only: {strip_colours(text)}"

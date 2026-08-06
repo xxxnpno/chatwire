@@ -473,7 +473,7 @@ namespace
             "The library is carried inside this file, so this is the only file\n"
             "you need.  Then connect a WebSocket to ws://127.0.0.1:24455 and\n"
             "drive the game from any language; the README has an example of\n"
-            "every command, and python/mcp_server.py exposes it to an AI.");
+            "every command, and mcp/ exposes it to an AI.");
     }
 }
 

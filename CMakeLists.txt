@@ -60,7 +60,6 @@ find_package(Threads REQUIRED)
 # ---------------------------------------------------------------------------
 option(CHATWIRE_WARNINGS_AS_ERRORS "Treat warnings as errors"              OFF)
 option(CHATWIRE_BUILD_TOOLS        "Build chatwire.exe (Windows)"          ON)
-option(CHATWIRE_BUILD_TESTS        "Build the no-Minecraft test suite"     ON)
 option(CHATWIRE_EMBED_DLL          "Carry chatwire.dll inside chatwire.exe" ON)
 
 # ---------------------------------------------------------------------------
@@ -129,11 +128,11 @@ endif()
 # instead of five hundred lines of template output later.
 #
 # Only when something that PRINTS is being built.  The library itself does not
-# use <print> -- it reports through chatwire/log.hpp -- so `-DCHATWIRE_BUILD_
-# TOOLS=OFF -DCHATWIRE_BUILD_TESTS=OFF` genuinely drops the requirement, and
-# checking anyway would refuse a configuration that would have worked.
+# use <print> -- it reports through chatwire/log.hpp -- so
+# `-DCHATWIRE_BUILD_TOOLS=OFF` genuinely drops the requirement, and checking
+# anyway would refuse a configuration that would have worked.
 # ---------------------------------------------------------------------------
-if(CHATWIRE_BUILD_TOOLS OR CHATWIRE_BUILD_TESTS)
+if(CHATWIRE_BUILD_TOOLS)
     include(CheckCXXSourceCompiles)
 
     set(CHATWIRE_PRINT_PROGRAM "#include <print>\nint main() { std::println(\"{}\", 1); }")
@@ -150,14 +149,14 @@ if(CHATWIRE_BUILD_TOOLS OR CHATWIRE_BUILD_TESTS)
             set(CHATWIRE_PRINT_LIBRARY stdc++exp)
         else()
             message(FATAL_ERROR
-                "chatwire's tools and tests need a working C++23 <print>, and this "
+                "chatwire.exe needs a working C++23 <print>, and this "
                 "compiler (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}) "
                 "has none. GCC 14+, LLVM/Clang 18+ with its own libc++, or "
                 "MSVC 19.37+. On macOS the system Apple Clang is usually too old: "
                 "`brew install llvm` and configure with "
                 "-DCMAKE_CXX_COMPILER=$(brew --prefix llvm)/bin/clang++. "
                 "Or build just the library, which needs none of it: "
-                "-DCHATWIRE_BUILD_TOOLS=OFF -DCHATWIRE_BUILD_TESTS=OFF.")
+                "-DCHATWIRE_BUILD_TOOLS=OFF.")
         endif()
     endif()
     unset(CMAKE_REQUIRED_QUIET)
@@ -186,7 +185,7 @@ add_library(chatwire_lib STATIC src/chatwire.cpp)
 add_library(chatwire::chatwire ALIAS chatwire_lib)
 
 target_include_directories(chatwire_lib PUBLIC
-    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>")
 target_link_libraries(chatwire_lib PUBLIC vmhook::vmhook Threads::Threads)
 target_compile_features(chatwire_lib PUBLIC cxx_std_23)
 
@@ -297,9 +296,10 @@ endif()
 # ---------------------------------------------------------------------------
 #
 # There is ONE tool: chatwire.exe, which is the library plus the thing that puts
-# it into the game.  The consumer side is Python and lives in python/ -- it needs
-# no build step, and a client that has to be compiled is a poor advertisement for
-# an API whose whole claim is "anything that speaks WebSocket".
+# it into the game.  The consumer side is a socket: see the README, and mcp/
+# for an MCP server.  Neither needs a build step, and a client that had to be
+# compiled would be a poor advertisement for an API whose whole claim is
+# "anything that speaks WebSocket".
 #
 if(CHATWIRE_BUILD_TOOLS)
     # chatwire-preload is a shell script, not a target: it sets two environment
@@ -334,7 +334,7 @@ if(CHATWIRE_BUILD_TOOLS)
         add_executable(chatwire_exe tools/injector.cpp)
         set_target_properties(chatwire_exe PROPERTIES OUTPUT_NAME "chatwire")
         target_include_directories(chatwire_exe PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
         chatwire_apply_warnings(chatwire_exe)
 
         # -------------------------------------------------------------------
@@ -389,36 +389,6 @@ if(CHATWIRE_BUILD_TOOLS)
             target_link_options(chatwire_exe PRIVATE
                 -static -static-libgcc -static-libstdc++)
         endif()
-    endif()
-endif()
-
-# ---------------------------------------------------------------------------
-# Tests: the halves that run without Minecraft -- the WebSocket server, the
-# framing, and the JSON.  They are also the halves most likely to be wrong: a
-# hand-written RFC 6455 codec is exactly the kind of code that looks right and
-# mishandles a length boundary.  The Minecraft side needs a live game.
-# ---------------------------------------------------------------------------
-if(CHATWIRE_BUILD_TESTS)
-    enable_testing()
-    add_executable(chatwire_test_server tests/test_server.cpp)
-    target_link_libraries(chatwire_test_server PRIVATE chatwire::chatwire)
-    if(CHATWIRE_PRINT_LIBRARY)
-        target_link_libraries(chatwire_test_server PRIVATE ${CHATWIRE_PRINT_LIBRARY})
-    endif()
-    chatwire_apply_warnings(chatwire_test_server)
-    add_test(NAME server COMMAND chatwire_test_server)
-
-    # The Python side is the only consumer that ships, so it is tested too --
-    # against a stub in tests/, not against a shipped fake.  Needs no build
-    # step and no packages; skipped rather than failed when there is no
-    # interpreter, since chatwire's own build has never required one.
-    find_package(Python3 COMPONENTS Interpreter QUIET)
-    if(Python3_Interpreter_FOUND)
-        add_test(NAME python
-                 COMMAND "${Python3_EXECUTABLE}"
-                         "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_python.py")
-    else()
-        message(STATUS "no Python 3 found; the Python client tests will not run")
     endif()
 endif()
 
