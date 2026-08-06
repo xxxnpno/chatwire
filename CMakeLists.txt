@@ -169,17 +169,17 @@ endif()
 add_library(vmhook INTERFACE)
 add_library(vmhook::vmhook ALIAS vmhook)
 target_include_directories(vmhook INTERFACE
-    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ext>")
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/chatwire/ext>")
 
 # ---------------------------------------------------------------------------
 # The library.  Header-based, with one .cpp for the bodies that should not be
 # duplicated into every consumer (start/stop and the wiring they use).
 # ---------------------------------------------------------------------------
-add_library(chatwire_lib STATIC src/chatwire.cpp)
+add_library(chatwire_lib STATIC chatwire/src/chatwire.cpp)
 add_library(chatwire::chatwire ALIAS chatwire_lib)
 
 target_include_directories(chatwire_lib PUBLIC
-    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>")
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src>")
 target_link_libraries(chatwire_lib PUBLIC vmhook::vmhook Threads::Threads)
 target_compile_features(chatwire_lib PUBLIC cxx_std_23)
 
@@ -215,7 +215,7 @@ chatwire_apply_warnings(chatwire_lib)
 # ---------------------------------------------------------------------------
 # The injectable DLL.
 # ---------------------------------------------------------------------------
-add_library(chatwire SHARED src/dllmain.cpp)
+add_library(chatwire SHARED chatwire/src/dllmain.cpp)
 target_link_libraries(chatwire PRIVATE chatwire::chatwire)
 set_target_properties(chatwire PROPERTIES
     PREFIX ""                       # chatwire.dll/.so/.dylib, never libchatwire
@@ -247,10 +247,10 @@ if(CHATWIRE_BUILD_TOOLS)
     # The target is chatwire_exe and the FILE is chatwire.exe: two CMake
     # targets cannot share a name, but chatwire.dll and chatwire.exe are
     # different files and may.
-    add_executable(chatwire_exe src/injector.cpp)
+    add_executable(chatwire_exe chatwire/src/injector.cpp)
     set_target_properties(chatwire_exe PROPERTIES OUTPUT_NAME "chatwire")
     target_include_directories(chatwire_exe PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src")
     chatwire_apply_warnings(chatwire_exe)
 
     # -------------------------------------------------------------------
@@ -271,7 +271,7 @@ if(CHATWIRE_BUILD_TOOLS)
 
         set(CHATWIRE_DLL_RC_PATH "${CHATWIRE_DLL_OUTPUT_DIR}/chatwire.dll")
         string(REPLACE "/" "\\\\" CHATWIRE_DLL_RC_PATH "${CHATWIRE_DLL_RC_PATH}")
-        configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/chatwire.rc.in"
+        configure_file("${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src/chatwire.rc.in"
                        "${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc" @ONLY)
 
         target_sources(chatwire_exe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc")
