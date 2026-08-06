@@ -169,13 +169,7 @@ exactly as if the player had typed it. Do not name a plugin's output after a reg
 
 ## An AI in the game
 
-[`mcp/`](mcp/) is an MCP server: point Claude Code or Claude Desktop at it and the assistant can
-read the chat, say things, list players, and own a slash command. See [mcp/README.md](mcp/README.md).
-
-```bash
-pip install mcp
-claude mcp add chatwire -- python mcp/mcp_server.py
-```
+See [mcp/README.md](mcp/README.md).
 
 ## Protocol
 
