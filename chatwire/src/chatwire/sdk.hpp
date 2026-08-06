@@ -128,6 +128,24 @@ namespace chatwire::sdk::detail
         }
     };
 
+    /*
+        net.minecraft.client.multiplayer.WorldClient — the argument of
+        loadWorld, and the ONE wrapper here that is never register_class'd.
+        It does not need to be: a detour argument declared as
+        std::unique_ptr<W> is wrapped directly around the incoming oop, because
+        W is known statically at the hook site.  Registration only buys field
+        and method lookups, and nothing here does either -- the world is read
+        for one thing, whether it is null.
+    */
+    class world_client : public vmhook::object<world_client>
+    {
+    public:
+        explicit world_client(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<world_client>{ oop }
+        {
+        }
+    };
+
     /* The callback the facade installs.  A plain function pointer: no captures
        to dangle, nothing to destroy at exit, and atomic so the detour thread
        and the installer never race. */
@@ -139,6 +157,13 @@ namespace chatwire::sdk::detail
         sdk::install_command_interceptor for what that means and what it costs.
     */
     inline std::atomic<bool (*)(const char*)> g_command_callback{ nullptr };
+
+    /*
+        The world-change observer.  `loaded` is false when the world argument was
+        null, which is Minecraft's way of saying the client is LEAVING one -- a
+        disconnect, or a return to the title screen.
+    */
+    inline std::atomic<void (*)(bool)> g_world_callback{ nullptr };
 
 
     /*
@@ -201,6 +226,89 @@ namespace chatwire::sdk::detail
     }
 
     /*
+        @brief The Minecraft.loadWorld detour.
+        @details
+        The receiver and ONE argument are declared; the trailing String is not,
+        and leaving it out is what lets a single detour serve both overloads.
+        `loadWorld(WorldClient)` and `loadWorld(WorldClient, String)` agree on
+        every slot up to the world, and vmhook reads only as many slots as the
+        detour asks for -- so declaring the String would make the shorter
+        overload read one that is not there.
+
+        The world may be NULL, and that case is the interesting one: it is the
+        client leaving a world rather than entering one.  A wrapper argument is
+        never a null pointer -- it is a wrapper whose get_instance() is null --
+        so the test is on the instance.
+
+        Runs on whichever thread is changing world, which for a join is the
+        client thread (the packet handler marshals itself onto it) and for a
+        disconnect can be a netty thread.  Nothing here cares: the callback is
+        loaded atomically, and the frame above is Minecraft's interpreter, which
+        has no handler for a C++ exception whoever is running it.
+    */
+    inline auto on_load_world(vmhook::return_value&,
+                              const std::unique_ptr<minecraft>&,
+                              const std::unique_ptr<world_client>& world) noexcept
+        -> void
+    {
+        try
+        {
+            const auto cb{ g_world_callback.load(std::memory_order_acquire) };
+            if (!cb) { return; }
+            cb(world->get_instance() != nullptr);
+        }
+        catch (...) { }
+    }
+
+    /*
+        @brief WorldClient's JVM descriptor -- "Lbdb;" on a vanilla 1.8.9.
+        @details
+        ASKED OF THE JVM first, and taken from the mapping table only if that
+        fails.  Both answers are now correct for a stock client -- the table
+        carries the real OBF name -- so this is not standing in for a gap in it;
+        it is the answer for a client that is NOT stock.  Lunar, Badlion and
+        friends ship repackaged classes, and the declared type of
+        `Minecraft.theWorld` is that jar's own spelling of WorldClient by
+        construction, whatever anyone's table says.
+
+        Metaspace reads only -- no oop is touched and nothing is called -- so
+        this needs no thread state and no gate.  The result is cached by vmhook's
+        field cache, so the walk happens once.
+
+        @return the descriptor with its L and ;, or "" when neither route has an
+                answer, at which point no descriptor built from it would be right
+                either.
+    */
+    [[nodiscard]] inline auto world_client_descriptor() noexcept -> std::string
+    {
+        try
+        {
+            const auto mc_class{ map::resolve(map::minecraft::clazz) };
+            const auto world_field{ map::resolve(map::minecraft::the_world) };
+            if (!mc_class.empty() && !world_field.empty())
+            {
+                if (vmhook::hotspot::klass* const k{ vmhook::find_class(mc_class) })
+                {
+                    const auto field{ vmhook::find_field(k, world_field) };
+                    // Anything but an object type means the mapping found a
+                    // DIFFERENT field of that name, and a descriptor built from
+                    // an int would hook nothing.  Fall through to the table.
+                    if (field && !field->signature.empty() && field->signature.front() == 'L')
+                    {
+                        return field->signature;
+                    }
+                }
+            }
+        }
+        catch (...) { }
+
+        // The table's answer, verified against the shipped jar for all three
+        // mappings, for the case where the field lookup itself failed.
+        const auto fallback{ map::resolve(map::world_client::clazz) };
+        return fallback.empty() ? std::string{} : std::format("L{};", fallback);
+    }
+
+    /*
         @brief The local player as a JNI reference, or nullptr.
         @details
         The same walk as player() below -- Minecraft.theMinecraft, then
@@ -225,11 +333,11 @@ namespace chatwire::sdk::detail
 
             // Descriptors are built from the mapping, so this works under MCP,
             // SRG and OBF without three code paths.
-            const std::string mc_descriptor{ "L" + mc_class + ";" };
+            const std::string mc_descriptor{ std::format("L{};", mc_class) };
             void* const mc{ vmhook::jni_static_object(k, mc_field.c_str(), mc_descriptor.c_str()) };
             if (!mc) { return nullptr; }
 
-            const std::string player_descriptor{ "L" + player_field + ";" };
+            const std::string player_descriptor{ std::format("L{};", player_field) };
             void* const player{ vmhook::jni_object_field(mc, the_player.c_str(),
                                                          player_descriptor.c_str()) };
             vmhook::jni_release(mc);
@@ -442,7 +550,7 @@ namespace chatwire::sdk
 
             d::g_chat_callback.store(on_chat, std::memory_order_release);
 
-            const std::string descriptor{ "(L" + component + ";)V" };
+            const std::string descriptor{ std::format("(L{};)V", component) };
             if (!vmhook::hook<d::gui_new_chat>(method, descriptor, &d::on_print_chat_message))
             {
                 return false;
@@ -450,6 +558,90 @@ namespace chatwire::sdk
             chatwire::log::info("chat observer installed on {}.{}{}",
                                 class_name, method, descriptor);
             return true;
+        }
+        catch (...) { return false; }
+    }
+
+    /*
+        @brief Called when the client changes world.  `loaded` false means it is
+               LEAVING one.
+        @details
+        Runs INSIDE the loadWorld detour, on whichever thread is changing world.
+        Must be quick and must not throw.
+    */
+    using world_callback = void (*)(bool loaded);
+
+    /*
+        @brief Hooks Minecraft.loadWorld so `on_world` sees every world change.
+        @details
+        Joins, respawns, server switches and disconnects all pass through this
+        one method, and it is the only one that reports a disconnect POSITIVELY:
+        every other route to that fact is polling `theWorld` and noticing it has
+        become null.
+
+        WHICH OVERLOAD.  1.8.9 has two, `loadWorld(WorldClient)` and
+        `loadWorld(WorldClient, String)`, and the first is a one-line delegation
+        to the second — so hooking the TWO-argument form catches both, while
+        hooking the one-argument form would miss every caller that passes a
+        loading message.  The longer one is therefore tried first and the shorter
+        one only as a fallback, for a build where the pair has been patched into
+        something else.
+
+        The fallback carries its own NAME as well as its own descriptor: SRG
+        calls the two overloads func_71353_a and func_71403_a, so reusing the
+        first name with the second descriptor would be a lookup that cannot
+        succeed.  See mapping::minecraft::load_world_short.
+
+        Under OBF both overloads are called `a`, along with a great many
+        unrelated methods on Minecraft, so the descriptor is not optional there:
+        a name-only hook would install on whichever `a` came first in the class's
+        method array.  That is why this refuses to install at all when the
+        descriptor cannot be built.
+
+        The detour observes and never cancels: suppressing loadWorld would leave
+        the client with the world it was leaving and no way back.
+    */
+    [[nodiscard]] inline auto install_world_observer(const world_callback on_world) noexcept
+        -> bool
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        try
+        {
+            const auto class_name{ map::resolve(map::minecraft::clazz) };
+            const auto world{ d::world_client_descriptor() };
+            if (class_name.empty() || world.empty()) { return false; }
+
+            // NAME AND DESCRIPTOR TOGETHER, because under SRG the two overloads
+            // do not share a name -- func_71353_a takes the loading message,
+            // func_71403_a does not.  Pairing them is what keeps the fallback
+            // from being a lookup that cannot succeed on two mappings out of
+            // three.  The long form is first: the short one delegates to it.
+            const std::pair<std::string, std::string> candidates[]{
+                { map::resolve(map::minecraft::load_world),
+                  std::format("({}Ljava/lang/String;)V", world) },
+                { map::resolve(map::minecraft::load_world_short),
+                  std::format("({})V", world) },
+            };
+            if (candidates[0].first.empty()) { return false; }
+
+            d::g_world_callback.store(on_world, std::memory_order_release);
+
+            for (const auto& [method, descriptor] : candidates)
+            {
+                if (method.empty()) { continue; }
+                if (vmhook::hook<d::minecraft>(method, descriptor, &d::on_load_world))
+                {
+                    chatwire::log::info("world observer installed on {}.{}{}",
+                                        class_name, method, descriptor);
+                    return true;
+                }
+            }
+
+            // Nothing was installed, so nothing may be left pointing at a
+            // callback the caller will assume is unreachable.
+            d::g_world_callback.store(nullptr, std::memory_order_release);
+            return false;
         }
         catch (...) { return false; }
     }
@@ -675,8 +867,8 @@ namespace chatwire::sdk
                 void* const player{ chatwire::sdk::detail::jni_player() };
                 if (!player) { vmhook::jni_release(component); return false; }
 
-                const std::string descriptor{ "(L" + map::resolve(map::i_chat_component::clazz)
-                                              + ";)V" };
+                const std::string descriptor{
+                    std::format("(L{};)V", map::resolve(map::i_chat_component::clazz)) };
                 const bool added{ vmhook::jni_call_void(
                     player, method.c_str(), descriptor.c_str(), { component }) };
                 vmhook::jni_release(component);
@@ -747,9 +939,16 @@ namespace chatwire::sdk
             const auto list_field{ map::resolve(map::world::player_entities) };
             const auto name_method{ map::resolve(map::entity::get_name) };
             const auto uuid_method{ map::resolve(map::entity::get_unique_id) };
-            const auto world_class{ map::resolve(map::world_client::clazz) };
+            // theWorld's declared type, ASKED FOR rather than spelled out, so a
+            // repackaged client answers for itself.  This used to build the
+            // descriptor from a table entry that had no OBF name, which on a
+            // vanilla client produced "Lnet/minecraft/client/multiplayer/
+            // WorldClient;" -- a field lookup that matches nothing, and a player
+            // list that came back empty every time.
+            const auto world_type{ chatwire::sdk::detail::world_client_descriptor() };
             if (mc_class.empty() || mc_field.empty() || world_field.empty()
-                || list_field.empty() || name_method.empty() || uuid_method.empty())
+                || list_field.empty() || name_method.empty() || uuid_method.empty()
+                || world_type.empty())
             {
                 return out;
             }
@@ -758,11 +957,11 @@ namespace chatwire::sdk
             if (!k) { return out; }
 
             void* const mc{ vmhook::jni_static_object(k, mc_field.c_str(),
-                                                      ("L" + mc_class + ";").c_str()) };
+                                                      std::format("L{};", mc_class).c_str()) };
             if (!mc) { return out; }
 
             void* const world{ vmhook::jni_object_field(mc, world_field.c_str(),
-                                                        ("L" + world_class + ";").c_str()) };
+                                                        world_type.c_str()) };
             vmhook::jni_release(mc);
             if (!world) { return out; }          // title screen: no world, no players
 
@@ -881,6 +1080,10 @@ namespace chatwire::sdk
         // swallowing it on the way out.  A half-detached chatwire that eats the
         // player's chat would be the worst possible parting gift.
         d::g_command_callback.store(nullptr, std::memory_order_release);
+        // Same reasoning once more: a detour that is already running finds no
+        // callback and reports nothing, rather than reaching a sink whose
+        // server is on its way down.
+        d::g_world_callback.store(nullptr, std::memory_order_release);
         // vmhook owns hook lifetime: shutdown_hooks() writes every patched entry
         // back and stops the watchdog that keeps them installed.  Explicit rather
         // than destructor-driven for the reason above -- unhooking touches the

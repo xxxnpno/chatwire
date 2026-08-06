@@ -8,7 +8,7 @@ Built on [vmhook](https://github.com/xxxnpno/vmhook). Works on any Minecraft 1.8
 ```
 ┌──────────────┐    ws://127.0.0.1:24455    ┌──────────────────────────────────┐
 │  your tool   │◄──────────────────────────►│  chatwire, inside the game       │
-│  any lang    │   events out, commands in  │  hooks chat in and chat out      │
+│  any lang    │   events out, commands in  │  hooks chat, commands, worlds    │
 └──────────────┘                            └──────────────────────────────────┘
 ```
 
@@ -98,6 +98,38 @@ async def main():
 asyncio.run(main())
 ```
 
+### `loadWorld` — the client changed world
+
+Pushed, unprompted. A join, a respawn, a server switch — and `"loaded": false`, which is the client
+**leaving** a world: a disconnect, or a return to the title screen. It is the only positive report of
+that; everything else is noticing the player has gone.
+
+Ask for the new roster when you are told, instead of polling for it.
+
+```python
+import asyncio, json, websockets
+
+WORLD   = "net.minecraft.client.Minecraft.loadWorld"
+PLAYERS = "net.minecraft.world.World.playerEntities"
+
+async def main():
+    async with websockets.connect("ws://127.0.0.1:24455") as ws:
+        async for raw in ws:
+            event = json.loads(raw)
+            if event.get("type") != WORLD:
+                continue
+            if not event["loaded"]:
+                print("left the world")
+                continue
+            await asyncio.sleep(2)               # let the server send the players
+            await ws.send(json.dumps({"cmd": PLAYERS}))
+
+asyncio.run(main())
+```
+
+The event fires **before** the world is installed, so the players are not there yet — which is why
+the roster is asked for a moment later rather than in the same breath.
+
 ### `commands.register` — add a command to the game
 
 Claim a name and the player typing it never reaches the server: chatwire swallows the line and
@@ -180,10 +212,16 @@ Minecraft has already happened. Not in a world gives `{"ok":false,"error":"not i
 
 {"type":"net.minecraft.client.entity.EntityPlayerSP.sendChatMessage",
  "command":"ping","args":["alpha"],"raw":"/ping alpha"}
+
+{"type":"net.minecraft.client.Minecraft.loadWorld","loaded":true}
 ```
 
 An event is named after the method it comes **out of**. The second shares its name with a command
 you can send; that is not a clash — `type` is what happened, `cmd` is what you are asking for.
+
+`loadWorld` fires on every world change, `loaded` false being the client leaving one. It arrives
+**before** the new world is installed, so treat it as "ask again now", not as a description of where
+the player is.
 
 `system` and `commands` are the only short prefixes. They reach nothing in the game, so there is no
 Java member to name them after and nothing for a reader to check.

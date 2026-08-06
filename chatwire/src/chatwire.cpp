@@ -87,8 +87,10 @@ namespace chatwire::detail
     */
     inline auto stats_json() -> std::string
     {
-        return json::object(features::chat::stats_json() + ","
-                            + features::commands::stats_json());
+        return json::object(std::format("{},{},{}",
+                                        features::chat::stats_json(),
+                                        features::commands::stats_json(),
+                                        features::world::stats_json()));
     }
 
     /*
@@ -136,11 +138,12 @@ namespace chatwire::detail
                 log::info("not in a world; skipped the in-game notice: {}", text);
                 return;
             }
-            const std::string prefix{ std::string{ chatwire::ansi::section } + "8["
-                                      + std::string{ chatwire::ansi::section } + "bchatwire"
-                                      + std::string{ chatwire::ansi::section } + "8] "
-                                      + std::string{ chatwire::ansi::section } + "7" };
-            if (!sdk::add_chat(prefix + std::string{ text }))
+            // `{0}` four times: the section sign is ONE argument repeated, which
+            // is what this line is actually saying and what four
+            // std::string{...} temporaries hid.
+            const std::string message{ std::format("{0}8[{0}bchatwire{0}8] {0}7{1}",
+                                                   chatwire::ansi::section, text) };
+            if (!sdk::add_chat(message))
             {
                 log::warn("could not show the in-game notice: {}", text);
             }
@@ -217,9 +220,9 @@ namespace chatwire::detail
         {
             try
             {
-                return json::object(json::field("ok", ok) + ","
-                                    + (ok ? "\"result\":" + body
-                                          : json::field("error", body)));
+                return json::object(std::format("{},{}", json::field("ok", ok),
+                                                ok ? std::format("\"result\":{}", body)
+                                                   : json::field("error", body)));
             }
             catch (...)
             {
@@ -256,7 +259,7 @@ namespace chatwire::detail
             feature* const target{ registry::find(feature_name) };
             if (!target)
             {
-                return reply(false, "no feature named '" + feature_name + "'");
+                return reply(false, std::format("no feature named '{}'", feature_name));
             }
 
             const response result{ target->handle(parsed) };
@@ -366,6 +369,13 @@ namespace chatwire
         //     window that exists for no reason, and windows like that are how
         //     "it dropped exactly one message, once" bugs are made.
         features::commands::set_sink(&detail::send_command_event);
+        // The world sink goes in here for the same reason and not one step
+        // later: starting the world feature installs its detour on loadWorld,
+        // and the game can be inside it before start_all() has returned.  A
+        // sink installed afterwards would drop the world change that happened
+        // while chatwire was coming up, which is precisely the one an injector
+        // that ran on the title screen is waiting for.
+        features::world::set_sink(&detail::broadcast_line);
 
         // 4. Features.  Installing a hook is metaspace work rather than a Java
         //    call, so it is safe on this thread and does not go through the
@@ -480,6 +490,7 @@ namespace chatwire
         detail::server_instance().stop();
         features::chat::set_sink(nullptr);
         features::chat::set_console_sink(nullptr);
+        features::world::set_sink(nullptr);
         // Cleared AFTER the server has gone, like the chat sink: while clients
         // still exist there is still somewhere for a command to be delivered,
         // and clearing this early would make the interceptor let a claimed
