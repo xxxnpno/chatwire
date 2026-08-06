@@ -39,6 +39,25 @@
 // The order matters.  MCP and SRG share the same CLASS names and differ only in
 // MEMBER names, so the class check cannot separate them — only a field probe
 // can.  OBF differs at both levels, so its class check is decisive.
+//
+// ===========================================================================
+// WHERE THE OBF NAMES COME FROM, AND WHY THAT MATTERS
+// ===========================================================================
+// From the shipped jar, read with javap:
+//
+//     unzip -o .minecraft/versions/1.8.9/1.8.9.jar '*.class' -d out
+//     javap -p -c out/ave.class
+//
+// NOT from a mappings site, a paste, or memory.  A wrong OBF name fails
+// SILENTLY — the class resolves to something real, the member lookup finds
+// nothing, and the feature that needed it just never works — so a guess here is
+// indistinguishable from a correct entry until a user on a vanilla client
+// reports that half the bridge does nothing.  That is exactly what `avq` for
+// GuiNewChat did (see the note there).
+//
+// A name is only entered here once the bytecode identifies it: a field by its
+// declared type, a method by the call chain it sits in.  Both are quoted at the
+// entry that needed them, so the next reader can re-derive rather than trust.
 #include "chatwire/common.hpp"
 namespace chatwire::mapping
 {
@@ -111,6 +130,40 @@ namespace chatwire::mapping
         inline constexpr name ingame_gui{ .mcp = "ingameGUI", .obf = "q", .srg = "field_71456_v" };
         /* The world the player is in, or null on the title screen. */
         inline constexpr name the_world{ .mcp = "theWorld", .obf = "f", .srg = "field_71441_e" };
+        /*
+            loadWorld(WorldClient[, String]) — the client changing world.  Every
+            join, respawn, server switch and disconnect goes through it, and a
+            NULL world argument is the disconnect: it is the one method that says
+            "the world you knew is gone" before theWorld stops being readable.
+
+            Both overloads share this name, and the one-argument form is a
+            one-line delegation to the two-argument one:
+
+                a(Lbdb;)V         aload_0 aload_1 ldc "" invokevirtual a(Lbdb;Ljava/lang/String;)V
+
+            so hooking the LONGER descriptor catches every call.  The descriptor
+            is built at run time rather than spelled here -- see
+            sdk::install_world_observer -- because it contains WorldClient's
+            class name, and the honest source for that is the attached jar.
+        */
+        inline constexpr name load_world{ .mcp = "loadWorld", .obf = "a", .srg = "func_71353_a" };
+        /*
+            The ONE-argument overload, and it needs an entry of its own for one
+            reason: SRG gives the two overloads DIFFERENT names.
+
+                func_71353_a   loadWorld(WorldClient, String)
+                func_71403_a   loadWorld(WorldClient)
+
+            MCP calls both `loadWorld` and OBF calls both `a`, so under those two
+            a name plus a descriptor is enough and this entry is the same string
+            twice.  Under SRG it is not, and looking for the long name with the
+            short descriptor finds nothing -- which is exactly how a fallback
+            path rots unnoticed, since the primary works and nobody exercises it.
+
+            Only a fallback.  The short form delegates to the long one, so a
+            client where both exist is caught entirely by load_world above.
+        */
+        inline constexpr name load_world_short{ .mcp = "loadWorld", .obf = "a", .srg = "func_71403_a" };
         // runTick is deliberately absent.  It was the pump's hook target, and
         // there is no pump: vmhook can enter Java on any thread now, so nothing
         // has to be marshalled onto the client's main loop.  This table is only
@@ -131,30 +184,41 @@ namespace chatwire::mapping
     // net.minecraft.client.multiplayer.WorldClient — the client's world.  Only
     // the DECLARED type of Minecraft.theWorld matters here: a JNI field lookup
     // is by declared type, not by what the object turns out to be.
+    //
+    //     ave.f is bdb, and bdb extends adm (World).
     namespace world_client
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/client/multiplayer/WorldClient" };
+        inline constexpr name clazz{ .mcp = "net/minecraft/client/multiplayer/WorldClient",
+                                     .obf = "bdb" };
     }
 
     // net.minecraft.world.World — where the player list lives.  `playerEntities`
     // is declared on World and inherited by WorldClient, which is why a lookup
     // against the instance finds it.
+    //
+    //     adm holds seven List fields; j is the only List<wn>, and wn is
+    //     EntityPlayer (bew -> bet -> wn).  That is what identifies it.
     namespace world
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/world/World" };
+        inline constexpr name clazz{ .mcp = "net/minecraft/world/World", .obf = "adm" };
         /* List<EntityPlayer> — everyone the client currently knows about. */
-        inline constexpr name player_entities{ .mcp = "playerEntities", .srg = "field_73010_i" };
+        inline constexpr name player_entities{ .mcp = "playerEntities", .obf = "j",
+                                               .srg = "field_73010_i" };
     }
 
     // net.minecraft.entity.Entity — the two identity accessors every player has.
     // Declared on Entity and overridden on EntityPlayer, so a virtual call
     // against a player instance lands on the player's version.
+    //
+    //     pk (Entity) declares exactly one no-argument UUID getter, aK, and
+    //     e_ is the String getter EntityPlayer overrides.
     namespace entity
     {
         /* getName() — the display name, which is the nickname on most servers. */
-        inline constexpr name get_name{ .mcp = "getName", .srg = "func_70005_c_" };
+        inline constexpr name get_name{ .mcp = "getName", .obf = "e_", .srg = "func_70005_c_" };
         /* getUniqueID() — the account UUID, stable across name changes. */
-        inline constexpr name get_unique_id{ .mcp = "getUniqueID", .srg = "func_110124_au" };
+        inline constexpr name get_unique_id{ .mcp = "getUniqueID", .obf = "aK",
+                                             .srg = "func_110124_au" };
     }
 
     // net.minecraft.client.gui.GuiIngame — holds the chat GUI.
@@ -167,9 +231,25 @@ namespace chatwire::mapping
     // net.minecraft.client.gui.GuiNewChat — every line that reaches the chat box
     // passes through printChatMessage, which is why hooking it once catches
     // everything: server messages, client messages, mod output, death messages.
+    //
+    // THE OBF NAME WAS WRONG HERE, and silently: it said `avq`, which in 1.8.9
+    // is MapItemRenderer -- a class that exists, registers cleanly, and has no
+    // method called `a(Leu;)V`, so the chat observer simply never installed on a
+    // vanilla client and every OBF user got a bridge that could send chat and
+    // never reported any.  The right answer is `avt`, and the shipped bytecode
+    // says so end to end: EntityPlayerSP.addChatMessage is
+    //
+    //     bew.a(Leu;)V   getfield ave.q:Lavo;   invokevirtual avo.d:()Lavt;
+    //                    invokevirtual avt.a:(Leu;)V
+    //
+    // which is `this.mc.ingameGUI.getChatGUI().printChatMessage(component)` with
+    // every link named.  avt also has the shape: it extends avp (Gui), holds a
+    // List<String> of sent messages and two List<ava> of chat lines, and carries
+    // a(Leu;), a(Leu;I) and a private a(Leu;III) -- printChatMessage,
+    // printChatMessageWithOptionalDeletion and setChatLine.
     namespace gui_new_chat
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/client/gui/GuiNewChat", .obf = "avq" };
+        inline constexpr name clazz{ .mcp = "net/minecraft/client/gui/GuiNewChat", .obf = "avt" };
         inline constexpr name print_chat_message{ .mcp = "printChatMessage", .obf = "a", .srg = "func_146227_a" };
     }
 
