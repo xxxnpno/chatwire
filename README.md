@@ -201,51 +201,6 @@ that *renders* chat and sees both.
 
 Use a proxy for headless bots, multi-version support, or anything that is not Windows.
 
-## Design notes
-
-**Any thread can call Java.** vmhook enters via pure VMStructs where the VM publishes a usable
-polling page (Java 8–20) and minimal JNI everywhere else, including Java 17. There is no pump and
-no tick to wait for, so commands are synchronous and report what happened.
-
-**What the VM permits is not what Minecraft permits.** `sendChatMessage` is genuinely thread-safe —
-it hands off to the netty event loop. `addChatMessage` races cosmetically: worst case, one line
-drawn twice for a frame.
-
-**It runs inside someone's game.** No exception reaches the JVM. Nothing blocks the game thread.
-`system.detach` stops chatwire but leaves the module mapped — unloading while a game thread might
-be inside a trampoline produced a DEP violation on Minecraft's own thread, twice.
-
-**Swallowing a chat message needs a reason; letting one through needs none.** The command
-interceptor is the only hook that changes what the game does, and every failure in it ends with the
-player's line going to the server.
-
-**Layering.** `sdk.hpp` is the only header that includes vmhook; `net.hpp` the only one that
-includes Winsock; `chatwire.hpp` neither.
-
-## Security
-
-**Binds `127.0.0.1` only, and that is not configurable.** This socket sends chat as the player and
-reads everything they see. There is no authentication, and that is only defensible because of the
-bind address.
-
-Chat text is attacker-controlled and flows into the JSON chatwire emits, so output is escaped.
-
-## Requirements
-
-**Windows**, x86-64, HotSpot JVM. **CMake 3.20+** and GCC 14+ (developed against GCC 15.2 via
-MSYS2) or MSVC 19.37+ — C++23 with a working `<print>`. No package manager; `vmhook` is vendored
-in `ext/` and the only library linked is `ws2_32`.
-
-| Option | |
-|---|---|
-| `-DCHATWIRE_BUILD_TOOLS=OFF` | just the library; drops the `<print>` requirement |
-| `-DCHATWIRE_EMBED_DLL=OFF` | ship the exe and the DLL side by side instead of embedding |
-
-## Status
-
-Works end to end, verified by injecting into a real Minecraft. There is no CI: everything that
-matters here needs a live game.
-
 ## Licence
 
 MIT.
