@@ -192,29 +192,41 @@ namespace chatwire::ws
     [[nodiscard]] inline auto encode(const opcode op, const std::string_view payload)
         -> std::vector<std::uint8_t>
     {
-        std::vector<std::uint8_t> frame;
-        frame.reserve(payload.size() + 10u);
-        frame.push_back(static_cast<std::uint8_t>(0x80u | static_cast<std::uint8_t>(op)));  // FIN + opcode
+        // The header is built in a fixed array rather than pushed onto the
+        // vector.  A header is at most ten bytes and the reserve() below already
+        // made room for it, but GCC 15 cannot prove the growth path is dead and
+        // reports -Wfree-nonheap-object from inside push_back's reallocation --
+        // a false positive that fails any -Werror build.  An array cannot grow,
+        // so there is nothing left to warn about, and the shape is plainer.
+        std::array<std::uint8_t, 10u> header{};
+        std::size_t header_size{ 0 };
+        header[header_size++] = static_cast<std::uint8_t>(0x80u | static_cast<std::uint8_t>(op));  // FIN + opcode
 
         const std::size_t n{ payload.size() };
         if (n < 126u)
         {
-            frame.push_back(static_cast<std::uint8_t>(n));
+            header[header_size++] = static_cast<std::uint8_t>(n);
         }
         else if (n <= 0xFFFFu)
         {
-            frame.push_back(126u);
-            frame.push_back(static_cast<std::uint8_t>((n >> 8) & 0xFFu));
-            frame.push_back(static_cast<std::uint8_t>(n & 0xFFu));
+            header[header_size++] = 126u;
+            header[header_size++] = static_cast<std::uint8_t>((n >> 8) & 0xFFu);
+            header[header_size++] = static_cast<std::uint8_t>(n & 0xFFu);
         }
         else
         {
-            frame.push_back(127u);
+            header[header_size++] = 127u;
             for (int i{ 7 }; i >= 0; --i)
             {
-                frame.push_back(static_cast<std::uint8_t>((static_cast<std::uint64_t>(n) >> (i * 8)) & 0xFFu));
+                header[header_size++] =
+                    static_cast<std::uint8_t>((static_cast<std::uint64_t>(n) >> (i * 8)) & 0xFFu);
             }
         }
+
+        std::vector<std::uint8_t> frame;
+        frame.reserve(header_size + n);
+        frame.insert(frame.end(), header.begin(),
+                     header.begin() + static_cast<std::ptrdiff_t>(header_size));
         frame.insert(frame.end(), payload.begin(), payload.end());
         return frame;
     }

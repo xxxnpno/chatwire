@@ -7,6 +7,14 @@
 // in chatwire sees neither.
 //
 // The startup ORDER is not arbitrary -- see the header of chatwire/chatwire.hpp.
+//
+// ws/server.hpp COMES FIRST, and has to.  It reaches winsock2.h, which refuses
+// to be included after windows.h: it emits `#warning Please include winsock2.h
+// before windows.h` and then defines a conflicting, older socket API.  sdk.hpp
+// pulls in vmhook, which includes windows.h, so any order that puts sdk first
+// loses the race -- and under -Werror that #warning is a build failure.
+#include "chatwire/ws/server.hpp"
+
 #include "chatwire/chatwire.hpp"
 
 #include "chatwire/ansi.hpp"
@@ -16,22 +24,21 @@
 #include "chatwire/features/system.hpp"
 #include "chatwire/features/world.hpp"
 #include "chatwire/sdk.hpp"
-#include "chatwire/ws/server.hpp"
 
 namespace chatwire::detail
 {
     /*
         The server is a function-local static that is NEVER DESTROYED,
-        deliberately -- and so is the hook list over in sdk.hpp, for the same
-        reason.
+        deliberately.
 
-        Both destructors do things that must not happen during static
-        destruction or DLL unload: ~server joins threads, and ~hook_handle
-        removes a detour from a JVM that may already be tearing down.  Static
-        destruction of a DLL runs under the loader lock, where joining a thread
-        is a guaranteed deadlock -- the game would hang on exit.
+        ~server joins threads, and static destruction of a DLL runs under the
+        loader lock, where joining a thread is a guaranteed deadlock -- the game
+        would hang on exit.  The hooks have the same shape of problem and vmhook
+        owns that one: removing a detour touches a JVM that may already be
+        tearing down, which is why nothing unhooks from a destructor and
+        sdk::remove_hooks() calls vmhook::shutdown_hooks() explicitly.
 
-        So they are leaked on purpose.  chatwire::stop() is the explicit,
+        So it is leaked on purpose.  chatwire::stop() is the explicit,
         correctly-ordered teardown, and the process reclaims everything anyway.
         This also removes the atexit registration that a namespace-scope object
         with a destructor would need, which GCC 15's module machinery does not
@@ -319,12 +326,7 @@ namespace chatwire
         registry::add(features::system::instance());
         registry::add(features::world::instance());
 
-        // 3. Deoptimise the hook target before installing the hook: a
-        //    JIT-compiled method never reaches the interpreter entry a detour
-        //    patches, so the hook would install and never fire.
-        sdk::deoptimize_hook_targets();
-
-        // 4. Join the VM.  Everything past this point may call Java from this
+        // 3. Join the VM.  Everything past this point may call Java from this
         //    thread; nothing before it could.  This is where the pump used to
         //    be -- a detour on Minecraft.runTick, a queue, and a tick of
         //    latency, all of it in service of "a call must happen inside a
@@ -341,7 +343,7 @@ namespace chatwire
             return false;
         }
 
-        // 4b. The safepoint gate and the caches every call depends on, resolved
+        // 3b. The safepoint gate and the caches every call depends on, resolved
         //     HERE, on a thread nothing is waiting for.  Doing either for the
         //     first time on the direct route would stop the game for the length
         //     of a class-graph walk.
@@ -356,9 +358,7 @@ namespace chatwire
                        "works, commands will not");
         }
 
-
-
-        // 4c. The command sink, BEFORE the features start.  Starting the
+        // 3c. The command sink, BEFORE the features start.  Starting the
         //     commands feature installs its detour on sendChatMessage, and from
         //     that instant the game thread can be inside on_typed().  Nothing
         //     is registered yet, so it would find no owner and let the line
@@ -367,7 +367,7 @@ namespace chatwire
         //     "it dropped exactly one message, once" bugs are made.
         features::commands::set_sink(&detail::send_command_event);
 
-        // 5. Features.  Installing a hook is metaspace work rather than a Java
+        // 4. Features.  Installing a hook is metaspace work rather than a Java
         //    call, so it is safe on this thread and does not go through the
         //    pump -- and doing it here means a feature that fails is reported
         //    before the server opens rather than a tick later.
@@ -376,7 +376,7 @@ namespace chatwire
             log::info("{} feature(s) started", started);
         }
 
-        // 6. The server, last, so an instant client finds a working API.
+        // 5. The server, last, so an instant client finds a working API.
         features::chat::set_sink(&detail::broadcast_line);
         features::chat::set_console_sink(&detail::console_line);
         if (!detail::server_instance().start(bind_port, &detail::dispatch, &detail::on_presence))

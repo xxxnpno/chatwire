@@ -64,9 +64,9 @@
 // fixes.  The packed VMHOOK_VERSION integer makes it easy to gate consumer
 // code on a minimum version via `#if VMHOOK_VERSION >= VMHOOK_MAKE_VERSION(0,3,0)`.
 // ---------------------------------------------------------------------------
-#define VMHOOK_VERSION_MAJOR 0
-#define VMHOOK_VERSION_MINOR 5
-#define VMHOOK_VERSION_PATCH 3
+#define VMHOOK_VERSION_MAJOR 6
+#define VMHOOK_VERSION_MINOR 0
+#define VMHOOK_VERSION_PATCH 0
 
 #define VMHOOK_MAKE_VERSION(major, minor, patch) \
     (((major) * 1000000) + ((minor) * 1000) + (patch))
@@ -93,6 +93,7 @@
 #include <unordered_set>
 #include <typeindex>
 #include <memory>
+#include <new>          // std::nothrow — object<T>::create() is noexcept
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -498,6 +499,21 @@ namespace vmhook
     inline constexpr std::string_view error_tag{ "[VMHook ERROR]" };
     inline constexpr std::string_view warning_tag{ "[VMHook WARNING]" };
     inline constexpr std::string_view info_tag{ "[VMHook INFO]" };
+
+    /*
+        @brief The version the compiled library (vmhook.lib) was built from.
+        @details
+        Declared here, DEFINED only in vmhook/src/vmhook.cpp — so these two link
+        only if you link vmhook::compiled, and a header-only consumer that never
+        calls them is unaffected.  Comparing compiled_version() with
+        VMHOOK_VERSION catches the one mistake a static library can introduce
+        silently: a .lib built from a different checkout than the header you
+        included.
+    */
+    [[nodiscard]] auto compiled_version() noexcept -> std::uint32_t;
+
+    /* @brief @see compiled_version. */
+    [[nodiscard]] auto compiled_version_string() noexcept -> const char*;
 
     /*
         @brief Exception type thrown internally by VMHook to report unrecoverable errors.
@@ -1899,7 +1915,15 @@ namespace vmhook
 
     class object_base;
     template<typename derived = void> class object;
+
+    /* Defined further down; object_base::resolve_klass() needs it to ask an oop
+       what class it REALLY is.  @see vmhook::klass_from_oop. */
+    [[nodiscard]] inline auto klass_from_oop(void* const oop) noexcept -> vmhook::hotspot::klass*;
     class field_proxy;
+    // The untyped wrapper every reference value can be navigated through
+    // without naming a type.  Defined after oop_reflective_base, which
+    // supplies the read-the-klass-out-of-the-header machinery it needs.
+    class any_object;
     class collection;
     class list;
     class set;
@@ -1917,6 +1941,11 @@ namespace vmhook
     template<typename wrapper_type = void> class root;
     template<typename wrapper_type = void> class borrowed;
     template<typename wrapper_type = void> class ref_vector;
+
+    // The one-expression binding proxy every `->` in this library returns.
+    // Declared here so field_proxy::value_t and method_proxy::value_t — both
+    // defined long before it — can name it in their own operator->.
+    namespace detail { template<typename wrapper_type> class access; }
 
     // Upper bound, in CHARACTERS, on the String read_java_string will decode.
     // The backing-array length is validated against this (in char units, the same
@@ -2045,6 +2074,35 @@ namespace vmhook
         */
         template<typename type>
         inline constexpr bool is_unique_ptr_v{ is_unique_ptr<std::remove_cvref_t<type>>::value };
+
+        /*
+            @brief Wraps an address in a std::unique_ptr that is NEVER null.
+            @details
+            The single place every `std::unique_ptr<W>` a caller receives is
+            built — a field read, a call result, a detour argument, create().
+
+            The contract it exists to enforce: the POINTER is always valid, and
+            the OBJECT may be absent.  `p->get_instance() == nullptr` means the
+            Java reference was null (or could not be decoded); `p` itself is
+            never null, so there is exactly one thing to check and `p->` is
+            always safe to write.
+
+            Folding both cases into a null unique_ptr — which is what this
+            replaced — made the two indistinguishable at the call site and made
+            every access site carry a null test before it could ask anything.
+
+            The one residual null is a failed C++ allocation: `new` is nothrow
+            here because every one of these paths is noexcept, and there is
+            nothing honest to return when the process is out of memory.
+
+            Complexity: O(1) plus one small allocation.  noexcept.
+        */
+        template<typename wrapper_type>
+        [[nodiscard]] inline auto wrap_object(void* const address) noexcept
+            -> std::unique_ptr<wrapper_type>
+        {
+            return std::unique_ptr<wrapper_type>{ new (std::nothrow) wrapper_type{ address } };
+        }
 
         /*
             @brief The human-readable spelling of a C++ type, for diagnostics.
@@ -2403,6 +2461,74 @@ namespace vmhook
                 }
             }()
         };
+
+        /*
+            @brief Recognises the reference-shaped targets a value_t can produce.
+            @details
+            A Java reference read (field or call result) arrives as a compressed
+            OOP.  What the caller wants out of it is decided by the type they
+            assigned it to, not by a template argument they had to supply:
+
+                vmhook::borrowed<entity> e = f->get();   // is_borrowed_v
+                vmhook::ref<entity>      r = f->get();   // is_ref_v
+                entity                   w = f->get();   // is_java_wrapper_v
+
+            Before these traits existed every one of those lines compiled and
+            produced a DEFAULT-CONSTRUCTED result — an empty handle, a null
+            wrapper — because the conversion fell through to `target_type{}`.
+            That is the worst possible outcome: the code reads correctly and is
+            silently null.  Recognising the shape here is what turns those three
+            lines into real decodes.
+
+            The borrow case reuses the existing is_borrowed_v (the detour
+            machinery already needed it); ref and wrapper are new here.  Each is
+            a pure name match, so none needs a complete type — the branch that
+            uses it is only instantiated at the call site, by which point
+            borrowed / ref / the wrapper all are complete.
+        */
+        template<typename type>
+        struct is_ref : std::false_type {};
+        template<typename wrapped_type>
+        struct is_ref<vmhook::ref<wrapped_type>> : std::true_type
+        {
+            using value_type_t = wrapped_type;
+        };
+
+        /* @brief cv-ref-stripping convenience constant for is_ref<T>. */
+        template<typename type>
+        inline constexpr bool is_ref_v{ is_ref<std::remove_cvref_t<type>>::value };
+
+        /*
+            @brief True for a user wrapper — anything derived from object_base
+                   that can be built from a decoded OOP.
+            @details
+            Deliberately NOT satisfied by object_base itself (never the thing a
+            caller declares) nor by any type that lacks the oop constructor, so
+            a wrapper whose author hid that constructor is simply not a
+            conversion target rather than a hard error.  The nested `requires`
+            keeps is_base_of off any target that is not a class, which is what
+            makes the trait safe to evaluate for `int` and friends.
+        */
+        template<typename type>
+        inline constexpr bool is_java_wrapper_v{
+            std::is_class_v<std::remove_cvref_t<type>>
+            && !std::is_same_v<std::remove_cvref_t<type>, vmhook::object_base>
+            && requires {
+                   requires std::is_base_of_v<vmhook::object_base, std::remove_cvref_t<type>>;
+                   requires std::is_constructible_v<std::remove_cvref_t<type>, void*>;
+               }
+        };
+
+        /* @brief The wrapper a handle target names, or void for an untyped one. */
+        template<typename type>
+        struct handle_wrapper_impl { using type_t = void; };
+        template<typename wrapper_type>
+        struct handle_wrapper_impl<vmhook::borrowed<wrapper_type>> { using type_t = wrapper_type; };
+        template<typename wrapper_type>
+        struct handle_wrapper_impl<vmhook::ref<wrapper_type>> { using type_t = wrapper_type; };
+
+        template<typename type>
+        using handle_wrapper_t = typename handle_wrapper_impl<std::remove_cvref_t<type>>::type_t;
 
     }
 
@@ -8773,10 +8899,11 @@ namespace vmhook
         */
         struct method_flags_slot
         {
-            void* address{ nullptr };
-            int   width_bytes{ 0 };
-            int   dont_inline_bit{ 0 };
-            bool  confident{ false };
+            void*         address{ nullptr };
+            int           width_bytes{ 0 };
+            int           dont_inline_bit{ 0 };
+            std::uint32_t not_compilable_mask{ 0 };
+            bool          confident{ false };
         };
 
         /*
@@ -8809,6 +8936,15 @@ namespace vmhook
             std::uint64_t offset{ 0 };
             int           width_bytes{ 0 };
             int           dont_inline_bit{ 0 };
+            /*
+                Bits in the SAME word that make HotSpot refuse to compile the
+                method.  Non-zero only for the JDK 21+ MethodFlags::_status
+                layout, where the compile-control bits live alongside
+                _dont_inline; zero on the JDK 11..20 u2 _flags layout, whose
+                compilability bits are in _access_flags and are handled by the
+                legacy NO_COMPILE mask instead.
+            */
+            std::uint32_t not_compilable_mask{ 0 };
             bool          confident{ false };
         };
 
@@ -8883,6 +9019,7 @@ namespace vmhook
                     evidence.flags_offset,
                     /*width_bytes*/ 2,
                     /*dont_inline_bit*/ 2,
+                    /*not_compilable_mask*/ 0u,
                     /*confident*/ true };
             }
 
@@ -8896,6 +9033,20 @@ namespace vmhook
                     evidence.intrinsic_id_offset - 4,
                     /*width_bytes*/ 4,
                     /*dont_inline_bit*/ 12,
+                    // MethodFlags::_status, from methodFlags.hpp:
+                    //   is_not_c2_compilable      1 << 8
+                    //   is_not_c1_compilable      1 << 9
+                    //   is_not_c2_osr_compilable  1 << 10
+                    // Verified IDENTICAL on jdk-21 and master (JDK 26-era), and
+                    // corroborated by dont_inline landing on bit 12 in the same
+                    // table -- the bit this resolver already derives independently
+                    // and which is exercised on live JDK 21+.
+                    //
+                    // queued_for_compilation (1 << 7) is deliberately NOT set: the
+                    // legacy _access_flags mask included JVM_ACC_QUEUED, but lying
+                    // to the compile broker about a queue entry it never made is a
+                    // different (and unnecessary) claim from "never compile this".
+                    /*not_compilable_mask*/ (1u << 8) | (1u << 9) | (1u << 10),
                     /*confident*/ true };
             }
 
@@ -8954,6 +9105,7 @@ namespace vmhook
                 base + layout.offset,
                 layout.width_bytes,
                 layout.dont_inline_bit,
+                layout.not_compilable_mask,
                 /*confident*/ true };
         }
 
@@ -8976,11 +9128,18 @@ namespace vmhook
             2 bytes of alignment padding that sit between the u2 _access_flags and the
             4-byte-aligned _flags that follows it (verified field order:
             _vtable_index, _access_flags(u2), _flags(u4)), so it corrupts NOTHING but
-            is also a no-op for JIT inhibition on JDK 24+.  This is intentionally left
-            as-is: the deopt/settle path the hook modules rely on keeps a hooked
-            method interpreted regardless, and routing NO_COMPILE into MethodFlags on
-            JDK 24+ would require mutating the install/teardown call sites (outside the
-            flag-accessor surface).  No behavioural change on JDK 8..23.
+            is also a no-op for JIT inhibition on JDK 24+.
+
+            THAT GAP IS NOW CLOSED ELSEWHERE, and this mask is no longer the whole
+            story: hotspot::set_not_compilable() writes the relocated bits into
+            MethodFlags::_status, and every call site that ORs this mask calls it
+            too.  This mask is kept because it is still the ONLY route on
+            JDK 8..23, where those bits really do live here.
+
+            Do not "fix" this constant by adding the MethodFlags bit numbers to
+            it.  They are bits 8..10 of a DIFFERENT word; OR-ing them here would
+            write them into _access_flags, where on JDK 8..23 they collide with
+            real class-file flags.
         */
         inline constexpr std::int32_t NO_COMPILE =
             0x02000000 |
@@ -9160,6 +9319,96 @@ namespace vmhook
                 }
             }
             // Any other width -> unrecognised; no-op (never reached for confident slots).
+        }
+
+        /*
+            @brief Makes HotSpot refuse to JIT-compile a Method, on JDK 21+.
+            @details
+            The companion to the legacy NO_COMPILE mask, and the fix for the case
+            that mask silently stopped covering.
+
+            THE BUG IT CLOSES.  Until JDK 23 the compile-control bits lived in
+            Method::_access_flags, and `*flags |= NO_COMPILE` inhibited the JIT.
+            JDK-8339113 shrank AccessFlags to u2 and RELOCATED those bits into
+            MethodFlags::_status — the same u4 word that already holds
+            _dont_inline.  The u4 OR then lands its high byte in the alignment
+            padding after the u2 _access_flags: it corrupts nothing, and it also
+            does nothing.  A hooked method was therefore free to be recompiled on
+            JDK 24+, which is exactly what the auto-repair watchdog kept catching
+            ("JIT-state drifted ... NO_COMPILE=set") — the flag really was set, in
+            a word HotSpot had stopped reading.
+
+            THE BITS.  is_not_c2_compilable (1<<8), is_not_c1_compilable (1<<9)
+            and is_not_c2_osr_compilable (1<<10), read from methodFlags.hpp and
+            verified IDENTICAL on jdk-21 and master.  They are not guessed
+            positions: the same table places _dont_inline at bit 12, which
+            resolve_method_flags_slot derives INDEPENDENTLY from
+            `_intrinsic_id_offset - 4` and which is exercised on live JDK 21+ —
+            so the table is corroborated by a bit this library already relies on.
+
+            WHERE IT APPLIES.  Only the JDK 21+ MethodFlags layout, which is the
+            only one whose slot carries a non-zero not_compilable_mask.  On the
+            JDK 11..20 u2 `_flags` layout the mask is 0 and this is a no-op,
+            because there the compilability bits genuinely are in _access_flags
+            and the legacy NO_COMPILE still owns them.  On JDK 8 the resolver is
+            not confident and this no-ops, as everything else in this family does.
+
+            SAFETY.  Byte-for-byte the same contract as set_dont_inline, whose
+            slot, alignment gate, cold-page probe, atomic set and fault-safe
+            non-atomic clear this reuses verbatim — it writes different bits in
+            the very same word, through the very same resolver.  A non-confident
+            slot, an unreadable page or a zero mask all no-op.
+        */
+        inline auto set_not_compilable(const vmhook::hotspot::method* const method_pointer,
+                                       const bool enabled) noexcept
+            -> void
+        {
+            if (!method_pointer || !vmhook::hotspot::is_valid_pointer(method_pointer))
+            {
+                return;
+            }
+
+            const vmhook::hotspot::method_flags_slot slot{
+                vmhook::hotspot::resolve_method_flags_slot(method_pointer) };
+            if (!slot.confident || !slot.address || slot.not_compilable_mask == 0u
+                || slot.width_bytes != 4)
+            {
+                return;
+            }
+
+            const std::uintptr_t address_value{ reinterpret_cast<std::uintptr_t>(slot.address) };
+            if ((address_value % alignof(std::uint32_t)) != 0)
+            {
+                return;
+            }
+
+            // Cold-page probe before any raw access, exactly as set_dont_inline
+            // does: this runs on the install path AND on the detached watchdog,
+            // off a STORED Method* that may have been relocated or freed since.
+            std::uint32_t probe_value{ 0 };
+            if (!vmhook::os::safe_read(&probe_value, slot.address, sizeof(probe_value)))
+            {
+                return;
+            }
+
+            if (enabled)
+            {
+                // ATOMIC: HotSpot's compiler threads CAS this same word.
+                std::atomic_ref<std::uint32_t> word{ *static_cast<std::uint32_t*>(slot.address) };
+                word.fetch_or(slot.not_compilable_mask, std::memory_order_acq_rel);
+            }
+            else
+            {
+                // TEARDOWN: driver thread, method already out of dispatch — the
+                // fault-safe non-atomic path, so a cold slot skips instead of AVing.
+                std::uint32_t word{ 0 };
+                if (!vmhook::os::safe_read(&word, slot.address, sizeof(word)))
+                {
+                    return;
+                }
+                word &= ~slot.not_compilable_mask;
+                (void)vmhook::os::safe_write(slot.address, &word, sizeof(word));
+            }
         }
 
         /*
@@ -9817,7 +10066,7 @@ namespace vmhook
                 if (!java) { return; }
 
                 player->get_field("health")->set(20.0f);
-                minecraft->call<void>("sendChatMessage", "hi");
+                minecraft->call("sendChatMessage", "hi");
             }
 
         It does TWO things, and the second is the one that matters:
@@ -9836,7 +10085,7 @@ namespace vmhook
             const vmhook::java_thread_scope java{};
             if (!java) { return false; }
             auto player = find_player();                 // resolved inside
-            player->call<void>("sendChatMessage", "hi"); // used inside
+            player->call("sendChatMessage", "hi");        // used inside
 
         Splitting that into two scopes throws the guarantee away: between them a
         collection can run and move what the first one found.
@@ -10232,6 +10481,641 @@ namespace vmhook
         }
     }
 
+    namespace detail
+    {
+        /*
+            @brief HotSpot's adapter key for a method, as a comparable string.
+            @details
+            Adapters are shared, and this is the rule by which they are shared.
+            AdapterFingerPrint is built from the ARGUMENT BasicTypes only -- the
+            return type is not part of it -- and each type is normalised by
+            SharedRuntime's adapter_encoding():
+
+                Z B S C I     -> int      (all promoted in the calling convention)
+                object array  -> long     (both are one 64-bit word on LP64)
+                J             -> long
+                F             -> float
+                D             -> double
+
+            plus a leading receiver word for a non-static method.
+
+            Matching on the raw descriptor instead -- which is what this did
+            first -- is far stricter than the thing it is modelling, and the cost
+            is not theoretical: on a live JDK 26 Minecraft it found donors for 1
+            signature out of 24 and refused the rest, because it treated
+            `()Lnet/minecraft/client/Minecraft;` and `()V` as different keys when
+            HotSpot gives them the SAME adapter.  Every refusal then fell through
+            to a path that could not deoptimise.
+
+            Encoded as a small string ("I", "L", "F", "D" per word) purely so it
+            can key a map; the letters are the normalised classes above, not the
+            descriptor characters they came from -- note that an object argument
+            encodes as 'L' *because it is long-sized*, which is why `J` encodes
+            the same way.
+
+            Pure: no JVM, no live Method, so the whole table is unit-testable.
+
+            @return The key, or an empty string if the descriptor is malformed.
+        */
+        inline auto adapter_fingerprint(const std::string_view descriptor,
+                                        const bool is_static) noexcept
+            -> std::string
+        {
+            const std::size_t open{ descriptor.find('(') };
+            const std::size_t close{ descriptor.find(')') };
+            if (open == std::string_view::npos || close == std::string_view::npos
+                || close < open)
+            {
+                return {};
+            }
+
+            std::string key{};
+            if (!is_static)
+            {
+                key.push_back('L');   // the receiver: one object-sized word
+            }
+
+            for (std::size_t i{ open + 1 }; i < close; ++i)
+            {
+                switch (descriptor[i])
+                {
+                    case 'Z': case 'B': case 'S': case 'C': case 'I':
+                        key.push_back('I');
+                        break;
+                    case 'J':
+                        key.push_back('L');
+                        break;
+                    case 'F':
+                        key.push_back('F');
+                        break;
+                    case 'D':
+                        key.push_back('D');
+                        break;
+                    case 'L':
+                    {
+                        const std::size_t end{ descriptor.find(';', i) };
+                        if (end == std::string_view::npos || end > close)
+                        {
+                            return {};
+                        }
+                        i = end;
+                        key.push_back('L');
+                        break;
+                    }
+                    case '[':
+                    {
+                        // Skip the (possibly nested) array prefix, then the
+                        // element type; the whole thing is one reference word.
+                        while (i < close && descriptor[i] == '[')
+                        {
+                            ++i;
+                        }
+                        if (i >= close)
+                        {
+                            return {};
+                        }
+                        if (descriptor[i] == 'L')
+                        {
+                            const std::size_t end{ descriptor.find(';', i) };
+                            if (end == std::string_view::npos || end > close)
+                            {
+                                return {};
+                            }
+                            i = end;
+                        }
+                        key.push_back('L');
+                        break;
+                    }
+                    default:
+                        return {};
+                }
+            }
+            return key;
+        }
+
+        /*
+            @brief One signature's worth of borrowed-adapter evidence.
+        */
+        struct c2i_vote
+        {
+            void*       candidate{ nullptr };
+            std::size_t agreeing{ 0 };
+            std::size_t total{ 0 };
+        };
+
+        /*
+            @brief Harvests borrowed-adapter evidence, stopping as soon as it can.
+            @details
+            Every read here is os::safe_read, which on Windows is a
+            ReadProcessMemory SYSCALL.  A full sweep of a running Minecraft is
+            223,016 methods, and touching _code, the access flags and
+            _from_compiled_entry on each is on the order of 450,000 syscalls --
+            about three seconds, paid before the first hook fires.
+
+            Almost all of it is wasted.  A hook needs the adapter for ONE
+            signature, and common shapes are found within the first handful of
+            classes.  So the walk takes the key it is looking for and stops the
+            moment that key has two corroborating votes; everything harvested on
+            the way is kept, because it is free and the next lookup may want it.
+
+            `complete` records whether the graph was exhausted.  Only then is a
+            missing key known to be genuinely absent -- before that, a miss just
+            means the early exit stopped somewhere else.  A lookup that misses an
+            incomplete index therefore re-runs the walk with no stop key, once,
+            and from then on the answer is authoritative.
+
+            The counters are logged whenever a walk runs, because a silent zero
+            is what made the previous version's failure invisible.
+        */
+        struct c2i_index_state
+        {
+            std::unordered_map<std::string, vmhook::detail::c2i_vote> votes{};
+            bool                                                     complete{ false };
+            std::mutex                                               guard{};
+        };
+
+        inline auto c2i_state() noexcept
+            -> vmhook::detail::c2i_index_state&
+        {
+            static vmhook::detail::c2i_index_state state{};
+            return state;
+        }
+
+        /*
+            @brief One pass over the class graph.  Caller holds state.guard.
+            @param stop_key  Stop once this key has 2 votes; empty means "sweep
+                             everything and mark the index complete".
+        */
+        inline auto harvest_c2i(vmhook::detail::c2i_index_state& state,
+                                const std::string& stop_key) noexcept
+            -> void
+        {
+            try
+            {
+                std::size_t classes{ 0 };
+                std::size_t methods_seen{ 0 };
+                std::size_t skip_compiled{ 0 };
+                std::size_t skip_flags{ 0 };
+                std::size_t skip_abstract_native{ 0 };
+                std::size_t skip_no_entry{ 0 };
+                std::size_t recorded{ 0 };
+                std::size_t donors_static{ 0 };
+                std::size_t donors_instance{ 0 };
+                bool        stopped_early{ false };
+
+                const auto satisfied = [&]() noexcept -> bool
+                {
+                    if (stop_key.empty())
+                    {
+                        return false;
+                    }
+                    const auto it{ state.votes.find(stop_key) };
+                    return it != state.votes.end() && it->second.agreeing >= 2;
+                };
+
+                vmhook::for_each_loaded_class(
+                    [&](const std::string&, vmhook::hotspot::klass* const k) -> void
+                    {
+                        // The visitor cannot break out of the graph walk, but it
+                        // can decline to do any work -- and the work is what
+                        // costs, not the iteration.
+                        if (stopped_early)
+                        {
+                            return;
+                        }
+                        if (satisfied())
+                        {
+                            stopped_early = true;
+                            return;
+                        }
+                        if (k == nullptr || !vmhook::hotspot::is_valid_pointer(k))
+                        {
+                            return;
+                        }
+                        ++classes;
+                        const std::int32_t count{ k->get_methods_count() };
+                        vmhook::hotspot::method** const list{ k->get_methods_ptr() };
+                        if (list == nullptr || count <= 0)
+                        {
+                            return;
+                        }
+                        for (std::int32_t i{ 0 }; i < count; ++i)
+                        {
+                            vmhook::hotspot::method* const m{ list[i] };
+                            if (m == nullptr || !vmhook::hotspot::is_valid_pointer(m))
+                            {
+                                continue;
+                            }
+                            ++methods_seen;
+
+                            // ABSTRACT: HotSpot hands every abstract method the
+                            // shared _abstract_method_handler, whose c2i entry IS
+                            // the AbstractMethodError stub -- and an abstract
+                            // method has _code == nullptr, so it looks like a
+                            // perfect donor.  Borrowing one points the hooked
+                            // method at a throw.
+                            // NATIVE: _from_compiled_entry is the native wrapper.
+                            constexpr std::uint32_t JVM_ACC_STATIC_BIT{ 0x0008u };
+                            constexpr std::uint32_t JVM_ACC_NATIVE_BIT{ 0x0100u };
+                            constexpr std::uint32_t JVM_ACC_ABSTRACT_BIT{ 0x0400u };
+
+                            // Cheapest discriminators first: every one of these
+                            // is a syscall, and the signature read below also
+                            // allocates.
+                            if (m->get_code() != nullptr)
+                            {
+                                ++skip_compiled;
+                                continue;
+                            }
+                            std::uint32_t* const flags{ m->get_access_flags() };
+                            std::uint32_t access{ 0 };
+                            if (flags == nullptr
+                                || !vmhook::os::safe_read(&access, flags, sizeof(access)))
+                            {
+                                ++skip_flags;
+                                continue;
+                            }
+                            if ((access & (JVM_ACC_NATIVE_BIT | JVM_ACC_ABSTRACT_BIT)) != 0u)
+                            {
+                                ++skip_abstract_native;
+                                continue;
+                            }
+                            void* const entry{ m->get_from_compiled_entry() };
+                            if (entry == nullptr || !vmhook::hotspot::is_valid_pointer(entry))
+                            {
+                                ++skip_no_entry;
+                                continue;
+                            }
+                            const std::string signature{ m->get_signature() };
+                            if (signature.empty())
+                            {
+                                continue;
+                            }
+                            const std::string key{ vmhook::detail::adapter_fingerprint(
+                                signature, (access & JVM_ACC_STATIC_BIT) != 0u) };
+                            if (key.empty())
+                            {
+                                continue;
+                            }
+
+                            if ((access & JVM_ACC_STATIC_BIT) != 0u) { ++donors_static; }
+                            else { ++donors_instance; }
+
+                            vmhook::detail::c2i_vote& vote{ state.votes[key] };
+                            ++vote.total;
+                            if (vote.candidate == nullptr)
+                            {
+                                vote.candidate = entry;
+                                vote.agreeing  = 1;
+                            }
+                            else if (vote.candidate == entry)
+                            {
+                                ++vote.agreeing;
+                            }
+                            ++recorded;
+
+                            if (satisfied())
+                            {
+                                stopped_early = true;
+                                return;
+                            }
+                        }
+                    });
+
+                if (!stopped_early)
+                {
+                    state.complete = true;
+                }
+
+                // The shapes actually harvested, most common first.  A lookup
+                // that misses a shape this list says is plentiful means the two
+                // sides are computing different keys -- which is exactly the bug
+                // this exists to make visible rather than infer.
+                // Whenever the graph was EXHAUSTED -- not only when the sweep
+                // was keyless.  Gating on stop_key.empty() printed nothing at
+                // all, because the sweep that completes is the one that went
+                // looking for a specific key and never found it, which is
+                // precisely the case worth dumping.
+                if (!stopped_early)
+                {
+                    std::vector<std::pair<std::string, vmhook::detail::c2i_vote>> ranked{
+                        state.votes.begin(), state.votes.end() };
+                    std::sort(ranked.begin(), ranked.end(),
+                              [](const auto& left, const auto& right) noexcept
+                              {
+                                  return left.second.total > right.second.total;
+                              });
+                    for (std::size_t i{ 0 }; i < ranked.size() && i < 12; ++i)
+                    {
+                        VMHOOK_LOG("{} c2i shape [{}] '{}' total={} agreeing={}",
+                                   vmhook::info_tag, i, ranked[i].first,
+                                   ranked[i].second.total, ranked[i].second.agreeing);
+                    }
+                }
+
+                VMHOOK_LOG("{} c2i donors by kind: {} instance, {} static.",
+                           vmhook::info_tag, donors_instance, donors_static);
+
+                VMHOOK_LOG("{} c2i harvest ({}): {} signature(s), {} donor(s), {} class(es), "
+                           "{} method(s) (skipped: {} compiled, {} unreadable flags, "
+                           "{} abstract/native, {} no entry).",
+                           vmhook::info_tag,
+                           stopped_early ? "stopped early" : "complete",
+                           state.votes.size(), recorded, classes, methods_seen,
+                           skip_compiled, skip_flags, skip_abstract_native, skip_no_entry);
+            }
+            catch (const std::exception&)
+            {
+                // A partial index is still useful; every miss just declines.
+            }
+        }
+    }
+
+    /*
+        @brief The c2i adapter entry for a signature, WITHOUT AdapterHandlerEntry.
+        @details
+        Deoptimising a method means pointing `_from_compiled_entry` at the c2i
+        adapter, so compiled callers land in the interpreter.  vmhook used to
+        find that address by reading `Method::_adapter` and then
+        `AdapterHandlerEntry::_c2i_entry` out of it.  On a modern JVM NEITHER is
+        exported: measured on a JDK 26-era VM, `Method::_adapter`,
+        `AdapterHandlerEntry::_c2i_entry`, `_i2c_entry` and
+        `_c2i_unverified_entry` are ALL absent from gHotSpotVMStructs.  With no
+        way to validate a candidate the heuristic scan returned 0, get_adapter()
+        returned null, and every deoptimisation degraded.
+
+        This derives the same address from facts that ARE exported, using a
+        property of HotSpot's own adapter library: adapters are SHARED, keyed on
+        the signature.  AdapterHandlerLibrary::get_adapter() looks an adapter up
+        by an AdapterFingerPrint computed from the method's argument BasicTypes
+        (plus the receiver for a non-static method), so every method with the
+        same descriptor and the same static-ness resolves to the SAME adapter.
+        And for a method that is NOT currently compiled, HotSpot leaves
+        `_from_compiled_entry` pointing at exactly that adapter's c2i entry.
+
+        Matching on the exact descriptor is deliberately STRICTER than the
+        fingerprint HotSpot uses (which collapses every object argument to one
+        BasicType).  Stricter is the safe direction: an identical descriptor plus
+        identical static-ness ALWAYS implies the same fingerprint, so a match is
+        never wrong -- some correct matches are simply passed over.
+
+        CORROBORATION.  This address is written into a live Method's
+        `_from_compiled_entry`, and a wrong one is not a failed lookup -- it is a
+        JVM that dies at the next compiled call.  So a lone donor is only trusted
+        when it is the only one the VM has; with two or more, one must agree with
+        another.  Refusing costs nothing but the older, safer path.
+
+        @return The c2i entry, or nullptr when no corroborated donor exists.
+    */
+    inline auto find_shared_c2i_entry(const std::string& descriptor,
+                                      const bool wanted_static) noexcept
+        -> void*
+    {
+        try
+        {
+            const std::string key{
+                vmhook::detail::adapter_fingerprint(descriptor, wanted_static) };
+            if (key.empty())
+            {
+                return nullptr;
+            }
+
+            vmhook::detail::c2i_index_state& state{ vmhook::detail::c2i_state() };
+            const std::lock_guard<std::mutex> guard{ state.guard };
+
+            const auto accept = [&]() noexcept -> void*
+            {
+                const auto it{ state.votes.find(key) };
+                if (it == state.votes.end())
+                {
+                    return nullptr;
+                }
+                const vmhook::detail::c2i_vote& vote{ it->second };
+                // Corroborated, or the only donor the VM has.  "Only" is a claim
+                // about the WHOLE graph, so it may only be made once the index is
+                // complete -- an early-exited walk that saw one donor has not
+                // finished looking.
+                if (vote.agreeing >= 2 || (state.complete && vote.total == 1))
+                {
+                    return vote.candidate;
+                }
+                return nullptr;
+            };
+
+            if (void* const early{ accept() })
+            {
+                return early;
+            }
+
+            // Not known yet: harvest, stopping as soon as THIS key is settled.
+            if (!state.complete)
+            {
+                vmhook::detail::harvest_c2i(state, key);
+                if (void* const found{ accept() })
+                {
+                    return found;
+                }
+            }
+
+            // Still nothing, and the walk stopped early for some other reason:
+            // sweep the whole graph once so a miss becomes authoritative.
+            if (!state.complete)
+            {
+                vmhook::detail::harvest_c2i(state, std::string{});
+                if (void* const found{ accept() })
+                {
+                    return found;
+                }
+            }
+
+            const auto it{ state.votes.find(key) };
+            VMHOOK_LOG("{} find_shared_c2i_entry('{}', static={}) -> key '{}': refusing - {}.",
+                       vmhook::warning_tag, descriptor, wanted_static, key,
+                       it == state.votes.end()
+                           ? "no donor of this shape exists"
+                           : "donors disagreed, which means one of them is not what it seems");
+            return nullptr;
+        }
+        catch (const std::exception&)
+        {
+            return nullptr;
+        }
+    }
+
+    /*
+        @brief The c2i entry for a live Method, by whatever means the VM allows.
+        @details Prefers the classic Method::_adapter -> AdapterHandlerEntry
+        route (exported on JDK 8, and cheap wherever the heuristic still finds
+        the slot), and falls back to the signature-shared derivation above when
+        the VM exports neither.  Callers get an address or nullptr and never have
+        to know which JDK they are on.
+    */
+    namespace detail
+    {
+        /*
+            @brief c2i adapters already proven for a specific Method.
+            @details
+            A hooked method is deoptimised over and over: once at install, then
+            again every time HotSpot re-JITs it.  The FIRST of those may have no
+            adapter available -- the method is compiled, so it cannot tell us its
+            own, and the borrowed-donor route may have no method of its shape to
+            borrow from.  Every subsequent one can be exact, because by then the
+            method has been interpreted and has published its own adapter.
+
+            So remember it.  Keyed on the Method*, which is what the caller has,
+            and re-validated on read: a class redefinition can recycle a Method*,
+            and an address that used to be an adapter is exactly the kind of
+            stale value that must not be written into a live method.
+        */
+        inline std::unordered_map<const void*, void*> g_proven_c2i{};
+        inline std::mutex                             g_proven_c2i_mutex{};
+    }
+
+    namespace detail
+    {
+        /*
+            @brief Whether a hook may deoptimise a method it has no adapter for.
+            @details
+            Clearing Method::_code makes HotSpot dispatch through the interpreter,
+            which is the only way a hook on an already-JIT-compiled method fires
+            at all.  Normally _from_compiled_entry is repointed at the c2i adapter
+            first; when no adapter can be found, clearing anyway leaves compiled
+            callers aimed at a stale nmethod until their inline caches re-resolve.
+
+            That is a real risk and it is not hypothetical -- it has killed a JVM
+            in testing.  But refusing outright is not free either: the hook then
+            stops firing the moment HotSpot recompiles the method, which on a
+            20 Hz game method is a couple of minutes.  Measured on JDK 26
+            Minecraft: deoptimising regardless survived 500,000 ticks; refusing
+            died at ~50,000.
+
+            So it is a choice, and the default is the one that makes hooks work.
+            set_deoptimise_without_adapter(false) takes the other side.
+
+            It also matters less over time than it looks: the FIRST deopt of a
+            compiled method is the one with no adapter, and once the method has
+            been interpreted it publishes its own (see resolve_and_cache_c2i), so
+            later deopts of the same method are exact.
+        */
+        inline std::atomic<bool> g_deopt_without_adapter{ true };
+    }
+
+    /* @brief @see detail::g_deopt_without_adapter. */
+    [[nodiscard]] inline auto deoptimise_without_adapter() noexcept
+        -> bool
+    {
+        return vmhook::detail::g_deopt_without_adapter.load(std::memory_order_acquire);
+    }
+
+    /* @brief @see detail::g_deopt_without_adapter. */
+    inline auto set_deoptimise_without_adapter(const bool enabled) noexcept
+        -> void
+    {
+        vmhook::detail::g_deopt_without_adapter.store(enabled, std::memory_order_release);
+    }
+
+    inline auto resolve_c2i_entry(vmhook::hotspot::method* const target) noexcept
+        -> void*
+    {
+        if (target == nullptr || !vmhook::hotspot::is_valid_pointer(target))
+        {
+            return nullptr;
+        }
+
+        // FIRST: ask the method itself.  While a method is NOT compiled, HotSpot
+        // keeps _from_compiled_entry pointing at that method's own c2i adapter --
+        // so a method that is currently deoptimised hands over the exact address,
+        // with no borrowing, no fingerprint and no chance of picking the wrong
+        // shape.  This is strictly better than every route below and should have
+        // been tried first.
+        //
+        // It does not help at the moment of hooking an already-compiled method,
+        // which is why the other routes exist.  But it converges: once a hooked
+        // method has been deoptimised even once, the watchdog sees _code null and
+        // this returns its real adapter, so every LATER re-deopt is exact.
+        // resolve_and_cache_c2i() is what keeps that answer.
+        if (target->get_code() == nullptr)
+        {
+            void* const own{ target->get_from_compiled_entry() };
+            if (own != nullptr && vmhook::hotspot::is_valid_pointer(own))
+            {
+                return own;
+            }
+        }
+
+        if (void* const adapter{ target->get_adapter() })
+        {
+            if (void* const c2i{ vmhook::hotspot::get_c2i_entry_from_adapter(adapter) })
+            {
+                return c2i;
+            }
+        }
+        constexpr std::uint32_t JVM_ACC_STATIC_BIT{ 0x0008u };
+        std::uint32_t* const flags{ target->get_access_flags() };
+        std::uint32_t access{ 0 };
+        if (flags == nullptr || !vmhook::os::safe_read(&access, flags, sizeof(access)))
+        {
+            return nullptr;
+        }
+        const std::string descriptor{ target->get_signature() };
+        if (descriptor.empty())
+        {
+            return nullptr;
+        }
+        return vmhook::find_shared_c2i_entry(descriptor, (access & JVM_ACC_STATIC_BIT) != 0u);
+    }
+
+    /*
+        @brief resolve_c2i_entry(), remembering what it proves.
+        @details
+        The install-time deopt of an already-compiled method often cannot find
+        an adapter, while every later deopt of the SAME method can -- by then it
+        has run interpreted and published its own.  Caching that turns a method
+        that was once unsafe to deoptimise into one that is exact from then on.
+
+        Use this, not resolve_c2i_entry, from anything that deoptimises.
+    */
+    inline auto resolve_and_cache_c2i(vmhook::hotspot::method* const target) noexcept
+        -> void*
+    {
+        if (target == nullptr || !vmhook::hotspot::is_valid_pointer(target))
+        {
+            return nullptr;
+        }
+
+        if (void* const fresh{ vmhook::resolve_c2i_entry(target) })
+        {
+            try
+            {
+                const std::lock_guard<std::mutex> guard{ vmhook::detail::g_proven_c2i_mutex };
+                vmhook::detail::g_proven_c2i[target] = fresh;
+            }
+            catch (const std::exception&)
+            {
+                // Caching is an optimisation; failing to cache is not an error.
+            }
+            return fresh;
+        }
+
+        try
+        {
+            const std::lock_guard<std::mutex> guard{ vmhook::detail::g_proven_c2i_mutex };
+            const auto it{ vmhook::detail::g_proven_c2i.find(target) };
+            if (it != vmhook::detail::g_proven_c2i.end()
+                && it->second != nullptr
+                && vmhook::hotspot::is_valid_pointer(it->second))
+            {
+                VMHOOK_LOG("{} resolve_c2i_entry: reusing the adapter this method published "
+                           "the last time it was interpreted.", vmhook::info_tag);
+                return it->second;
+            }
+        }
+        catch (const std::exception&)
+        {
+        }
+        return nullptr;
+    }
+
     /*
         @brief Forces every currently JIT-compiled Java method for which
                `predicate(class_name, method)` returns true to fall back to
@@ -10389,7 +11273,16 @@ namespace vmhook
                     {
                         adapter = m->get_adapter();
                     }
-                    void* const c2i{ vmhook::hotspot::get_c2i_entry_from_adapter(adapter) };
+                    void* c2i{ vmhook::hotspot::get_c2i_entry_from_adapter(adapter) };
+                    if (!c2i)
+                    {
+                        // A modern JVM exports neither Method::_adapter nor
+                        // AdapterHandlerEntry, so the route above yields nothing
+                        // and this whole sweep used to skip every method it saw.
+                        // Borrow the shared adapter from an interpreted method of
+                        // the same signature instead.
+                        c2i = vmhook::resolve_and_cache_c2i(m);
+                    }
 
                     if (!c2i || !vmhook::hotspot::is_valid_pointer(c2i))
                     {
@@ -10434,11 +11327,113 @@ namespace vmhook
             vmhook::deoptimize_all_jit_compiled_methods();
         @endcode
     */
+    /*
+        DANGER, measured: sweeping the WHOLE VM is not the same operation as
+        deoptimising one method.  Clearing Method::_code is not HotSpot's own
+        make_not_entrant() -- it consults no on-stack frames, no inline-cache
+        references and no dependency lists.  One method is a small risk; on a
+        live JDK 26 VM this deoptimised 5715 nmethods in a single pass and the
+        JVM died roughly twenty seconds later, which is the profile of the
+        code-cache sweeper reclaiming an nmethod a frame was still executing in.
+
+        hook() therefore does NOT call this.  It flushes only the hooked method's
+        own declaring class, which is where an inlining caller almost always
+        lives.  Reach for this only if you know you need a VM-wide flush and can
+        accept that outcome.
+    */
     inline auto deoptimize_all_jit_compiled_methods() noexcept
         -> std::size_t
     {
         return vmhook::deoptimize_methods_if(
             [](const std::string&, vmhook::hotspot::method*) noexcept { return true; });
+    }
+
+    namespace detail::auto_deopt
+    {
+        inline std::atomic<bool> g_enabled{ true };
+        inline std::once_flag    g_once{};
+
+        /*
+            @brief Flushes the JIT-compiled methods that could have inlined a
+                   freshly-hooked method -- its OWN class, and only once.
+            @details
+            hook() deoptimises the method it hooks, and (since the MethodFlags
+            fix) makes it genuinely not-compilable and not-inlinable, so no
+            FUTURE compile can inline it.  What none of that undoes is a caller
+            already compiled with the target inlined: there is no call left at
+            that site to intercept.  Injecting into a running process is exactly
+            when that has happened, which is why callers used to have to know
+            about deoptimize_all_jit_compiled_methods() and remember to call it.
+
+            SCOPE, AND WHY IT IS NOT THE WHOLE VM.  This deliberately sweeps only
+            the hooked method's OWN declaring class.  A first version swept every
+            loaded method; on a live JDK 26 VM that deoptimised 5715 nmethods in
+            one pass and the JVM died about twenty seconds later -- the profile of
+            the code-cache sweeper reclaiming an nmethod that a frame was still
+            executing in.  Clearing Method::_code is not the VM's own
+            make_not_entrant(): it does not consult on-stack frames, inline-cache
+            references or dependency lists, so every method swept is a small risk
+            and thousands of them is a large one.
+
+            The narrow scope keeps almost all of the benefit.  Inlining happens in
+            the CALLER, and a caller that inlined a method is overwhelmingly
+            likely to be a sibling in the same class -- Minecraft.run() inlining
+            Minecraft.runTick() is the case that motivated this. A couple of
+            hundred methods instead of several thousand is the same fix with a
+            fraction of the exposure.
+
+            Once per process: the sweep is expensive and the problem it solves is
+            a property of code compiled BEFORE hooking began.
+
+            set_auto_deoptimize_callers(false) opts out entirely.  Callers who
+            genuinely need a VM-wide flush can still call
+            deoptimize_all_jit_compiled_methods() themselves and accept the risk
+            documented there.
+        */
+        inline auto flush_callers_once(const std::string& class_name) noexcept -> void
+        {
+            if (!g_enabled.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            std::call_once(g_once, [&class_name]() noexcept
+            {
+                if (class_name.empty())
+                {
+                    return;
+                }
+                const std::size_t deoptimised{ vmhook::deoptimize_methods_if(
+                    [&class_name](const std::string& owner,
+                                  vmhook::hotspot::method*) noexcept -> bool
+                    {
+                        return owner == class_name;
+                    }) };
+                VMHOOK_LOG("{} auto-deopt: flushed {} JIT-compiled method(s) in '{}' so a "
+                           "caller that already inlined the hooked method stops bypassing it.",
+                           vmhook::info_tag, deoptimised, class_name);
+            });
+        }
+    }
+
+    /*
+        @brief Whether hook() flushes JIT-compiled callers on the first install.
+        Defaults to true.  @see detail::auto_deopt::flush_callers_once.
+    */
+    [[nodiscard]] inline auto auto_deoptimize_callers() noexcept
+        -> bool
+    {
+        return vmhook::detail::auto_deopt::g_enabled.load(std::memory_order_acquire);
+    }
+
+    /*
+        @brief Enables/disables the automatic caller flush.
+        @details Only meaningful BEFORE the first hook installs; the sweep runs
+        once and disabling it afterwards does not undo it.
+    */
+    inline auto set_auto_deoptimize_callers(const bool enabled) noexcept
+        -> void
+    {
+        vmhook::detail::auto_deopt::g_enabled.store(enabled, std::memory_order_release);
     }
 
     /*
@@ -11769,25 +12764,20 @@ namespace vmhook
             }
             else if constexpr (is_unique_ptr_v<base_t>)
             {
+                // A detour argument declared as std::unique_ptr<W> is the same
+                // shape as everywhere else: NEVER a null pointer, and a null
+                // instance when the Java argument was null.
+                //
+                // The wrapper is constructed DIRECTLY rather than through
+                // g_type_factory_map, because W is known statically here.  The
+                // factory route additionally required the wrapper to have been
+                // register_class<>'d, so an unregistered wrapper silently
+                // produced a null argument -- a registration mistake that looked
+                // exactly like a Java null at the call site.  It no longer can:
+                // the wrapper arrives, and a missing registration surfaces where
+                // it actually matters, on the first field or method lookup.
                 using element_t = typename base_t::element_type;
-                void* const oop{ decode_oop(raw_value) };
-                if (!oop)
-                {
-                    return nullptr;
-                }
-                const auto type_it{ vmhook::type_to_class_map.find(std::type_index{ typeid(element_t) }) };
-                if (type_it == vmhook::type_to_class_map.end())
-                {
-                    return nullptr;
-                }
-                const auto factory_it{ vmhook::g_type_factory_map.find(type_it->second) };
-                if (factory_it == vmhook::g_type_factory_map.end())
-                {
-                    return nullptr;
-                }
-                // factory returns object_base*; downcast to element_t* and
-                // hand it to the unique_ptr at the call site.
-                return base_t{ static_cast<element_t*>(factory_it->second(oop)) };
+                return vmhook::detail::wrap_object<element_t>(decode_oop(raw_value));
             }
             else if constexpr (std::is_pointer_v<base_t>)
             {
@@ -12143,7 +13133,15 @@ namespace vmhook
             return false;
         }
 
-        using clean_value_type = std::remove_cvref_t<value_type>;
+        // std::decay_t, not remove_cvref_t: a STRING LITERAL is `const char(&)[N]`,
+        // and remove_cvref_t leaves it as `char[N]` -- which matched none of the
+        // string arms below, so `set_arg(0, "/hello")` silently fell through to
+        // the trivially-copyable arm and wrote the array's first bytes into the
+        // interpreter slot instead of building a java.lang.String.  Decaying to
+        // `const char*` routes a literal through the same arm a `const char*`
+        // variable already took.  Every non-array type decays to itself, so no
+        // other arm moves.
+        using clean_value_type = std::decay_t<std::remove_reference_t<value_type>>;
 
         // Fault-safe slot writer.  Every store this function makes goes through
         // here so the dangerous part — writing THROUGH a pointer derived from a
@@ -12249,7 +13247,20 @@ namespace vmhook
             // const char* is a C string (no interior NULs), but can still hold
             // standard-UTF-8 astral bytes, so it goes through the same
             // length-counted UTF-16 encoder to avoid modified-UTF-8 mangling.
-            const std::string_view text{ value ? std::string_view{ value } : std::string_view{} };
+            //
+            // The null test is compiled out for a STRING LITERAL: an array
+            // reference can never be null, and testing it is a -Waddress error
+            // under -Werror.  A genuine `const char*` still gets checked.
+            std::string_view text{};
+            if constexpr (std::is_array_v<std::remove_reference_t<value_type>>)
+            {
+                text = std::string_view{ value };
+            }
+            else
+            {
+                const clean_value_type pointer{ value };
+                text = pointer ? std::string_view{ pointer } : std::string_view{};
+            }
             void* const string_oop{ vmhook::make_java_string(text) };
             if (!string_oop)
             {
@@ -12483,6 +13494,10 @@ namespace vmhook
             }
 
             vmhook::hotspot::set_dont_inline(found_method, true);
+            // JDK 21+: the compile-control bits moved out of _access_flags into
+            // MethodFlags::_status, so the NO_COMPILE OR below no longer reaches
+            // them.  This does.  No-op on JDK 8..20, where NO_COMPILE still owns them.
+            vmhook::hotspot::set_not_compilable(found_method, true);
 
             std::uint32_t* const flags{ found_method->get_access_flags() };
             if (!flags)
@@ -12706,7 +13721,16 @@ namespace vmhook
             if (was_compiled)
             {
                 void* const adapter{ found_method->get_adapter() };
-                void* const c2i_entry{ vmhook::hotspot::get_c2i_entry_from_adapter(adapter) };
+                void* c2i_entry{ vmhook::hotspot::get_c2i_entry_from_adapter(adapter) };
+                if (!c2i_entry)
+                {
+                    // Modern JVMs export neither Method::_adapter nor
+                    // AdapterHandlerEntry; derive the shared adapter from an
+                    // interpreted method of the same signature rather than
+                    // dropping to the forced deopt that leaves
+                    // _from_compiled_entry aimed at a stale nmethod.
+                    c2i_entry = vmhook::resolve_and_cache_c2i(found_method);
+                }
 
                 if (c2i_entry && vmhook::hotspot::is_valid_pointer(c2i_entry))
                 {
@@ -12721,23 +13745,45 @@ namespace vmhook
                 }
                 else
                 {
-                    // c2i adapter unrecoverable.  The upstream-conservative
-                    // policy is to leave _code intact and accept that compiled
-                    // callers bypass the hook, but that defeats the entire
-                    // point of installing the hook in the first place for
-                    // hot methods like runTick.  Match the older vmhook
-                    // behaviour: redirect the interpreted entry to the i2i
-                    // stub and clear _code so subsequent dispatch falls back
-                    // through the interpreter and hits the hook.  Compiled
-                    // callers with stale inline caches still reach the old
-                    // nmethod for one cycle, but the cache is repaired at
-                    // the next safepoint when the IC re-resolves and finds
-                    // _code == nullptr.
+                    // c2i adapter unrecoverable, on BOTH routes: no exported
+                    // AdapterHandlerEntry, and no corroborated donor of this
+                    // signature to borrow one from.
+                    //
+                    // This used to clear _code anyway and redirect only
+                    // _from_interpreted_entry, on the reasoning that compiled
+                    // inline caches would repair themselves at the next
+                    // safepoint.  That leaves the VM in exactly the state the
+                    // deoptimize_methods_if comment calls out as fatal --
+                    // _code == nullptr while _from_compiled_entry still points
+                    // into the now-stale nmethod -- and it was observed killing
+                    // a JDK 26 Minecraft outright: no crash report, no hs_err,
+                    // the log simply stops mid-tick.
+                    //
+                    // So do not.  The interpreted entry is still patched, so the
+                    // hook fires for every interpreted call and for anything
+                    // that deoptimises later; what is given up is compiled
+                    // callers, which is the upstream-conservative policy and the
+                    // only one that cannot corrupt the VM.  A caller who needs
+                    // more can keep the method interpreted from the start with
+                    //     -XX:CompileCommand=exclude,the/Class.method
                     found_method->set_from_interpreted_entry(i2i);
-                    found_method->set_code(nullptr);
-                    VMHOOK_LOG("{} hook():   c2i adapter unrecoverable for '{}'; forced deopt - _code cleared, "
-                               "_from_interpreted_entry redirected to i2i.  Compiled inline caches will repair "
-                               "themselves at the next safepoint.", vmhook::warning_tag, method_name);
+                    if (vmhook::deoptimise_without_adapter())
+                    {
+                        found_method->set_code(nullptr);
+                        VMHOOK_LOG("{} hook():   no c2i adapter for '{}' on this VM - deoptimising "
+                                   "anyway so the hook actually fires.  Compiled callers stay aimed "
+                                   "at the old nmethod until their inline caches re-resolve; the "
+                                   "method publishes its own adapter once interpreted, so the next "
+                                   "deopt is exact.  set_deoptimise_without_adapter(false) to refuse.",
+                                   vmhook::warning_tag, method_name);
+                    }
+                    else
+                    {
+                        VMHOOK_LOG("{} hook():   no c2i adapter for '{}' and deoptimising without one "
+                                   "is disabled - leaving _code intact.  The hook fires on interpreted "
+                                   "calls only, and stops once HotSpot recompiles the method.",
+                                   vmhook::warning_tag, method_name);
+                    }
                 }
             }
 
@@ -12745,6 +13791,12 @@ namespace vmhook
             // so hooks keep firing even when HotSpot eventually re-JITs
             // them despite our NO_COMPILE flag.  No-op on subsequent calls.
             vmhook::detail::auto_repair::ensure_started();
+
+            // Flush callers that were compiled with this method inlined BEFORE we
+            // hooked it -- otherwise there is no call site left to intercept and
+            // the hook is silently dead.  Scoped to this class, once per process;
+            // see flush_callers_once for why it is not the whole VM.
+            vmhook::detail::auto_deopt::flush_callers_once(type_map_entry->second);
 
             return true;
         }
@@ -12891,33 +13943,42 @@ namespace vmhook
                     // anyway — consistent with the rest of the watchdog path and a
                     // no-op cost on a mapped page.
                     vmhook::hotspot::set_dont_inline(new_method, true);
+                    vmhook::hotspot::set_not_compilable(new_method, true);
                     (void)new_method->safe_access_flags_or(vmhook::hotspot::NO_COMPILE);
 
-                    // If the new method is already JIT-compiled, deopt it
-                    // the same way the install path does.  c2i recovery is
-                    // best-effort; on failure we still clear _code so the
-                    // method falls back to interpreted dispatch through
-                    // the (still-patched) shared i2i.
+                    // If the new method is already JIT-compiled, deopt it the
+                    // same way the install path does -- INCLUDING its refusal to
+                    // clear _code without a valid _from_compiled_entry.  This
+                    // used to clear it regardless, calling c2i recovery
+                    // "best-effort"; that leaves _code null while
+                    // _from_compiled_entry still points into the stale nmethod,
+                    // which is the combination that kills the VM.  Observed on
+                    // JDK 26 as a hard process kill about a minute in -- the
+                    // watchdog tick after HotSpot re-JITted the method.
                     void* const code_now{ new_method->get_code() };
                     if (code_now != nullptr && vmhook::hotspot::is_valid_pointer(code_now))
                     {
                         void* const adapter{ new_method->get_adapter() };
-                        void* const c2i_entry{ vmhook::hotspot::get_c2i_entry_from_adapter(adapter) };
-                        if (c2i_entry && vmhook::hotspot::is_valid_pointer(c2i_entry))
+                        void* c2i_entry{ vmhook::hotspot::get_c2i_entry_from_adapter(adapter) };
+                        if (!c2i_entry)
                         {
-                            new_method->set_from_compiled_entry(c2i_entry);
+                            c2i_entry = vmhook::resolve_and_cache_c2i(new_method);
                         }
-                        // Restore the interpreted entry to the i2i stub, mirroring
-                        // the install path.  Re-anchoring onto a freshly-resolved
-                        // Method whose _code is set means _from_interpreted_entry
-                        // points at the i2c adapter; clearing _code below without
-                        // this leaves interpreted dispatch bypassing the detour, so
-                        // the re-installed hook would never fire.
+                        // Restore the interpreted entry either way: it costs
+                        // nothing and interpreted dispatch must reach the detour.
                         if (void* const i2i{ new_method->get_i2i_entry() })
                         {
                             new_method->set_from_interpreted_entry(i2i);
                         }
-                        new_method->set_code(nullptr);
+                        if (c2i_entry && vmhook::hotspot::is_valid_pointer(c2i_entry))
+                        {
+                            new_method->set_from_compiled_entry(c2i_entry);
+                            new_method->set_code(nullptr);
+                        }
+                        else if (vmhook::deoptimise_without_adapter())
+                        {
+                            new_method->set_code(nullptr);
+                        }
                     }
 
                     // Re-arm drift detection so the next time anything
@@ -13074,6 +14135,7 @@ namespace vmhook
                     }
 
                     vmhook::hotspot::set_dont_inline(hm.method, true);
+                    vmhook::hotspot::set_not_compilable(hm.method, true);
                     // Fault-safe RMW of NO_COMPILE (was a raw `*flags |= …`).  A cold
                     // Method page defers the re-arm to the next tick instead of faulting.
                     (void)hm.method->safe_access_flags_or(vmhook::hotspot::NO_COMPILE);
@@ -13081,7 +14143,11 @@ namespace vmhook
                     if (code_now != nullptr && vmhook::hotspot::is_valid_pointer(code_now))
                     {
                         void* const adapter{ hm.method->get_adapter() };
-                        void* const c2i_entry{ vmhook::hotspot::get_c2i_entry_from_adapter(adapter) };
+                        void* c2i_entry{ vmhook::hotspot::get_c2i_entry_from_adapter(adapter) };
+                        if (!c2i_entry)
+                        {
+                            c2i_entry = vmhook::resolve_and_cache_c2i(hm.method);
+                        }
                         if (c2i_entry && vmhook::hotspot::is_valid_pointer(c2i_entry))
                         {
                             hm.method->set_from_compiled_entry(c2i_entry);
@@ -13098,7 +14164,19 @@ namespace vmhook
                         {
                             hm.method->set_from_interpreted_entry(i2i);
                         }
-                        hm.method->set_code(nullptr);
+                        // Same refusal as the install path: _code may only be
+                        // cleared once _from_compiled_entry points somewhere the
+                        // VM can survive.  See the install-path comment.
+                        if (c2i_entry && vmhook::hotspot::is_valid_pointer(c2i_entry))
+                        {
+                            hm.method->set_code(nullptr);
+                        }
+                        else if (vmhook::deoptimise_without_adapter())
+                        {
+                            // The re-JIT case: refusing here is what makes a hook
+                            // on a hot method die a couple of minutes in.
+                            hm.method->set_code(nullptr);
+                        }
                     }
 
                     ++repaired;
@@ -13413,6 +14491,7 @@ namespace vmhook
             }
 
             vmhook::hotspot::set_dont_inline(hooked_method_entry.method, false);
+            vmhook::hotspot::set_not_compilable(hooked_method_entry.method, false);
 
             // Fault-safe RMW clear of NO_COMPILE (was a raw `*flags &= ~…` on a
             // STORED Method* that a JVMTI RedefineClasses between install and
@@ -13510,6 +14589,7 @@ namespace vmhook
             // common_detour will simply skip over methods missing
             // from g_hooked_methods.
             vmhook::hotspot::set_dont_inline(entry_it->method, false);
+            vmhook::hotspot::set_not_compilable(entry_it->method, false);
             // Fault-safe RMW clear of NO_COMPILE (was a raw `*flags &= ~…` on a
             // STORED Method* that may be cold/relocated/freed by a JVMTI
             // RedefineClasses between install and this single-handle stop — the raw
@@ -14298,91 +15378,37 @@ namespace vmhook
     inline auto make_java_object(vmhook::hotspot::klass* klass, std::size_t requested_size) noexcept -> void*;
 
     /*
-        @brief Constructs a new Java object and returns a C++ wrapper.
-        @tparam T The C++ wrapper class (must derive from vmhook::object).
-        @param args Arguments to pass to the Java constructor.
-        @return A std::unique_ptr<T> wrapping the new Java object, or nullptr on failure.
+        @brief `new Java(args...)` — allocates AND runs the real Java constructor.
         @details
-        Looks up the Java class for type T (via register_class<T>()), allocates a new
-        instance, and calls the appropriate constructor with the provided arguments.
+            const auto player{ vmhook::make_unique<sdk::player>("Bob", 12) };
+            if (player->get_instance()) { ... }
 
-        Usage:
-            vmhook::register_class<player>("com/example/Player");
-            auto p = vmhook::make_unique<player>("Bob", 12);
+        The wrapper needs nothing added to it beyond what every wrapper already
+        has: a constructor taking a vmhook::oop_t, and a register_class<T>().
+        The Java `<init>` overload is selected from the C++ argument types, the
+        same way get_method(name)->call(args...) selects one, so nothing here
+        takes a descriptor or a template argument.
 
-        @note This is a minimal implementation. Full constructor dispatch requires
-              parsing method descriptors and setting up interpreter frames.
+        A wrapper MAY additionally define `construct(args...)`; it is a C++-side
+        hook that runs after the Java constructor, and it is optional.
+
+        The returned unique_ptr is never null; `get_instance()` is null when the
+        object could not be built.  Every refusal — unregistered type, unloaded
+        class, non-instantiable klass, no matching `<init>`, no derivable call
+        stub, not on a JavaThread — is detected BEFORE anything is allocated, so
+        a failure cannot leave a raw, constructor-less object on the Java heap.
+        A constructor that throws abandons the instance for the same reason: a
+        half-built object escaping into Java is worse than no object.
+
+        Defined out-of-line, after the invocation machinery is complete.
+
+        Complexity: O(instance size) + O(M) over the class's methods + the
+        constructor's own cost.  Exception safety: noexcept.
     */
     template<typename wrapper_type, typename... args_t>
-    inline auto make_unique(args_t&&... args)
-        -> std::unique_ptr<wrapper_type>
-    {
-        if (!vmhook::hotspot::ensure_current_java_thread())
-        {
-            VMHOOK_LOG("{} vmhook::make_unique<{}>(): failed to attach current native thread to the JVM.", vmhook::error_tag, vmhook::detail::type_name<wrapper_type>());
-            return nullptr;
-        }
+    [[nodiscard]] inline auto make_unique(args_t&&... args) noexcept
+        -> std::unique_ptr<wrapper_type>;
 
-        auto map_entry{ vmhook::type_to_class_map.find(std::type_index{ typeid(wrapper_type) }) };
-        if (map_entry == vmhook::type_to_class_map.end())
-        {
-            VMHOOK_LOG("{} vmhook::make_unique<{}>(): type not registered.", vmhook::error_tag, vmhook::detail::type_name<wrapper_type>());
-            return nullptr;
-        }
-
-        // Construction is allocate + stamp the object header via make_java_object
-        // (TLAB path), then run the wrapper's C++-side construct() for field
-        // initialisation.  IMPORTANT: the Java <init> chain is NOT executed —
-        // nothing here invokes a constructor — so a wrapper that depends on
-        // constructor side effects must reproduce them in construct().
-        vmhook::hotspot::klass* const klass{ vmhook::find_class(map_entry->second) };
-        if (!klass)
-        {
-            VMHOOK_LOG("{} vmhook::make_unique<{}>(): find_class('{}') returned null - class not loaded.",
-                       vmhook::error_tag, vmhook::detail::type_name<wrapper_type>(), map_entry->second);
-            return nullptr;
-        }
-
-        const std::size_t raw_size{ klass->get_instance_size() };
-        if (raw_size == 0)
-        {
-            VMHOOK_LOG("{} vmhook::make_unique<{}>(): failed to read HotSpot instance size.", vmhook::error_tag, vmhook::detail::type_name<wrapper_type>());
-            return nullptr;
-        }
-
-        // Allocate + zero + stamp the oopDesc header via the shared allocation
-        // primitive.  make_java_object() rounds raw_size up to 8-byte alignment,
-        // performs the same find_allocation_thread()->allocate_tlab fast path,
-        // the same 256-thread walk + allocate_from_threads_list() fallbacks, the
-        // same std::memset, and the same mark-word / (compressed) klass-pointer
-        // header stamping this path used to hand-roll inline.  Delegating keeps
-        // make_unique on the one allocation path the library maintains (so any
-        // future hardening of make_java_object — e.g. a GC-aware slow path — is
-        // inherited here for free) instead of a near-identical copy.  Failure
-        // contract is unchanged: a null return becomes a null unique_ptr.
-        void* const object_pointer{ vmhook::make_java_object(klass, raw_size) };
-        if (!object_pointer)
-        {
-            VMHOOK_LOG("{} vmhook::make_unique<{}>(): make_java_object() failed to allocate {} bytes.", vmhook::warning_tag, vmhook::detail::type_name<wrapper_type>(), raw_size);
-            return nullptr;
-        }
-
-        auto result{ std::make_unique<wrapper_type>(object_pointer) };
-
-        if constexpr (requires(wrapper_type & wrapper, args_t&&... construct_args)
-        {
-            wrapper.construct(std::forward<args_t>(construct_args)...);
-        })
-        {
-            result->construct(std::forward<args_t>(args)...);
-        }
-        else if constexpr (sizeof...(args_t) > 0)
-        {
-            VMHOOK_LOG("{} vmhook::make_unique<{}>(): object allocated, but wrapper has no matching construct(...) method for the provided arguments.", vmhook::warning_tag, vmhook::detail::type_name<wrapper_type>());
-        }
-
-        return result;
-    }
 
     // --- Field access ---------------------------------------------------------
 
@@ -15133,6 +16159,19 @@ namespace vmhook
             Writing:
                 obj.get_field("health")->set(100);  // T = int, deduced
                 obj.get_field("flag"  )->set(true); // T = bool, deduced
+
+            NOTHING here takes a type argument, and that is the contract, not a
+            convenience.  The JVM already stores the field's descriptor; making
+            the caller repeat it is how a read gets to disagree with the field
+            it reads.  A reference field is the same story one level up -- see
+            value_t, which arrives as whatever the caller declared, or as
+            nothing at all if they declared nothing.
+
+            Use COPY-initialisation (`float f = ...->get();`), not brace-init.
+            `T x{ ...->get() }` is direct-list-init: it reconsiders T's own
+            constructors next to the conversion, which picks
+            initializer_list<char> for std::string and is rejected outright by
+            MSVC for the handle and wrapper targets.
         */
     class field_proxy final
     {
@@ -15154,8 +16193,24 @@ namespace vmhook
                 auto  v = proxy->get();   // type is field_proxy::value_t; converts lazily
 
             For reference-type fields (signature starts with 'L' or '[') the stored
-            alternative is uint32_t (the raw compressed OOP).  Pass it to
-            vmhook::hotspot::decode_oop_pointer() to recover the real 64-bit address.
+            alternative is uint32_t (the raw compressed OOP).
+
+            A reference does NOT have to be decoded by hand, and the caller does
+            not have to decide in advance what shape they want it in.  The type
+            they declare decides:
+
+                std::string     name  = proxy->get();   // decoded String
+                vmhook::borrowed<entity> e = proxy->get();   // epoch-checked handle
+                vmhook::ref<entity>      r = proxy->get();   // re-resolving handle
+                entity                   w = proxy->get();   // the wrapper itself
+                auto                     a = proxy->get();   // nothing declared:
+                float x = a->get_field("posX")->get();       //   navigate untyped
+
+            Every one of those goes through the same decode, heap-range check
+            and fail-open klass gate, so a value that is not an object comes
+            back EMPTY rather than pointing at reinterpreted bits.  The raw
+            escape hatch is still there -- `static_cast<void*>` yields the
+            decoded address -- but nothing above needs it.
         */
         struct value_t
         {
@@ -15538,6 +16593,57 @@ namespace vmhook
             }
 
             /*
+                @brief The address a reference value points at, or nullptr.
+                @details
+                The single decode-and-vet step behind every reference-shaped
+                conversion (borrowed<W>, ref<W>, a wrapper W, and the untyped
+                operator->).  It exists so those four cannot drift apart: each
+                one has the same three ways to come back empty, and each of them
+                is a case where handing back an address would be worse than
+                handing back nothing.
+
+                  - the compressed OOP is null (a Java null), or decodes to an
+                    address that fails the heap-range heuristic, or
+                  - the descriptor is not a single object reference.  An ARRAY
+                    field ('[') decodes to the ARRAY oop, not an element, so
+                    wrapping it would resolve every later field at an offset
+                    that means nothing.  Read arrays into a std::vector instead.
+                  - the object's runtime klass provably is not the wrapper's.
+
+                Complexity: O(D) in superclass-chain depth.  noexcept.
+
+                @tparam wrapper_type  The wrapper the caller is aiming at; drives
+                                      the klass gate.  `void` (an untyped read)
+                                      skips it, since there is nothing to check.
+                @param compressed     The stored compressed OOP.
+                @return  A decoded, vetted heap address, or nullptr.
+            */
+            template<typename wrapper_type>
+            auto reference_target(const std::uint32_t compressed) const noexcept
+                -> void*
+            {
+                if (this->signature.empty() || this->signature.front() != 'L')
+                {
+                    return nullptr;
+                }
+                void* const decoded{ vmhook::hotspot::decode_oop_pointer(compressed) };
+                if (!decoded || !vmhook::hotspot::is_valid_pointer(decoded))
+                {
+                    return nullptr;
+                }
+                if constexpr (!std::is_void_v<wrapper_type>)
+                {
+                    // Fail-open cross-klass guard, identical to the unique_ptr
+                    // arm's: only a PROVEN mismatch rejects.
+                    if (!klass_match_ok<wrapper_type>(decoded))
+                    {
+                        return nullptr;
+                    }
+                }
+                return decoded;
+            }
+
+            /*
                 @brief Converts a variant alternative source_type to target_type with semantic dispatch.
                 @details
                 Called by operator target_type() via std::visit.  Applies the correct
@@ -15587,45 +16693,40 @@ namespace vmhook
                 }
                 else if constexpr (vmhook::detail::is_unique_ptr_v<clean_target_type>)
                 {
+                    // The unique_ptr is NEVER null; the INSTANCE inside it may be.
+                    // Every refusal below therefore yields a wrapper on a null oop
+                    // rather than a null pointer, so a caller has exactly one thing
+                    // to check (`p->get_instance()`) and `p->` is always safe.
+                    //
+                    // What is refused, and why, is unchanged:
+                    //   - a non-'L' descriptor: an ARRAY field decodes to the ARRAY
+                    //     oop, not an element, so a wrapper on it would resolve
+                    //     every later field at a meaningless offset (read a '[L'
+                    //     field into a std::vector instead);
+                    //   - an address that fails the heap-range check;
+                    //   - a PROVEN cross-klass mismatch.  klass_match_ok is
+                    //     fail-open: unregistered wrappers, unresolvable klasses,
+                    //     interface-registered wrappers and IS-A reads all pass.
+                    using wrapper_type = typename clean_target_type::element_type;
                     if constexpr (std::is_same_v<clean_source_type, std::uint32_t>)
                     {
-                        // FLAW B fix: a unique_ptr<T> target reads a SINGLE object
-                        // reference field ('L...;').  If the field is actually an
-                        // ARRAY ('[...;'), decoding its compressed OOP as a single
-                        // wrapper points the wrapper at the ARRAY oop, not an
-                        // element — and any field read through that wrapper is UB.
-                        // Reject non-'L' signatures (arrays / primitives) so the
-                        // mis-typed read yields nullptr instead of a wild wrapper.
-                        // (Use to_vector<T>() to read a '[L' field as elements.)
                         if (this->signature.empty() || this->signature.front() != 'L')
                         {
-                            return nullptr;
+                            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
                         }
-                        using wrapper_type = typename clean_target_type::element_type;
                         void* const decoded{ vmhook::hotspot::decode_oop_pointer(value) };
-                        if (!decoded || !vmhook::hotspot::is_valid_pointer(decoded))
+                        if (!decoded || !vmhook::hotspot::is_valid_pointer(decoded)
+                            || !klass_match_ok<wrapper_type>(decoded))
                         {
-                            return nullptr;
+                            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
                         }
-                        // FLAW A fix: refuse a CONFIDENT wrapper-klass mismatch.  If the
-                        // live object's runtime klass is provably not a wrapper_type
-                        // (the wrapper's registered class is a non-interface that is
-                        // absent from the OOP's entire superclass chain), wrapping it
-                        // here would resolve every later field/method at a mismatched
-                        // offset — a silent type confusion.  klass_match_ok() is
-                        // fail-open: it only returns false for a proven cross-klass
-                        // mismatch, so unregistered wrappers, unresolvable klasses,
-                        // INTERFACE-registered wrappers, and IS-A (subclass-through-
-                        // base) reads all still go through unchanged.
-                        if (!klass_match_ok<wrapper_type>(decoded))
-                        {
-                            return nullptr;
-                        }
-                        return clean_target_type{ new wrapper_type{ decoded } };
+                        return vmhook::detail::wrap_object<wrapper_type>(decoded);
                     }
                     else
                     {
-                        return nullptr;
+                        // A primitive is not an object: an empty wrapper, never one
+                        // aimed at an address invented from the primitive's bits.
+                        return vmhook::detail::wrap_object<wrapper_type>(nullptr);
                     }
                 }
                 else if constexpr (std::is_same_v<target_type, void*>)
@@ -15638,6 +16739,57 @@ namespace vmhook
                     else
                     {
                         return static_cast<target_type>(nullptr);
+                    }
+                }
+                // --- Reference targets: borrowed<W> / ref<W> / a wrapper W ------
+                //
+                // These three are what let the CALLER'S DECLARED TYPE decide how a
+                // reference field comes back, with no template argument and no
+                // to_borrowed<> at the call site:
+                //
+                //     vmhook::borrowed<entity> e = self->get_field("rider")->get();
+                //     entity                   w = self->get_field("rider")->get();
+                //
+                // Every one of them goes through the same decode + validity + klass
+                // gate the unique_ptr arm uses, so a mistyped read yields an EMPTY
+                // handle / null wrapper instead of one aimed at a foreign object.
+                else if constexpr (vmhook::detail::is_borrowed_v<clean_target_type>
+                                || vmhook::detail::is_ref_v<clean_target_type>)
+                {
+                    if constexpr (std::is_same_v<clean_source_type, std::uint32_t>)
+                    {
+                        using handle_wrapper_type =
+                            vmhook::detail::handle_wrapper_t<clean_target_type>;
+                        void* const decoded{ reference_target<handle_wrapper_type>(value) };
+                        if (!decoded)
+                        {
+                            return clean_target_type{};
+                        }
+                        if constexpr (vmhook::detail::is_borrowed_v<clean_target_type>)
+                        {
+                            return clean_target_type{ decoded };
+                        }
+                        else
+                        {
+                            return clean_target_type::ephemeral(decoded);
+                        }
+                    }
+                    else
+                    {
+                        // A primitive read is not an object.  Empty, never a handle
+                        // fabricated out of the primitive's bits.
+                        return clean_target_type{};
+                    }
+                }
+                else if constexpr (vmhook::detail::is_java_wrapper_v<clean_target_type>)
+                {
+                    if constexpr (std::is_same_v<clean_source_type, std::uint32_t>)
+                    {
+                        return clean_target_type{ reference_target<clean_target_type>(value) };
+                    }
+                    else
+                    {
+                        return clean_target_type{ nullptr };
                     }
                 }
                 else if constexpr (requires { static_cast<target_type>(value); })
@@ -15783,6 +16935,36 @@ namespace vmhook
             template<typename wrapper_type = void>
             [[nodiscard]] auto to_borrowed() const noexcept
                 -> vmhook::borrowed<wrapper_type>;
+
+            /*
+                @brief Navigates straight into the object this value refers to.
+                @details
+                The reason a caller never has to name a wrapper type, and never
+                has to say the word "borrow":
+
+                    auto rider = self->get_field("passenger")->get();
+                    float x    = rider->get_field("posX")->get();
+                    rider->get_method("dismountEntity")->call();
+
+                The class is read out of the LIVE object's header, so every
+                field and method on its whole hierarchy is reachable without a
+                register_class<T>() for it.  A primitive value, a Java null, an
+                array, or an unreadable object all navigate to a null-safe
+                any_object: the reads that follow return empty and log, exactly
+                as they do through a typed wrapper built on a null instance.
+
+                Like every other `->` here, the proxy binds for ONE expression
+                and cannot be hoisted (see detail::access).  Defined out-of-line,
+                after any_object.
+
+                Complexity: O(1).  Exception safety: noexcept.
+            */
+            auto operator->() const noexcept
+                -> vmhook::detail::access<vmhook::any_object>;
+
+            /* @brief Same as operator->, spelled for `(*value).member`. */
+            auto operator*() const noexcept
+                -> vmhook::detail::access<vmhook::any_object>;
         };
 
         /*
@@ -15982,6 +17164,87 @@ namespace vmhook
         */
         template<typename value_type>
         auto set(const value_type& value) const noexcept
+            -> void
+        {
+            // --- Writing an OBJECT ------------------------------------------
+            //
+            // The write counterpart of the read side's inferred targets: what
+            // the caller already HAS decides how the address is obtained, so
+            // storing a reference is `set(other)` and never a hand-written
+            // store_object / raw oop.  Everything that can name a live object
+            // is accepted - a handle (borrowed / ref), a wrapper, an untyped
+            // any_object, and the value another get() or call() produced:
+            //
+            //     self->get_field("passenger")->set(rider);
+            //     self->get_field("passenger")->set(other->get_field("rider")->get());
+            //
+            // Each is resolved through its OWN validity rule first (a borrow
+            // revalidates its epoch, a ref re-walks its anchor, a value decodes
+            // and vets), so an expired or empty source stores nothing rather
+            // than storing a stale address into the heap - which is the write
+            // that would outlive the mistake and corrupt a later collection.
+            //
+            // Split into two functions rather than an early return so that
+            // NEITHER instantiation contains a dead tail: MSVC /W4 reports
+            // C4702 for code made unreachable by a discarded `if constexpr`
+            // branch, and this header is built with /WX.
+            if constexpr (names_a_java_object_v<std::remove_cvref_t<value_type>>)
+            {
+                this->store_object_oop(object_address_of(value));
+            }
+            else
+            {
+                this->set_non_object(value);
+            }
+        }
+
+        /*
+            @brief True for every C++ type that names a live Java object.
+            @details
+            The value_t arm is detected STRUCTURALLY (does it have to_borrowed?)
+            rather than by name: method_proxy is not declared yet at this point
+            in the header, and to_borrowed<>() is the member both value types
+            have and nothing else does.
+        */
+        template<typename clean_value_type>
+        static constexpr bool names_a_java_object_v{
+            vmhook::detail::is_borrowed_v<clean_value_type>
+            || vmhook::detail::is_ref_v<clean_value_type>
+            || vmhook::detail::is_java_wrapper_v<clean_value_type>
+            || requires(const clean_value_type& probe) { probe.template to_borrowed<>(); } };
+
+        /*
+            @brief The live address behind any of those, or nullptr.
+            @details Each shape is asked in ITS OWN terms - a borrow and a ref
+            revalidate, a wrapper reports its instance, a value decodes and vets
+            - so "this source is no longer good" is decided by the thing that
+            knows, not by a common denominator that would have to guess.
+        */
+        template<typename value_type>
+        static auto object_address_of(const value_type& value) noexcept
+            -> void*
+        {
+            using clean_value_type = std::remove_cvref_t<value_type>;
+            if constexpr (vmhook::detail::is_borrowed_v<clean_value_type>
+                       || vmhook::detail::is_ref_v<clean_value_type>)
+            {
+                return value.resolve();
+            }
+            else if constexpr (vmhook::detail::is_java_wrapper_v<clean_value_type>)
+            {
+                return value.get_instance();
+            }
+            else
+            {
+                return value.template to_borrowed<>().resolve();
+            }
+        }
+
+        /*
+            @brief The primitive / string / array write.  @see set().
+        */
+        template<typename value_type>
+        auto set_non_object(const value_type& value) const noexcept
             -> void
         {
             using clean_value_type = std::remove_cvref_t<value_type>;
@@ -17359,6 +18622,42 @@ namespace vmhook
             }
 
             /*
+                @brief The address a reference RESULT points at, or nullptr.
+                @details
+                The call-result twin of field_proxy::value_t::reference_target,
+                and it exists for the same reason: borrowed<W>, ref<W>, a
+                wrapper W and the untyped operator-> must all decide "is there
+                an object here?" identically, or they will disagree in exactly
+                the cases that matter.
+
+                Unlike the field twin there is no descriptor to consult — a
+                returned value carries no signature — so the vetting is decode,
+                heap-range check, and the same fail-open klass gate.  A call
+                that returned void, a primitive, or an eagerly-decoded String
+                never reaches here: those are other variant alternatives.
+
+                Complexity: O(D) in superclass-chain depth.  noexcept.
+            */
+            template<typename wrapper_type>
+            static auto reference_target(const std::uint32_t compressed) noexcept
+                -> void*
+            {
+                void* const decoded{ vmhook::hotspot::decode_oop_pointer(compressed) };
+                if (!decoded || !vmhook::hotspot::is_valid_pointer(decoded))
+                {
+                    return nullptr;
+                }
+                if constexpr (!std::is_void_v<wrapper_type>)
+                {
+                    if (!vmhook::field_proxy::value_t::klass_match_ok<wrapper_type>(decoded))
+                    {
+                        return nullptr;
+                    }
+                }
+                return decoded;
+            }
+
+            /*
                 @brief Converts the stored value to T via static_cast.
                 Falls back to a default-constructed T for variant alternatives
                 that cannot be cast to the target type (std::monostate, std::string).
@@ -17406,18 +18705,24 @@ namespace vmhook
                                           "method_proxy::value_t -> std::unique_ptr<T>: T must derive "
                                           "from vmhook::object_base.  Return-by-wrapper only works for "
                                           "registered vmhook wrapper types.");
+                            // NEVER a null unique_ptr; a wrapper on a null oop.
+                            // See detail::wrap_object for why the pointer and the
+                            // object are kept as separate questions.
                             if constexpr (std::is_same_v<stored_type, std::uint32_t>)
                             {
                                 void* const decoded{ vmhook::hotspot::decode_oop_pointer(v) };
-                                if (!decoded || !vmhook::hotspot::is_valid_pointer(decoded))
+                                if (!decoded || !vmhook::hotspot::is_valid_pointer(decoded)
+                                    || !vmhook::field_proxy::value_t::klass_match_ok<wrapper_type>(decoded))
                                 {
-                                    return target_type{};
+                                    return vmhook::detail::wrap_object<wrapper_type>(nullptr);
                                 }
-                                return target_type{ new wrapper_type{ decoded } };
+                                return vmhook::detail::wrap_object<wrapper_type>(decoded);
                             }
                             else
                             {
-                                return target_type{};
+                                // void, a primitive, or a String the call already
+                                // decoded eagerly - no object to hand back.
+                                return vmhook::detail::wrap_object<wrapper_type>(nullptr);
                             }
                         }
                         // std::string <- either the eagerly-decoded std::string
@@ -17443,6 +18748,51 @@ namespace vmhook
                                         && std::is_same_v<stored_type, std::uint32_t>)
                         {
                             return vmhook::hotspot::decode_oop_pointer(v);
+                        }
+                        // --- Reference targets: borrowed<W> / ref<W> / a wrapper W --
+                        // The call-result twin of the field_proxy arm.  What the
+                        // caller declared decides the shape; nothing has to be
+                        // spelled at the call site:
+                        //     vmhook::borrowed<item> i = p->call("getHeld");
+                        //     item                   w = p->call("getHeld");
+                        else if constexpr (vmhook::detail::is_borrowed_v<target_type>
+                                        || vmhook::detail::is_ref_v<target_type>)
+                        {
+                            if constexpr (std::is_same_v<stored_type, std::uint32_t>)
+                            {
+                                using handle_wrapper_type =
+                                    vmhook::detail::handle_wrapper_t<target_type>;
+                                void* const decoded{ reference_target<handle_wrapper_type>(v) };
+                                if (!decoded)
+                                {
+                                    return target_type{};
+                                }
+                                if constexpr (vmhook::detail::is_borrowed_v<target_type>)
+                                {
+                                    return target_type{ decoded };
+                                }
+                                else
+                                {
+                                    return target_type::ephemeral(decoded);
+                                }
+                            }
+                            else
+                            {
+                                // void, a primitive, or a String the call already
+                                // decoded eagerly - no address left to hand out.
+                                return target_type{};
+                            }
+                        }
+                        else if constexpr (vmhook::detail::is_java_wrapper_v<target_type>)
+                        {
+                            if constexpr (std::is_same_v<stored_type, std::uint32_t>)
+                            {
+                                return target_type{ reference_target<target_type>(v) };
+                            }
+                            else
+                            {
+                                return target_type{ nullptr };
+                            }
                         }
                         else if constexpr (requires { static_cast<target_type>(v); })
                         {
@@ -17539,6 +18889,30 @@ namespace vmhook
             template<typename wrapper_type = void>
             [[nodiscard]] auto to_borrowed() const noexcept
                 -> vmhook::borrowed<wrapper_type>;
+
+            /*
+                @brief Navigates straight into the object this call returned.
+                @details
+                Lets a chain of Java calls be written as a chain, with no
+                wrapper type named anywhere along it:
+
+                    auto stack = self->get_method("getHeldItem")->call();
+                    std::string label = stack->get_method("getDisplayName")->call();
+
+                The class comes from the returned object's own header, so this
+                works for a type no register_class<T>() ever mentioned.  A void,
+                primitive, String, or failed call navigates to a null-safe
+                any_object whose reads return empty and log.  Binds for ONE
+                expression (see detail::access); defined out-of-line.
+
+                Complexity: O(1).  Exception safety: noexcept.
+            */
+            auto operator->() const noexcept
+                -> vmhook::detail::access<vmhook::any_object>;
+
+            /* @brief Same as operator->, spelled for `(*result).member`. */
+            auto operator*() const noexcept
+                -> vmhook::detail::access<vmhook::any_object>;
         };
 
         /*
@@ -19378,6 +20752,32 @@ namespace vmhook
                     return get_method("takeValues")->call(a, b);
                 }
         */
+        /*
+            @brief Whether this candidate must NOT be handed back as a method to call.
+            @details
+            An ABSTRACT method has no body: HotSpot gives it the shared
+            _abstract_method_handler, whose entry throws AbstractMethodError.
+            Calling it through a synthetic frame does not raise a Java exception a
+            caller can see -- it tears the VM down.  A class can also carry an
+            abstract re-declaration of a method its own superclass implements, so
+            "first name match wins" is not enough; the first NON-abstract match is
+            what virtual dispatch would pick, and it is what these overloads
+            return.
+
+            An unreadable flags word counts as unusable too.  This runs on live
+            metadata, where a Method* left cold by a deopt or a class unload is a
+            fault rather than an exception, and a method whose flags cannot be read
+            is not one to invoke.
+        */
+        [[nodiscard]] static auto is_uncallable(vmhook::hotspot::method* const candidate) noexcept
+            -> bool
+        {
+            constexpr std::uint32_t k_acc_abstract{ 0x0400u };
+            bool readable{ false };
+            const bool abstract{ candidate->safe_access_flags_test(k_acc_abstract, readable) };
+            return !readable || abstract;
+        }
+
         auto get_method(const std::string_view method_name) const
             -> std::optional<vmhook::method_proxy>
         {
@@ -19404,7 +20804,8 @@ namespace vmhook
                 {
                     vmhook::hotspot::method* const current_method{ methods_array[method_index] };
                     if (current_method && vmhook::hotspot::is_valid_pointer(current_method)
-                        && current_method->get_name() == method_name)
+                        && current_method->get_name() == method_name
+                        && !is_uncallable(current_method))
                     {
                         return vmhook::method_proxy{ this->instance, current_method, current_method->get_signature() };
                     }
@@ -19474,7 +20875,8 @@ namespace vmhook
                     }
 
                     const std::string current_signature{ current_method->get_signature() };
-                    if (current_method->get_name() == method_name && current_signature == method_signature)
+                    if (current_method->get_name() == method_name && current_signature == method_signature
+                        && !is_uncallable(current_method))
                     {
                         return vmhook::method_proxy{ this->instance, current_method, current_signature,
                                                      /*signature_pinned=*/true };
@@ -19760,6 +21162,32 @@ namespace vmhook
         auto resolve_klass() const
             -> vmhook::hotspot::klass*
         {
+            // THE OBJECT IS ASKED WHAT IT IS, not the wrapper.  A wrapper is
+            // registered as the type its call site DECLARES -- a parameter typed
+            // IChatComponent, a field typed Entity -- and the object that turns up
+            // is a subclass of it.  Resolving from the registered name finds the
+            // DECLARATION; resolving from the oop's own klass finds the
+            // IMPLEMENTATION, which is what Java's own dispatch would pick.
+            //
+            // That difference has already killed a VM.  A wrapper registered as an
+            // INTERFACE resolved getFormattedText to the interface's abstract
+            // declaration, whose interpreted entry is HotSpot's
+            // AbstractMethodError stub, and invoking it through a synthetic frame
+            // took Minecraft down every time.
+            //
+            // Falls back to the registered class whenever the oop cannot answer:
+            // a null instance (a static access, which has no object), or a header
+            // that will not decode.
+            if (this->instance)
+            {
+                if (vmhook::hotspot::klass* const concrete{ vmhook::klass_from_oop(this->instance) })
+                {
+                    if (vmhook::hotspot::is_valid_pointer(concrete))
+                    {
+                        return concrete;
+                    }
+                }
+            }
             return resolve_klass(std::type_index{ typeid(*this) });
         }
 
@@ -20220,42 +21648,27 @@ namespace vmhook
         @details
         Derive from vmhook::object<YourClass> (not object_base directly).
 
-        Field / method access syntax:
+        `get_field(name)` and `get_method(name)` are the whole access surface.
+        Each resolves a STATIC or an INSTANCE Java member indistinguishably --
+        the JVM_ACC_STATIC flag on the member decides which storage is
+        addressed, so the caller never picks a spelling based on it.  Both are
+        inherited from object_base and route through the implicit `this`.
 
-          - Inside an instance C++ method, `get_field("name")` /
-            `get_method("name")` route through the implicit `this` and
-            resolve via the live OOP.  These are inherited from
-            object_base.
+        The one case that is NOT uniform is the C++ context, and it is a
+        language limit rather than a choice: from a STATIC C++ method there is
+        no implicit object, and a non-static member cannot be called without
+        one.  MSVC and Clang < 20 resolve `get_field("name")` there through the
+        deducing-this overloads below, which fall through to the static
+        fallbacks.  GCC and Clang >= 20 select the non-static candidate on
+        argument match before checking object availability and then hard-error,
+        so a static C++ method on those toolchains must spell it
+        `static_field("name")` / `static_method("name")`.  Those names exist on
+        every compiler; nothing else about the API varies by toolchain.
 
-          - Inside a static C++ method, the same `get_field("name")` /
-            `get_method("name")` call resolves through the C++23
-            deducing-this overloads below on MSVC and Clang.  These
-            compilers correctly exclude deducing-this overloads from
-            overload resolution when no implicit object is available,
-            so the static fallbacks defined here win automatically.
-
-          - On GCC the deducing-this overloads are still selected from
-            a static-call context (the compiler picks the better
-            argument-type match before checking object availability,
-            then errors), so static methods on GCC must call
-            `static_field("name")` / `static_method("name")` instead.
-            The same names are available on every compiler for
-            authors who want a uniformly portable call site.
-
-        Usage:
-            class my_entity : public vmhook::object<my_entity>
-            {
-            public:
-                explicit my_entity(vmhook::oop_t oop) : vmhook::object<my_entity>{ oop } {}
-
-                auto get_health()       -> int { return get_field("health")->get(); }
-
-                // Portable static accessor (works on MSVC, Clang, GCC):
-                inline auto get_count() -> int { return static_field("entityCount")->get(); }
-
-                // MSVC/Clang only — deducing-this resolves to the static fallback:
-                // static auto get_count() -> int { return get_field("entityCount")->get(); }
-            };
+        A wrapper is OPTIONAL.  vmhook::any_object reads fields and calls
+        methods through the live object's own klass, so nothing has to be
+        declared or registered to navigate a reference.  Write a wrapper when
+        you want named accessors, the klass gate, or a hook target.
     */
     template<typename derived>
     class object : public object_base
@@ -20393,6 +21806,7 @@ namespace vmhook
         {
             return object_base::get_method(std::type_index{ typeid(derived) }, name, signature);
         }
+
     };
 
     // --- Built-in Java collection wrappers ------------------------------------
@@ -20408,7 +21822,7 @@ namespace vmhook
 
         Returns nullptr if the pointer is invalid or decoding fails.
     */
-    inline auto klass_from_oop(void* const oop) noexcept -> vmhook::hotspot::klass*
+    [[nodiscard]] inline auto klass_from_oop(void* const oop) noexcept -> vmhook::hotspot::klass*
     {
         if (!oop || !vmhook::hotspot::is_valid_pointer(oop))
         {
@@ -20621,6 +22035,122 @@ namespace vmhook
                 }
             }
             return std::nullopt;
+        }
+    };
+
+    /*
+        @brief A Java object with no C++ type attached to it.
+        @details
+        This is what every `->` on a value lands on, and it is the answer to
+        "which wrapper do I have to declare for this?" — none.
+
+            auto rider = self->get_field("passenger")->get();
+            float x    = rider->get_field("posX")->get();
+            rider->get_method("dismountEntity")->call();
+
+        Fields and methods resolve through the klass read out of the LIVE
+        object's header, so the whole hierarchy of whatever the object actually
+        is stays reachable, with no register_class<T>() for it and no name for
+        it anywhere in the C++.  A wrapper is then something you write when you
+        WANT one — for named accessors, for the klass gate, for hooks — not
+        something the library makes you write to read one field.
+
+        A null instance is not an error here: every accessor degrades to
+        nullopt / an empty value exactly as a typed wrapper built on a null oop
+        does, so a chain through a Java null ends quietly instead of faulting.
+
+        It deliberately does NOT derive from object<any_object> and is never
+        registered: it has no fixed Java class, and typeid-based resolution is
+        precisely what it exists to avoid.
+    */
+    class any_object final : public vmhook::oop_reflective_base
+    {
+    public:
+        using vmhook::oop_reflective_base::oop_reflective_base;
+
+        /*
+            @brief Field proxy for any field on the object's real class.
+            @details Instance or static, declared or inherited; the JVM_ACC_STATIC
+            flag decides which storage is addressed, exactly as object_base does.
+        */
+        auto get_field(const std::string_view name) const
+            -> std::optional<vmhook::field_proxy>
+        {
+            return this->get_field_by_oop_klass(name);
+        }
+
+        /*
+            @brief Method proxy for any method on the object's real class.
+        */
+        auto get_method(const std::string_view method_name) const
+            -> std::optional<vmhook::method_proxy>
+        {
+            return this->get_method_by_oop_klass(method_name);
+        }
+
+        /*
+            @brief Method proxy pinned to one exact overload by JVM descriptor.
+        */
+        auto get_method(const std::string_view method_name,
+                        const std::string_view method_signature) const
+            -> std::optional<vmhook::method_proxy>
+        {
+            for (vmhook::hotspot::klass* k{ this->oop_klass() }; k != nullptr; k = k->get_super())
+            {
+                const std::int32_t method_count{ k->get_methods_count() };
+                vmhook::hotspot::method** const methods_array{ k->get_methods_ptr() };
+                if (!methods_array || method_count <= 0)
+                {
+                    continue;
+                }
+                for (std::int32_t index{ 0 }; index < method_count; ++index)
+                {
+                    vmhook::hotspot::method* const m{ methods_array[index] };
+                    if (m && vmhook::hotspot::is_valid_pointer(m)
+                        && m->get_name() == method_name
+                        && m->get_signature() == method_signature)
+                    {
+                        return vmhook::method_proxy{ this->get_instance(), m, m->get_signature() };
+                    }
+                }
+            }
+            return std::nullopt;
+        }
+
+        /*
+            @brief The object's real Java class name, or "" when unreadable.
+            @details What an untyped handle is usually asked first: `what is
+            this?`.  Read from the live header, so it names the CONCRETE class,
+            not whatever base a caller happened to expect.
+        */
+        auto class_name() const noexcept
+            -> std::string
+        {
+            vmhook::hotspot::klass* const k{ this->oop_klass() };
+            if (!k)
+            {
+                return std::string{};
+            }
+            const vmhook::hotspot::symbol* const name_symbol{ k->get_name() };
+            if (!vmhook::hotspot::is_valid_pointer(name_symbol))
+            {
+                return std::string{};
+            }
+            return name_symbol->to_string();
+        }
+
+        /* @brief True when the object is an instance of the named Java class. */
+        auto instance_of(const std::string_view name) const noexcept
+            -> bool
+        {
+            return this->get_instance() != nullptr
+                && vmhook::is_instance_of(this->get_instance(), name);
+        }
+
+        /* @brief True when there is an object here at all. */
+        explicit operator bool() const noexcept
+        {
+            return this->get_instance() != nullptr;
         }
     };
 
@@ -25389,6 +26919,29 @@ namespace hotspot
         }
 
         /*
+            @brief The UNTYPED ref navigates too, through any_object.
+            @details
+            Same revalidate-then-bind contract as the typed overload — the
+            anchor walk runs first, so a ref that no longer resolves binds a
+            null any_object.  See borrowed's twin for why the untyped case
+            deserves a `->` at all.
+        */
+        auto operator->() const noexcept
+            -> vmhook::detail::access<vmhook::any_object>
+            requires (std::is_void_v<wrapper_type>)
+        {
+            return vmhook::detail::access<vmhook::any_object>{ this->resolve() };
+        }
+
+        /* @brief Same as operator->, spelled for `(*ref).member`. */
+        auto operator*() const noexcept
+            -> vmhook::detail::access<vmhook::any_object>
+            requires (std::is_void_v<wrapper_type>)
+        {
+            return vmhook::detail::access<vmhook::any_object>{ this->resolve() };
+        }
+
+        /*
             @brief Revalidate once, bind once, run a block of reads.
             @details
             The hot-loop form of Pattern 1: one revalidation for N field reads
@@ -25831,6 +27384,18 @@ namespace hotspot
             return vmhook::detail::access<wrapper_type>{ this->resolve() };
         }
 
+        /*
+            @brief The UNTYPED root navigates too, through any_object.
+            @details Same revalidation; the members come from the live object's
+            own class instead of a wrapper the caller had to declare first.
+        */
+        auto operator->() const noexcept
+            -> vmhook::detail::access<vmhook::any_object>
+            requires (std::is_void_v<wrapper_type>)
+        {
+            return vmhook::detail::access<vmhook::any_object>{ this->resolve() };
+        }
+
         /* @brief The declaring class name this root was given, if any (empty when
            the root defers to the wrapper type's registered name). */
         auto declaring_class() const noexcept
@@ -25943,6 +27508,32 @@ namespace hotspot
         }
 
         /*
+            @brief The UNTYPED borrow navigates too, through any_object.
+            @details
+            borrowed<> is what every read hands back when no wrapper was named,
+            and it used to be a dead end: no `->`, so the caller had to go and
+            invent a wrapper type before they could read one field.  Now the
+            object's own klass supplies the members, and the revalidation is
+            identical — the address is resolved through the epoch check first,
+            so an expired borrow binds a null any_object rather than the
+            address it used to have.
+        */
+        auto operator->() const noexcept
+            -> vmhook::detail::access<vmhook::any_object>
+            requires (std::is_void_v<wrapper_type>)
+        {
+            return vmhook::detail::access<vmhook::any_object>{ this->resolve() };
+        }
+
+        /* @brief Same as operator->, spelled for `(*handle).member`. */
+        auto operator*() const noexcept
+            -> vmhook::detail::access<vmhook::any_object>
+            requires (std::is_void_v<wrapper_type>)
+        {
+            return vmhook::detail::access<vmhook::any_object>{ this->resolve() };
+        }
+
+        /*
             @brief Promotes the borrow to a vmhook::ref.
             @details The result is an EPHEMERAL ref - same expiry, now chainable.
             It does NOT become durable, because no GC root exists to make it so;
@@ -26004,12 +27595,180 @@ namespace hotspot
     auto object<derived>::self() const noexcept
         -> vmhook::borrowed<derived>
     {
-        vmhook::oop_t const instance{ this->get_instance() };
-        if (!instance)
+        // Named `held`, not `instance`: object_base has a member of that name
+        // in scope here, and shadowing it trips MSVC C4458.
+        vmhook::oop_t const held{ this->get_instance() };
+        if (!held)
         {
             return vmhook::borrowed<derived>{};
         }
-        return vmhook::borrowed<derived>{ instance };
+        return vmhook::borrowed<derived>{ held };
+    }
+
+    /*
+        @brief Out-of-line definition of vmhook::make_unique<W>(args...).
+        @details
+        Deferred to here because the allocation and invocation machinery it
+        needs is only complete at this point.
+
+        Every failure between the allocation and a successfully-returned
+        constructor abandons the instance and yields an EMPTY wrapper (a
+        non-null unique_ptr whose get_instance() is null).  That is
+        deliberate — an object that was allocated but whose `<init>` did not run
+        (or threw) has Java-visible invariants that were never established, and
+        handing it back would push a half-built object into code that has no way
+        to tell.  Abandoning it costs one dead object the collector reclaims;
+        returning it costs whatever that class's constructor was for.
+    */
+    template<typename wrapper_type, typename... args_t>
+    inline auto make_unique(args_t&&... args) noexcept
+        -> std::unique_ptr<wrapper_type>
+    {
+        const std::string class_name{ vmhook::detail::registered_class_name<wrapper_type>() };
+        if (class_name.empty())
+        {
+            VMHOOK_LOG("{} make_unique(): type '{}' is not registered - call "
+                       "register_class<T>(\"java/lang/Name\") before constructing it.",
+                       vmhook::error_tag, vmhook::detail::type_name<wrapper_type>());
+            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
+        }
+
+        vmhook::hotspot::klass* const target_klass{ vmhook::find_class(class_name) };
+        if (!target_klass || !vmhook::hotspot::is_valid_pointer(target_klass))
+        {
+            VMHOOK_LOG("{} make_unique(): class '{}' is not loaded in this VM.",
+                       vmhook::error_tag, class_name);
+            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
+        }
+
+        // A zero instance size means non-instantiable (interface / abstract /
+        // array).  `new` on one of those is a Java error, and allocating it here
+        // would produce an object whose klass says it cannot exist.
+        const std::size_t instance_size{ target_klass->get_instance_size() };
+        if (instance_size == 0)
+        {
+            VMHOOK_LOG("{} make_unique(): '{}' is not instantiable (interface, "
+                       "abstract, or its instance size could not be read).",
+                       vmhook::error_tag, class_name);
+            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
+        }
+
+        // Locate ANY <init> on the class first.  The exact overload is chosen
+        // from the C++ argument types by method_proxy::call() itself (its
+        // resolve_compatible_method walks the receiver's klass for same-name
+        // candidates), so this only has to find a starting point - and finding
+        // NONE means there is no constructor to run, which must be discovered
+        // BEFORE anything is allocated.
+        vmhook::hotspot::method* initializer{ nullptr };
+        {
+            const std::int32_t method_count{ target_klass->get_methods_count() };
+            vmhook::hotspot::method** const methods_array{ target_klass->get_methods_ptr() };
+            if (methods_array)
+            {
+                for (std::int32_t index{ 0 }; index < method_count; ++index)
+                {
+                    vmhook::hotspot::method* const candidate{ methods_array[index] };
+                    // <init> is spelled <init> under every mapping: the JVM
+                    // reserves the name, so no obfuscator or remapper touches it.
+                    if (candidate && vmhook::hotspot::is_valid_pointer(candidate)
+                        && candidate->get_name() == "<init>")
+                    {
+                        initializer = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!initializer)
+        {
+            VMHOOK_LOG("{} make_unique(): '{}' declares no <init> this library can "
+                       "reach - nothing was allocated.",
+                       vmhook::error_tag, class_name);
+            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
+        }
+
+        // PRE-FLIGHT the invocability of the call BEFORE allocating.  A refused
+        // call() and a void constructor both come back as monostate, so once the
+        // object exists there is no way to tell "the constructor ran and returned
+        // nothing" from "the call was refused and the object is raw".  Checking
+        // the two refusal causes up front — no derivable call stub, and not being
+        // on a usable JavaThread — turns that ambiguity into an honest failure
+        // with nothing allocated.  It is not a proof: call() can still refuse for
+        // a thread-state reason that only exists at the moment of the call.  It
+        // removes the two that are knowable in advance.
+        if (!vmhook::detail::find_call_stub_entry())
+        {
+            VMHOOK_LOG("{} make_unique(): no call stub could be derived on this VM, "
+                       "so '{}' cannot be constructed - nothing was allocated.",
+                       vmhook::error_tag, class_name);
+            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
+        }
+        if (!vmhook::hotspot::ensure_current_java_thread())
+        {
+            VMHOOK_LOG("{} make_unique(): this thread is not a JavaThread and could "
+                       "not be attached, so the constructor of '{}' cannot run - nothing "
+                       "was allocated.",
+                       vmhook::error_tag, class_name);
+            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
+        }
+
+        // Named `allocated`, not `instance`: object_base has a member of
+        // that name in scope even here, and shadowing it trips MSVC C4458.
+        void* const allocated{ vmhook::make_java_object(target_klass, instance_size) };
+        if (!allocated)
+        {
+            VMHOOK_LOG("{} make_unique(): allocation of {} bytes for '{}' failed.",
+                       vmhook::warning_tag, instance_size, class_name);
+            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
+        }
+
+        // The interpreter locals[] array method_proxy::call packs into is sized
+        // for 8 arguments, and exceeding it is a hard static_assert INSIDE call().
+        // Refuse here instead of instantiating it: a caller with a 9-argument
+        // constructor deserves a logged failure, not a compile error from the
+        // middle of a template they never named.
+        if constexpr (sizeof...(args_t) > 8)
+        {
+            // Nothing is constructed on this path, so the pack is otherwise
+            // unread and MSVC reports every element as an unused parameter.
+            ((void)args, ...);
+            VMHOOK_LOG("{} vmhook::make_unique<{}>(): {} constructor arguments exceeds the "
+                       "8 the interpreter locals[] array holds - nothing was allocated.",
+                       vmhook::error_tag, vmhook::detail::type_name<wrapper_type>(),
+                       sizeof...(args_t));
+            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
+        }
+        else
+        {
+        const vmhook::method_proxy constructor{ allocated, initializer, initializer->get_signature() };
+        const auto call_result{ constructor.call(std::forward<args_t>(args)...) };
+        if (call_result.threw())
+        {
+            VMHOOK_LOG("{} make_unique(): the constructor of '{}' threw {} - the "
+                       "instance is abandoned.",
+                       vmhook::error_tag, class_name,
+                       call_result.exception_class.empty()
+                           ? "an exception" : call_result.exception_class.c_str());
+            return vmhook::detail::wrap_object<wrapper_type>(nullptr);
+        }
+
+        // wrap_object never yields a null pointer: a caller checks
+        // get_instance(), exactly as for a field read or a call result.
+        auto result{ vmhook::detail::wrap_object<wrapper_type>(allocated) };
+
+        // OPTIONAL C++-side hook.  It runs AFTER the Java constructor, so a
+        // wrapper that wants to stamp extra state can, and one that does not
+        // need it (the common case) declares nothing.
+        if constexpr (requires(wrapper_type& wrapper, args_t&&... hook_args)
+                      { wrapper.construct(std::forward<args_t>(hook_args)...); })
+        {
+            if (result)
+            {
+                result->construct(std::forward<args_t>(args)...);
+            }
+        }
+        return result;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -26164,6 +27923,70 @@ namespace hotspot
                     return vmhook::borrowed<wrapper_type>{};
                 }
             }, this->data);
+    }
+
+    /*
+        @brief Out-of-line definitions of the untyped `->` on both value types.
+        @details
+        Deferred to here because detail::access and any_object are only complete
+        at this point.  Both do the same thing: decode the reference the value
+        holds, vet it once, and bind an any_object to it for the length of the
+        surrounding expression.
+
+        A value that holds no object — a primitive, a void call, a Java null, an
+        array, an address that fails the heap check — binds a NULL any_object
+        rather than failing.  That is deliberate: `a->get_method("b")->call()->get_method("c")->call()` then
+        ends quietly at the first missing link and logs there, instead of
+        requiring a check between every hop.
+    */
+    inline auto field_proxy::value_t::operator->() const noexcept
+        -> vmhook::detail::access<vmhook::any_object>
+    {
+        return std::visit([this](const auto& stored) noexcept
+            -> vmhook::detail::access<vmhook::any_object>
+            {
+                using stored_type = std::remove_cvref_t<decltype(stored)>;
+                if constexpr (std::is_same_v<stored_type, std::uint32_t>)
+                {
+                    return vmhook::detail::access<vmhook::any_object>{
+                        this->reference_target<void>(stored) };
+                }
+                else
+                {
+                    return vmhook::detail::access<vmhook::any_object>{ nullptr };
+                }
+            }, this->data);
+    }
+
+    inline auto field_proxy::value_t::operator*() const noexcept
+        -> vmhook::detail::access<vmhook::any_object>
+    {
+        return this->operator->();
+    }
+
+    inline auto method_proxy::value_t::operator->() const noexcept
+        -> vmhook::detail::access<vmhook::any_object>
+    {
+        return std::visit([](const auto& stored) noexcept
+            -> vmhook::detail::access<vmhook::any_object>
+            {
+                using stored_type = std::remove_cvref_t<decltype(stored)>;
+                if constexpr (std::is_same_v<stored_type, std::uint32_t>)
+                {
+                    return vmhook::detail::access<vmhook::any_object>{
+                        reference_target<void>(stored) };
+                }
+                else
+                {
+                    return vmhook::detail::access<vmhook::any_object>{ nullptr };
+                }
+            }, this->data);
+    }
+
+    inline auto method_proxy::value_t::operator*() const noexcept
+        -> vmhook::detail::access<vmhook::any_object>
+    {
+        return this->operator->();
     }
 
     /*
