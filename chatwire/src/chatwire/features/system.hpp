@@ -91,15 +91,18 @@ namespace chatwire::features
                 if (cmd.verb == "status")
                 {
                     const client_counter clients{ g_client_counter.load(std::memory_order_acquire) };
-                    return chatwire::response::success(chatwire::json::object(
-                        chatwire::json::field("version", chatwire::version)
-                        + "," + chatwire::json::field("mapping",
-                            chatwire::mapping::mode_name(chatwire::mapping::current))
-                        + "," + chatwire::json::field("port",
-                            static_cast<std::int64_t>(g_status_port.load(std::memory_order_relaxed)))
-                        + "," + chatwire::json::field("clients",
-                            static_cast<std::int64_t>(clients ? clients() : 0u))
-                        + "," + chatwire::json::field("can_call", g_can_call.load(std::memory_order_relaxed))));
+                    return chatwire::response::success(
+                        chatwire::json::object(std::format("{},{},{},{},{}",
+                            chatwire::json::field("version", chatwire::version),
+                            chatwire::json::field("mapping",
+                                chatwire::mapping::mode_name(chatwire::mapping::current)),
+                            chatwire::json::field("port",
+                                static_cast<std::int64_t>(
+                                    g_status_port.load(std::memory_order_relaxed))),
+                            chatwire::json::field("clients",
+                                static_cast<std::int64_t>(clients ? clients() : 0u)),
+                            chatwire::json::field("can_call",
+                                g_can_call.load(std::memory_order_relaxed)))));
                 }
 
                 if (cmd.verb == "stats")

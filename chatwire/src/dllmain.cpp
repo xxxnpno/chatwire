@@ -36,7 +36,7 @@ namespace
 */
 auto restart_event_name(const DWORD pid) -> std::string
 {
-    return "Local\\chatwire.restart." + std::to_string(pid);
+    return std::format("Local\\chatwire.restart.{}", pid);
 }
 
 namespace

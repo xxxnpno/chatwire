@@ -195,7 +195,9 @@ namespace
     */
     auto signal_restart(const DWORD pid) -> bool
     {
-        const std::string name{ "Local\\chatwire.restart." + std::to_string(pid) };
+        // Spelled exactly as dllmain.cpp's restart_event_name() spells it; the
+        // two are separate binaries, so the format string is the contract.
+        const std::string name{ std::format("Local\\chatwire.restart.{}", pid) };
         const HANDLE signal{ ::OpenEventA(EVENT_MODIFY_STATE, FALSE, name.c_str()) };
         if (signal == nullptr) { return false; }
         const bool ok{ ::SetEvent(signal) != 0 };
@@ -391,14 +393,24 @@ namespace
         wchar_t temp[MAX_PATH]{};
         if (::GetTempPathW(MAX_PATH, temp) == 0u) { return {}; }
 
-        wchar_t stamp[32]{};
-        (void)::swprintf(stamp, 32, L"%016llx",
-                         static_cast<unsigned long long>(content_hash(bytes)));
+        // `{:016x}` is `%016llx` with the buffer and the length argument gone --
+        // and with them the only way this could have truncated.  swprintf's 32
+        // wide characters were never too few for sixteen hex digits, but that is
+        // a fact a reader had to check rather than one the code stated.
+        const std::wstring stamp{ std::format(L"{:016x}",
+                                              static_cast<unsigned long long>(
+                                                  content_hash(bytes))) };
 
-        const std::wstring folder{ std::wstring{ temp } + L"chatwire\\" + stamp };
+        // std::format has a wide overload, so a path built from wchar_t buffers
+        // needs no widening dance: the literal is L"" and the result is a
+        // std::wstring.  GetTempPathW's buffer is handed over as a pointer
+        // because the formatter for a character array is the const one.
+        const std::wstring folder{ std::format(L"{}chatwire\\{}",
+                                               static_cast<const wchar_t*>(temp), stamp) };
         // Both levels, and neither failure is fatal on its own: ALREADY_EXISTS
         // is the normal case on the second run.
-        (void)::CreateDirectoryW((std::wstring{ temp } + L"chatwire").c_str(), nullptr);
+        (void)::CreateDirectoryW(
+            std::format(L"{}chatwire", static_cast<const wchar_t*>(temp)).c_str(), nullptr);
         (void)::CreateDirectoryW(folder.c_str(), nullptr);
 
         const std::wstring path{ folder + L"\\chatwire.dll" };
@@ -630,8 +642,8 @@ int main(const int argc, char** const argv)
         settings.console = console;
         settings.verbose = verbose;
 
-        const std::string cfg{ to_utf8(dll.substr(0, dll.find_last_of(L"\\/") + 1u))
-                               + "chatwire.cfg" };
+        const std::string cfg{ std::format("{}chatwire.cfg",
+                                           to_utf8(dll.substr(0, dll.find_last_of(L"\\/") + 1u))) };
         if (!chatwire::config::write(cfg, settings))
         {
             std::println("\n  [warn] could not write {};\n"

@@ -728,10 +728,11 @@ namespace chatwire::ws
             std::string reply;
             try
             {
-                reply = "HTTP/1.1 101 Switching Protocols\r\n"
-                        "Upgrade: websocket\r\n"
-                        "Connection: Upgrade\r\n"
-                        "Sec-WebSocket-Accept: " + accept_key(key) + "\r\n\r\n";
+                reply = std::format("HTTP/1.1 101 Switching Protocols\r\n"
+                                    "Upgrade: websocket\r\n"
+                                    "Connection: Upgrade\r\n"
+                                    "Sec-WebSocket-Accept: {}\r\n\r\n",
+                                    accept_key(key));
             }
             catch (...)
             {
@@ -769,7 +770,7 @@ namespace chatwire::ws
                 lowered += static_cast<char>((ch >= 'A' && ch <= 'Z') ? (ch - 'A' + 'a') : ch);
             }
 
-            const std::size_t at{ lowered.find(std::string{ lowercase_name } + ":") };
+            const std::size_t at{ lowered.find(std::format("{}:", lowercase_name)) };
             if (at == std::string::npos) { return {}; }
 
             std::size_t start{ at + lowercase_name.size() + 1u };

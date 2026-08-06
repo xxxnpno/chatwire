@@ -159,11 +159,15 @@ namespace chatwire::config
     {
         try
         {
-            std::string text;
-            text += "port=" + std::to_string(s.port) + "\n";
-            text += std::string{ "console=" } + (s.console ? "1" : "0") + "\n";
-            text += std::string{ "verbose=" } + (s.verbose ? "1" : "0") + "\n";
-            text += "timeout=" + std::to_string(s.timeout_seconds) + "\n";
+            // The two flags are formatted as INTEGERS, not as bools: read()
+            // above tests `value != "0"`, and std::format's default spelling of
+            // a bool is "true"/"false", which that test would read as true
+            // either way -- a config that could set a flag but never clear it.
+            const std::string text{ std::format("port={}\nconsole={}\nverbose={}\ntimeout={}\n",
+                                                s.port,
+                                                s.console ? 1 : 0,
+                                                s.verbose ? 1 : 0,
+                                                s.timeout_seconds) };
 
             std::FILE* const file{ std::fopen(path.c_str(), "wb") };
             if (file == nullptr) { return false; }

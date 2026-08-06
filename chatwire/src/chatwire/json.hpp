@@ -77,14 +77,14 @@ namespace chatwire::json
     [[nodiscard]] inline auto field(const std::string_view key, const std::string_view value)
         -> std::string
     {
-        return "\"" + escape(key) + "\":\"" + escape(value) + "\"";
+        return std::format("\"{}\":\"{}\"", escape(key), escape(value));
     }
 
     /* @brief `"key":123` — numbers are emitted unquoted. */
     [[nodiscard]] inline auto field(const std::string_view key, const std::int64_t value)
         -> std::string
     {
-        return "\"" + escape(key) + "\":" + std::to_string(value);
+        return std::format("\"{}\":{}", escape(key), value);
     }
 
     /*
@@ -108,7 +108,10 @@ namespace chatwire::json
     [[nodiscard]] inline auto field(const std::string_view key, const bool_type value)
         -> std::string
     {
-        return "\"" + escape(key) + "\":" + (value ? "true" : "false");
+        // `{}` on a bool is "true"/"false" -- std::format's default for bool is
+        // exactly JSON's spelling, so the ternary this replaces is gone rather
+        // than moved into the argument.
+        return std::format("\"{}\":{}", escape(key), value);
     }
 
     /*
@@ -123,7 +126,8 @@ namespace chatwire::json
     [[nodiscard]] inline auto field(const std::string_view key, const char (&value)[n])
         -> std::string
     {
-        return "\"" + escape(key) + "\":\"" + escape(std::string_view{ value, n - 1u }) + "\"";
+        return std::format("\"{}\":\"{}\"", escape(key),
+                           escape(std::string_view{ value, n - 1u }));
     }
 
     /*
@@ -286,7 +290,20 @@ namespace chatwire::json
         return std::nullopt;
     }
 
-    /* @brief Wraps `body` in braces. */
+    /*
+        @brief Wraps `body` in braces.
+        @details
+        The one string in chatwire that is NOT built with std::format, and
+        deliberately: the format string would be `"{{{}}}"` -- an escaped brace,
+        a replacement field, an escaped brace -- which is harder to read than
+        the thing it produces, and it would give up the move.  `body` is every
+        field of a response already joined, so it is the longest string here and
+        the one worth not copying.
+
+        Everything else in this file formats.  This is the exception, and the
+        reason is that it is a WRAP rather than a substitution: there is nothing
+        to interpolate, only two characters to put on the ends.
+    */
     [[nodiscard]] inline auto object(std::string body)
         -> std::string
     {

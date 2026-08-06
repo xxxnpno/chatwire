@@ -258,7 +258,7 @@ namespace chatwire::features
                     if (existing->client != cmd.client)
                     {
                         return chatwire::response::failure(
-                            "'" + name + "' is already registered by another client");
+                            std::format("'{}' is already registered by another client", name));
                     }
                 }
                 else
@@ -299,7 +299,7 @@ namespace chatwire::features
                     if (it->client != cmd.client)
                     {
                         return chatwire::response::failure(
-                            "'" + name + "' belongs to another client");
+                            std::format("'{}' belongs to another client", name));
                     }
                     table.erase(it);
                     removed = true;
@@ -309,7 +309,7 @@ namespace chatwire::features
 
             if (!removed)
             {
-                return chatwire::response::failure("'" + name + "' is not registered");
+                return chatwire::response::failure(std::format("'{}' is not registered", name));
             }
             return chatwire::response::success(chatwire::json::object(
                 chatwire::json::field("unregistered", name)));
@@ -327,15 +327,17 @@ namespace chatwire::features
             for (const auto& entry : snapshot)
             {
                 if (!entries.empty()) { entries += ","; }
-                entries += chatwire::json::object(
-                    chatwire::json::field("name", entry.name) + ","
-                    + chatwire::json::field("client",
-                        static_cast<std::int64_t>(entry.client)));
+                entries += chatwire::json::object(std::format("{},{}",
+                    chatwire::json::field("name", entry.name),
+                    chatwire::json::field("client",
+                        static_cast<std::int64_t>(entry.client))));
             }
 
-            return chatwire::response::success(chatwire::json::object(
-                chatwire::json::field("count", static_cast<std::int64_t>(snapshot.size()))
-                + ",\"commands\":[" + entries + "]"));
+            return chatwire::response::success(
+                chatwire::json::object(std::format("{},\"commands\":[{}]",
+                    chatwire::json::field("count",
+                        static_cast<std::int64_t>(snapshot.size())),
+                    entries)));
         }
 
         /*
@@ -389,17 +391,19 @@ namespace chatwire::features
                 for (const auto& argument : chatwire::command_line::arguments(line))
                 {
                     if (!args.empty()) { args += ","; }
-                    args += "\"" + chatwire::json::escape(argument) + "\"";
+                    args += std::format("\"{}\"", chatwire::json::escape(argument));
                 }
 
                 // Named after the method this comes OUT of, exactly as the chat
                 // event is named after printChatMessage.
                 const std::string payload{ chatwire::json::object(
-                    chatwire::json::field(
-                        "type", "net.minecraft.client.entity.EntityPlayerSP.sendChatMessage")
-                    + "," + chatwire::json::field("command", invoked)
-                    + ",\"args\":[" + args + "]"
-                    + "," + chatwire::json::field("raw", line)) };
+                    std::format("{},{},\"args\":[{}],{}",
+                        chatwire::json::field(
+                            "type",
+                            "net.minecraft.client.entity.EntityPlayerSP.sendChatMessage"),
+                        chatwire::json::field("command", invoked),
+                        args,
+                        chatwire::json::field("raw", line))) };
 
                 if (!sink(owner, payload))
                 {
@@ -484,12 +488,13 @@ namespace chatwire::features::commands
     */
     [[nodiscard]] inline auto stats_json() -> std::string
     {
-        return chatwire::json::field("commands_run",
-                   static_cast<std::int64_t>(
-                       chatwire::features::g_commands_run.load(std::memory_order_relaxed)))
-            + "," + chatwire::json::field("commands_dropped",
-                   static_cast<std::int64_t>(
-                       chatwire::features::g_commands_dropped.load(std::memory_order_relaxed)));
+        return std::format("{},{}",
+            chatwire::json::field("commands_run",
+                static_cast<std::int64_t>(
+                    chatwire::features::g_commands_run.load(std::memory_order_relaxed))),
+            chatwire::json::field("commands_dropped",
+                static_cast<std::int64_t>(
+                    chatwire::features::g_commands_dropped.load(std::memory_order_relaxed))));
     }
 
     /* @brief This feature's singleton, for the root module to register. */

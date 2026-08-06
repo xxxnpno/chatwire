@@ -213,11 +213,11 @@ namespace chatwire::features
                 // reads like the commands do and can be checked against the same
                 // source.  The short spellings ("printChatMessage", and "chat"
                 // before it) are gone with the short command prefixes.
-                const std::string payload{ chatwire::json::object(
+                const std::string payload{ chatwire::json::object(std::format("{},{},{}",
                     chatwire::json::field(
-                        "type", "net.minecraft.client.gui.GuiNewChat.printChatMessage") + ","
-                    + chatwire::json::field("formatted", formatted_view) + ","
-                    + chatwire::json::field("plain", plain_view)) };
+                        "type", "net.minecraft.client.gui.GuiNewChat.printChatMessage"),
+                    chatwire::json::field("formatted", formatted_view),
+                    chatwire::json::field("plain", plain_view))) };
 
                 sink(payload);
             }
@@ -308,15 +308,16 @@ namespace chatwire::features::chat
     */
     [[nodiscard]] inline auto stats_json() -> std::string
     {
-        return chatwire::json::field("lines_seen",
+        return std::format("{},{},{}",
+            chatwire::json::field("lines_seen",
                 static_cast<std::int64_t>(
-                    chatwire::features::g_lines_seen.load(std::memory_order_relaxed)))
-            + "," + chatwire::json::field("sent",
+                    chatwire::features::g_lines_seen.load(std::memory_order_relaxed))),
+            chatwire::json::field("sent",
                 static_cast<std::int64_t>(
-                    chatwire::features::g_sent.load(std::memory_order_relaxed)))
-            + "," + chatwire::json::field("added",
+                    chatwire::features::g_sent.load(std::memory_order_relaxed))),
+            chatwire::json::field("added",
                 static_cast<std::int64_t>(
-                    chatwire::features::g_added.load(std::memory_order_relaxed)));
+                    chatwire::features::g_added.load(std::memory_order_relaxed))));
     }
 
     /*
