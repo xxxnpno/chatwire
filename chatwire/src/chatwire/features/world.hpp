@@ -71,6 +71,48 @@ namespace chatwire::features
     inline std::atomic<std::uint64_t> g_worlds_entered{ 0 };
     inline std::atomic<std::uint64_t> g_worlds_left{ 0 };
 
+    /*
+        @brief The client changed world.  `loaded` false is it LEAVING one.
+        @details
+        The event's name is a default member initialiser rather than something
+        the one construction site spells, for the same reason the chat event's
+        is: it is a property of the event.
+    */
+    struct load_world_event
+    {
+        std::string_view type{ "net.minecraft.client.Minecraft.loadWorld" };
+        bool             loaded{ false };
+    };
+
+    /*
+        @brief The answer to `playerEntities`.
+        @details
+        `players` is a vector of chatwire::sdk::player_identity -- the sdk's OWN
+        type, put on the wire unchanged, because its members are already spelled
+        `name` and `uuid`.  There is no conversion step and no second struct
+        mirroring the first: json::object writes an array of objects by walking
+        whatever the element type turns out to be.
+
+        What that replaced was a loop that built each entry's JSON by hand and
+        pasted the results into a format string with the array's brackets typed
+        into it as literal text -- `"{},\"players\":[{}]"` -- which is the point
+        where a wire format stops being described anywhere and starts being
+        assembled.
+    */
+    struct player_entities_result
+    {
+        std::size_t                              count{ 0 };
+        std::vector<chatwire::sdk::player_identity> players{};
+    };
+
+    /* @brief This feature's contribution to `system.stats`. */
+    struct world_stats
+    {
+        std::uint64_t player_queries{ 0 };
+        std::uint64_t worlds_entered{ 0 };
+        std::uint64_t worlds_left{ 0 };
+    };
+
     class world_feature final : public chatwire::feature
     {
     public:
@@ -141,23 +183,13 @@ namespace chatwire::features
                         return chatwire::response::failure("not in a world");
                     }
 
-                    const auto found{ chatwire::sdk::players() };
+                    auto found{ chatwire::sdk::players() };
                     g_player_queries.fetch_add(1, std::memory_order_relaxed);
 
-                    std::string entries;
-                    for (const auto& who : found)
-                    {
-                        if (!entries.empty()) { entries += ","; }
-                        entries += chatwire::json::object(std::format("{},{}",
-                            chatwire::json::field("name", who.name),
-                            chatwire::json::field("uuid", who.uuid)));
-                    }
-
+                    const std::size_t count{ found.size() };
                     return chatwire::response::success(
-                        chatwire::json::object(std::format("{},\"players\":[{}]",
-                            chatwire::json::field("count",
-                                static_cast<std::int64_t>(found.size())),
-                            entries)));
+                        chatwire::json::object(player_entities_result{
+                            .count = count, .players = std::move(found) }));
                 }
 
                 return chatwire::response::failure(
@@ -197,13 +229,8 @@ namespace chatwire::features
                 const world_sink sink{ g_world_sink.load(std::memory_order_acquire) };
                 if (!sink) { return; }   // nobody watching; do no work
 
-                // Named for the method it comes out of, in full, exactly as the
-                // chat event is -- so a client reads `type` the same way whoever
-                // wrote it read Minecraft's source.
-                const std::string payload{ chatwire::json::object(std::format("{},{}",
-                    chatwire::json::field(
-                        "type", "net.minecraft.client.Minecraft.loadWorld"),
-                    chatwire::json::field("loaded", loaded))) };
+                const std::string payload{
+                    chatwire::json::object(load_world_event{ .loaded = loaded }) };
 
                 sink(payload);
             }
@@ -224,26 +251,19 @@ namespace chatwire::features::world
     }
 
     /*
-        @brief This feature's counters, as JSON fields WITHOUT the braces.
+        @brief This feature's counters, for `system.stats`.
         @details
-        A fragment, joined with the other features' by the host and wrapped
-        once -- see the same function in features/chat.hpp for why the shape is
-        this and not a finished object.  `player_queries` counted from the day
-        this feature existed and had nowhere to be reported until there was a
-        second number here to report it with.
+        One of several structs the host flattens into a single object -- see the
+        same function in features/chat.hpp.  `player_queries` counted from the
+        day this feature existed and had nowhere to be reported until there was
+        a second number here to report it with.
     */
-    [[nodiscard]] inline auto stats_json() -> std::string
+    [[nodiscard]] inline auto stats() noexcept -> chatwire::features::world_stats
     {
-        return std::format("{},{},{}",
-            chatwire::json::field("player_queries",
-                static_cast<std::int64_t>(
-                    chatwire::features::g_player_queries.load(std::memory_order_relaxed))),
-            chatwire::json::field("worlds_entered",
-                static_cast<std::int64_t>(
-                    chatwire::features::g_worlds_entered.load(std::memory_order_relaxed))),
-            chatwire::json::field("worlds_left",
-                static_cast<std::int64_t>(
-                    chatwire::features::g_worlds_left.load(std::memory_order_relaxed))));
+        return chatwire::features::world_stats{
+            .player_queries = chatwire::features::g_player_queries.load(std::memory_order_relaxed),
+            .worlds_entered = chatwire::features::g_worlds_entered.load(std::memory_order_relaxed),
+            .worlds_left    = chatwire::features::g_worlds_left.load(std::memory_order_relaxed) };
     }
 
     /* @brief This feature's singleton, for the root module to register. */

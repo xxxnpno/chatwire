@@ -65,6 +65,30 @@ namespace chatwire::features
     inline std::atomic<bool> g_can_call{ false };
     inline std::atomic<client_counter> g_client_counter{ nullptr };
 
+    /*
+        @brief What `system.*` answers with.
+        @details
+        `stats` is not among these: its shape is every counter-keeping feature's
+        struct flattened together, and which features those are is the host's
+        business rather than this one's -- see stats_source above.
+
+        `port` and `clients` keep the types they are counted in.  They used to be
+        cast to std::int64_t at the call site, not because anything wanted them
+        widened but because there was one numeric overload of json::field and
+        that was its parameter.  The writer takes a member's own type now, so
+        the cast is gone and a port is a std::uint16_t all the way to the wire.
+    */
+    struct pong_result   { bool pong{ true }; };
+    struct detaching_result { bool detaching{ true }; };
+    struct status_result
+    {
+        std::string_view version{};
+        std::string_view mapping{};
+        std::uint16_t    port{ 0 };
+        std::size_t      clients{ 0 };
+        bool             can_call{ false };
+    };
+
     class system_feature final : public chatwire::feature
     {
     public:
@@ -85,24 +109,19 @@ namespace chatwire::features
                 if (cmd.verb == "ping")
                 {
                     return chatwire::response::success(
-                        chatwire::json::object(chatwire::json::field("pong", true)));
+                        chatwire::json::object(pong_result{}));
                 }
 
                 if (cmd.verb == "status")
                 {
                     const client_counter clients{ g_client_counter.load(std::memory_order_acquire) };
                     return chatwire::response::success(
-                        chatwire::json::object(std::format("{},{},{},{},{}",
-                            chatwire::json::field("version", chatwire::version),
-                            chatwire::json::field("mapping",
-                                chatwire::mapping::mode_name(chatwire::mapping::current)),
-                            chatwire::json::field("port",
-                                static_cast<std::int64_t>(
-                                    g_status_port.load(std::memory_order_relaxed))),
-                            chatwire::json::field("clients",
-                                static_cast<std::int64_t>(clients ? clients() : 0u)),
-                            chatwire::json::field("can_call",
-                                g_can_call.load(std::memory_order_relaxed)))));
+                        chatwire::json::object(status_result{
+                            .version  = chatwire::version,
+                            .mapping  = chatwire::mapping::mode_name(chatwire::mapping::current),
+                            .port     = g_status_port.load(std::memory_order_relaxed),
+                            .clients  = clients ? clients() : 0u,
+                            .can_call = g_can_call.load(std::memory_order_relaxed) }));
                 }
 
                 if (cmd.verb == "stats")
@@ -148,8 +167,8 @@ namespace chatwire::features
                     request();
 
                     chatwire::log::warn("detach requested over the websocket");
-                    return chatwire::response::success(chatwire::json::object(
-                        chatwire::json::field("detaching", true)));
+                    return chatwire::response::success(
+                        chatwire::json::object(detaching_result{}));
                 }
 
                 return chatwire::response::failure(

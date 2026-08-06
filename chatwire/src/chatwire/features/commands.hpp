@@ -104,7 +104,14 @@ namespace chatwire::features
 
     namespace commands_detail
     {
-        /* One claimed name, and who claimed it. */
+        /*
+            One claimed name, and who claimed it.
+
+            This is also, unchanged, what `commands.list` puts on the wire: the
+            two members are already spelled `name` and `client`, which are the
+            keys the README documents, so json::object writes the table's own
+            entries rather than a copy of them built field by field.
+        */
         struct registration
         {
             std::string   name{};
@@ -144,6 +151,46 @@ namespace chatwire::features
             bound on the work done in a detour.
         */
         inline constexpr std::size_t max_registrations{ 256 };
+
+        /*
+            @brief One line the player typed that a plugin had claimed.
+            @details
+            Named after the method it comes OUT of, exactly as the chat event is
+            named after printChatMessage.  It shares that name with a command a
+            client can SEND, and that is not a collision: `type` is what
+            happened in the game, `cmd` is what you are asking for.
+
+            `args` is a vector of strings and needs nothing said about it here.
+            The version this replaced built the array by hand -- escape each
+            argument, wrap it in quotes, join with commas, then paste the result
+            into a format string with `[` and `]` typed in as literal text
+            beside two other fields.  Three of those four steps were places to
+            get the escaping or the punctuation wrong.
+        */
+        struct sent_chat_message_event
+        {
+            std::string_view type{
+                "net.minecraft.client.entity.EntityPlayerSP.sendChatMessage" };
+            std::string_view         command{};
+            std::vector<std::string> args{};
+            std::string_view         raw{};
+        };
+
+        /* @brief The replies to `commands.register` / `.unregister` / `.list`. */
+        struct registered_result   { std::string_view registered{}; };
+        struct unregistered_result { std::string_view unregistered{}; };
+        struct command_list_result
+        {
+            std::size_t              count{ 0 };
+            std::vector<registration> commands{};
+        };
+
+        /* @brief This feature's contribution to `system.stats`. */
+        struct commands_stats
+        {
+            std::uint64_t commands_run{ 0 };
+            std::uint64_t commands_dropped{ 0 };
+        };
 
         // The three text decisions -- what a typed line invokes, what its
         // arguments are, and what a registerable name looks like -- live in
@@ -274,7 +321,7 @@ namespace chatwire::features
 
             chatwire::log::info("commands: client {} registered /{}", cmd.client, name);
             return chatwire::response::success(chatwire::json::object(
-                chatwire::json::field("registered", name)));
+                commands_detail::registered_result{ .registered = name }));
         }
 
         [[nodiscard]] auto do_unregister(const chatwire::command& cmd) noexcept
@@ -312,7 +359,7 @@ namespace chatwire::features
                 return chatwire::response::failure(std::format("'{}' is not registered", name));
             }
             return chatwire::response::success(chatwire::json::object(
-                chatwire::json::field("unregistered", name)));
+                commands_detail::unregistered_result{ .unregistered = name }));
         }
 
         [[nodiscard]] static auto do_list() -> chatwire::response
@@ -323,21 +370,10 @@ namespace chatwire::features
                 snapshot = commands_detail::table();
             }
 
-            std::string entries;
-            for (const auto& entry : snapshot)
-            {
-                if (!entries.empty()) { entries += ","; }
-                entries += chatwire::json::object(std::format("{},{}",
-                    chatwire::json::field("name", entry.name),
-                    chatwire::json::field("client",
-                        static_cast<std::int64_t>(entry.client))));
-            }
-
+            const std::size_t count{ snapshot.size() };
             return chatwire::response::success(
-                chatwire::json::object(std::format("{},\"commands\":[{}]",
-                    chatwire::json::field("count",
-                        static_cast<std::int64_t>(snapshot.size())),
-                    entries)));
+                chatwire::json::object(commands_detail::command_list_result{
+                    .count = count, .commands = std::move(snapshot) }));
         }
 
         /*
@@ -387,23 +423,11 @@ namespace chatwire::features
                     return false;
                 }
 
-                std::string args;
-                for (const auto& argument : chatwire::command_line::arguments(line))
-                {
-                    if (!args.empty()) { args += ","; }
-                    args += std::format("\"{}\"", chatwire::json::escape(argument));
-                }
-
-                // Named after the method this comes OUT of, exactly as the chat
-                // event is named after printChatMessage.
                 const std::string payload{ chatwire::json::object(
-                    std::format("{},{},\"args\":[{}],{}",
-                        chatwire::json::field(
-                            "type",
-                            "net.minecraft.client.entity.EntityPlayerSP.sendChatMessage"),
-                        chatwire::json::field("command", invoked),
-                        args,
-                        chatwire::json::field("raw", line))) };
+                    commands_detail::sent_chat_message_event{
+                        .command = invoked,
+                        .args    = chatwire::command_line::arguments(line),
+                        .raw     = line }) };
 
                 if (!sink(owner, payload))
                 {
@@ -478,23 +502,21 @@ namespace chatwire::features::commands
     }
 
     /*
-        @brief The counters, as a JSON body fragment for `system.stats`.
+        @brief The counters, for `system.stats`.
         @details
-        Lives here because the numbers do.  `run` is commands delivered to a
-        plugin; `dropped` is commands that matched but could not be delivered
-        and were therefore let through to the server -- a number worth having,
-        because from inside the game that outcome looks exactly like a command
-        that was never registered.
+        Lives here because the numbers do.  `commands_run` is commands delivered
+        to a plugin; `commands_dropped` is commands that matched but could not be
+        delivered and were therefore let through to the server -- a number worth
+        having, because from inside the game that outcome looks exactly like a
+        command that was never registered.
     */
-    [[nodiscard]] inline auto stats_json() -> std::string
+    [[nodiscard]] inline auto stats() noexcept
+        -> chatwire::features::commands_detail::commands_stats
     {
-        return std::format("{},{}",
-            chatwire::json::field("commands_run",
-                static_cast<std::int64_t>(
-                    chatwire::features::g_commands_run.load(std::memory_order_relaxed))),
-            chatwire::json::field("commands_dropped",
-                static_cast<std::int64_t>(
-                    chatwire::features::g_commands_dropped.load(std::memory_order_relaxed))));
+        return chatwire::features::commands_detail::commands_stats{
+            .commands_run = chatwire::features::g_commands_run.load(std::memory_order_relaxed),
+            .commands_dropped =
+                chatwire::features::g_commands_dropped.load(std::memory_order_relaxed) };
     }
 
     /* @brief This feature's singleton, for the root module to register. */

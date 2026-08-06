@@ -28,6 +28,25 @@
 namespace chatwire::detail
 {
     /*
+        @brief The envelope every reply to a client comes in.
+        @details
+        `ok` is fixed by which struct this is, so neither is a field a caller
+        fills in -- a reply that said `{"ok":false,...}` next to a result, or the
+        reverse, was possible when the flag and the body were two arguments to
+        one function.  See dispatch() below.
+    */
+    struct ok_reply
+    {
+        bool           ok{ true };
+        json::verbatim result{};
+    };
+    struct error_reply
+    {
+        bool             ok{ false };
+        std::string_view error{};
+    };
+
+    /*
         The server is a function-local static that is NEVER DESTROYED,
         deliberately.
 
@@ -82,15 +101,19 @@ namespace chatwire::detail
         @details
         Composed HERE rather than in `system`, so that neither counter-keeping
         feature has to include the other and `system` does not have to know how
-        many there are.  Each feature contributes JSON fields without braces;
-        this joins them and wraps once.
+        many there are.  Each feature returns its own counters as a struct, and
+        json::object flattens the three into one object -- the features' fields
+        laid out in this argument order.
+
+        A fourth counter-keeping feature is one more argument on this line.  It
+        used to be one more brace-less JSON fragment and one more `{}` in a
+        format string that had to keep pace with it.
     */
     inline auto stats_json() -> std::string
     {
-        return json::object(std::format("{},{},{}",
-                                        features::chat::stats_json(),
-                                        features::commands::stats_json(),
-                                        features::world::stats_json()));
+        return json::object(features::chat::stats(),
+                            features::commands::stats(),
+                            features::world::stats());
     }
 
     /*
@@ -220,9 +243,21 @@ namespace chatwire::detail
         {
             try
             {
-                return json::object(std::format("{},{}", json::field("ok", ok),
-                                                ok ? std::format("\"result\":{}", body)
-                                                   : json::field("error", body)));
+                // json::verbatim, and this is the one place in chatwire that
+                // uses it: `body` is a feature's finished reply and is JSON
+                // already, so it goes in as it stands.  Written as a string it
+                // would be quoted and escaped, and the client would get its
+                // result as a lump of text to parse a second time.
+                //
+                // The two shapes are two structs rather than one with an unused
+                // member, because that is what the protocol says: a reply
+                // carries `result` OR `error`, never both and never an empty
+                // one of the other.
+                if (ok)
+                {
+                    return json::object(ok_reply{ .result = json::verbatim{ body } });
+                }
+                return json::object(error_reply{ .error = body });
             }
             catch (...)
             {

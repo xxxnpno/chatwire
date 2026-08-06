@@ -73,6 +73,42 @@ namespace chatwire::features
     inline std::atomic<std::uint64_t> g_sent{ 0 };
     inline std::atomic<std::uint64_t> g_added{ 0 };
 
+    /*
+        @brief The messages this feature puts on the wire.
+        @details
+        These structs ARE the wire format -- chatwire/json.hpp writes each one
+        by walking its members, so a key on the socket is a member name here and
+        the two cannot drift.  Adding a field to an event is adding a member.
+
+        `type` carries its value as a default member initialiser, which is where
+        the event's name belongs: it is a property of the event rather than
+        something each construction site should be trusted to spell.  The name
+        is the method the event comes OUT of, in full, so it reads like the
+        commands do and can be checked against Minecraft's source.
+    */
+    struct print_chat_message_event
+    {
+        std::string_view type{ "net.minecraft.client.gui.GuiNewChat.printChatMessage" };
+        /* With the section-sign colour codes still in. */
+        std::string_view formatted{};
+        /* The same line with them stripped. */
+        std::string_view plain{};
+    };
+
+    /* @brief The reply to sendChatMessage: it has already reached the server. */
+    struct sent_result { bool sent{ true }; };
+
+    /* @brief The reply to addChatMessage: it is already in the chat box. */
+    struct added_result { bool added{ true }; };
+
+    /* @brief This feature's contribution to `system.stats`. */
+    struct chat_stats
+    {
+        std::uint64_t lines_seen{ 0 };
+        std::uint64_t sent{ 0 };
+        std::uint64_t added{ 0 };
+    };
+
     class chat_feature final : public chatwire::feature
     {
     public:
@@ -209,15 +245,9 @@ namespace chatwire::features
                 }
                 if (!sink) { return; }
 
-                // Named for the method it comes out of, in full, so the event
-                // reads like the commands do and can be checked against the same
-                // source.  The short spellings ("printChatMessage", and "chat"
-                // before it) are gone with the short command prefixes.
-                const std::string payload{ chatwire::json::object(std::format("{},{},{}",
-                    chatwire::json::field(
-                        "type", "net.minecraft.client.gui.GuiNewChat.printChatMessage"),
-                    chatwire::json::field("formatted", formatted_view),
-                    chatwire::json::field("plain", plain_view))) };
+                const std::string payload{ chatwire::json::object(
+                    print_chat_message_event{ .formatted = formatted_view,
+                                              .plain     = plain_view }) };
 
                 sink(payload);
             }
@@ -256,8 +286,7 @@ namespace chatwire::features
                     return chatwire::response::failure("sendChatMessage failed");
                 }
                 g_sent.fetch_add(1, std::memory_order_relaxed);
-                return chatwire::response::success(
-                    chatwire::json::object(chatwire::json::field("sent", true)));
+                return chatwire::response::success(chatwire::json::object(sent_result{}));
             }
 
             if (!chatwire::sdk::add_chat(text))
@@ -265,8 +294,7 @@ namespace chatwire::features
                 return chatwire::response::failure("addChatMessage failed");
             }
             g_added.fetch_add(1, std::memory_order_relaxed);
-            return chatwire::response::success(
-                chatwire::json::object(chatwire::json::field("added", true)));
+            return chatwire::response::success(chatwire::json::object(added_result{}));
         }
 
     };
@@ -287,7 +315,7 @@ namespace chatwire::features::chat
     }
 
     /*
-        @brief This feature's counters, as JSON fields WITHOUT the braces.
+        @brief This feature's counters, for `system.stats`.
         @details
         Lives here because the numbers do, and is READ from the system feature
         rather than reachable as a chat command, because there is no Minecraft
@@ -295,29 +323,28 @@ namespace chatwire::features::chat
         wires the two together (see chatwire::features::system::set_stats_source)
         so that neither feature has to include the other.
 
-        A FRAGMENT rather than a finished object, because `system.stats` answers
-        for chatwire as a whole and more than one feature keeps counters now.
-        The host joins the fragments and wraps them once; the alternative was
-        every counter-keeping feature emitting a complete object and the host
-        unpicking the braces to merge them, which is a string surgery nobody
-        should have to read.
+        Returns the STRUCT, not JSON.  It used to return a brace-less fragment
+        of JSON -- text that was valid nowhere on its own -- because the host had
+        to merge several features' counters into one object and merging finished
+        objects would have meant unpicking their braces.  json::object takes
+        several structs and flattens them, so the fragment has no reason to
+        exist and neither does the paragraph that used to explain it.
 
         Safe from any thread: three relaxed loads.  They are not a consistent
         snapshot of each other and do not need to be -- nothing here is a
         difference or a ratio.
+
+        The counters are also no longer cast to std::int64_t on the way out.
+        That cast was for the one numeric `field()` overload there was; the
+        writer takes the member's own type now, and these are counts that cannot
+        go negative.
     */
-    [[nodiscard]] inline auto stats_json() -> std::string
+    [[nodiscard]] inline auto stats() noexcept -> chatwire::features::chat_stats
     {
-        return std::format("{},{},{}",
-            chatwire::json::field("lines_seen",
-                static_cast<std::int64_t>(
-                    chatwire::features::g_lines_seen.load(std::memory_order_relaxed))),
-            chatwire::json::field("sent",
-                static_cast<std::int64_t>(
-                    chatwire::features::g_sent.load(std::memory_order_relaxed))),
-            chatwire::json::field("added",
-                static_cast<std::int64_t>(
-                    chatwire::features::g_added.load(std::memory_order_relaxed))));
+        return chatwire::features::chat_stats{
+            .lines_seen = chatwire::features::g_lines_seen.load(std::memory_order_relaxed),
+            .sent       = chatwire::features::g_sent.load(std::memory_order_relaxed),
+            .added      = chatwire::features::g_added.load(std::memory_order_relaxed) };
     }
 
     /*
