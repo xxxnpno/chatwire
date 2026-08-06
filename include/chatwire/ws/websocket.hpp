@@ -9,7 +9,7 @@
 // pulls in is a library that has to agree with whatever the host process
 // already loaded, and a CRT or OpenSSL mismatch inside a foreign process is a
 // crash with no useful stack.  The server is also local-only and unencrypted by
-// design (see server.ixx), so the parts of a real WebSocket library that earn
+// design (see ws/server.hpp), so the parts of a real WebSocket library that earn
 // their weight — TLS, permessage-deflate, proxy handling — are exactly the
 // parts this does not want.
 //

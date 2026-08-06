@@ -10,6 +10,7 @@
 // including the boundary sizes and the malformed inputs a hostile client would
 // send.  What it cannot test is the Minecraft side, which needs a live game.
 #include "chatwire/common.hpp"
+#include "chatwire/command_line.hpp"
 #include "chatwire/json.hpp"
 #include "chatwire/ws/server.hpp"
 #include "chatwire/ws/websocket.hpp"
@@ -29,11 +30,18 @@ namespace
         if (!ok) { ++failures; }
     }
 
+    /* The id the server gave the connection the last request arrived on.  The
+       commands feature routes events by this, so a test that never looks at it
+       would not notice the server handing out the same one twice. */
+    std::atomic<std::uint64_t> last_client{ 0 };
+
     /* The server's message handler for these tests: echoes what it was sent. */
-    auto echo_handler(const std::string_view request) noexcept -> std::string
+    auto echo_handler(const std::uint64_t client, const std::string_view request) noexcept
+        -> std::string
     {
         try
         {
+            last_client.store(client, std::memory_order_release);
             const auto cmd{ chatwire::json::get_string(request, "cmd") };
             if (!cmd) { return R"({"ok":false})"; }
             return chatwire::json::object(chatwire::json::field("echo", *cmd));
@@ -303,6 +311,75 @@ int main()
         check("json_field_int_is_a_number",
               chatwire::json::field("n", std::int64_t{ 42 }) == R"("n":42)");
 
+    // ── the command line a plugin is handed ────────────────────────────────
+    // What a typed line turns into is the whole contract between chatwire and a
+    // plugin: get this wrong and either the command never fires or it fires
+    // with the wrong arguments.  It is also the only part of that feature that
+    // runs without a JVM, which is why it lives in its own header and why it is
+    // worth testing rather than assuming.
+    {
+        namespace cl = chatwire::command_line;
+
+        check("invoked_name_finds_a_bare_command",
+              cl::invoked_name("/ping") == "ping");
+        check("invoked_name_stops_at_the_first_space",
+              cl::invoked_name("/ping alpha beta") == "ping");
+        check("invoked_name_ignores_ordinary_chat",
+              cl::invoked_name("hello everyone").empty());
+        // A line that merely CONTAINS a slash is not a command: only a leading
+        // one is Minecraft's command syntax.
+        check("invoked_name_ignores_a_mid_line_slash",
+              cl::invoked_name("and/or").empty());
+        check("invoked_name_ignores_a_lone_slash", cl::invoked_name("/").empty());
+        check("invoked_name_ignores_an_empty_line", cl::invoked_name("").empty());
+
+        const auto none{ cl::arguments("/ping") };
+        check("arguments_of_a_bare_command_are_empty", none.empty());
+
+        const auto two{ cl::arguments("/ping alpha beta") };
+        check("arguments_are_split_on_whitespace",
+              two.size() == 2u && two[0] == "alpha" && two[1] == "beta");
+
+        // Runs of spaces and a trailing one are what a person actually types,
+        // and each of them is a chance to hand a plugin an empty argument it
+        // never asked for.
+        const auto messy{ cl::arguments("/ping   alpha \t beta  ") };
+        check("arguments_drop_empties_from_runs_and_trailing_space",
+              messy.size() == 2u && messy[0] == "alpha" && messy[1] == "beta");
+
+        check("arguments_of_ordinary_chat_are_empty",
+              cl::arguments("hello everyone").empty());
+        // The command name must never appear as its own first argument -- the
+        // classic off-by-one in this shape of parser.
+        const auto not_self{ cl::arguments("/ping alpha") };
+        check("arguments_exclude_the_command_name",
+              not_self.size() == 1u && not_self[0] == "alpha");
+
+        check("normalise_accepts_a_plain_name", cl::normalise("ping") == "ping");
+        check("normalise_drops_one_leading_slash", cl::normalise("/ping") == "ping");
+        check("normalise_rejects_a_second_slash", cl::normalise("//ping").empty());
+        check("normalise_rejects_a_name_with_a_space", cl::normalise("pi ng").empty());
+        check("normalise_rejects_an_empty_name", cl::normalise("").empty());
+        check("normalise_rejects_a_lone_slash", cl::normalise("/").empty());
+        check("normalise_rejects_a_control_character",
+              cl::normalise(std::string_view{ "pi\nng" }).empty());
+        check("normalise_rejects_an_over_long_name",
+              cl::normalise(std::string(cl::max_name_length + 1u, 'a')).empty());
+        check("normalise_accepts_the_longest_allowed_name",
+              cl::normalise(std::string(cl::max_name_length, 'a')).size()
+              == cl::max_name_length);
+
+        // The round trip that matters: whatever normalise() accepted at
+        // registration must be exactly what invoked_name() produces when the
+        // player types it, or a command registers successfully and then never
+        // fires.  This is the pair that has to agree, so it is asserted as a
+        // pair rather than as two separate opinions.
+        const std::string_view registered{ cl::normalise("/ping") };
+        check("registration_and_invocation_agree",
+              !registered.empty()
+              && cl::invoked_name("/" + std::string{ registered } + " alpha") == registered);
+    }
+
     // ── the server, over a real socket ─────────────────────────────────────
     {
         chatwire::ws::server server;
@@ -346,7 +423,32 @@ int main()
             std::string pushed;
             check("client_receives_a_broadcast", client.read_text(pushed));
             check("broadcast_payload_intact", pushed.find("hello") != std::string::npos);
+
+            // Targeted delivery: the route a registered command's event takes
+            // out of the game, and the reason a connection has an id at all.
+            const std::uint64_t id{ last_client.load(std::memory_order_acquire) };
+            check("handler_was_told_which_client_asked", id != 0u);
+            check("send_to_reaches_that_client",
+                  server.send_to(id, R"({"type":"targeted","command":"ping"})"));
+            std::string targeted;
+            check("client_receives_the_targeted_frame", client.read_text(targeted));
+            check("targeted_payload_intact",
+                  targeted.find("\"command\":\"ping\"") != std::string::npos);
+
+            // An id nobody holds is a normal "not connected", not an error and
+            // not a write into somebody else's socket.
+            check("send_to_an_unknown_client_reports_false",
+                  !server.send_to(id + 1000u, R"({"type":"targeted"})"));
+            last_client.store(id, std::memory_order_release);
         }
+
+        // Same id after the client is gone: still refused.  This is what stops a
+        // command registered by a dead plugin from being delivered to whoever
+        // connects next.
+        std::this_thread::sleep_for(std::chrono::milliseconds{ 300 });
+        check("send_to_a_departed_client_reports_false",
+              !server.send_to(last_client.load(std::memory_order_acquire),
+                              R"({"type":"targeted"})"));
 
         // The client's destructor closed the socket; the server must notice and
         // reap it rather than broadcasting into a dead handle forever.

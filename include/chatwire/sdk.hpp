@@ -195,6 +195,13 @@ namespace chatwire::sdk::detail
        and the installer never race. */
     inline std::atomic<void (*)(const char*, const char*)> g_chat_callback{ nullptr };
 
+    /*
+        The interceptor for chat the PLAYER sends, installed the same way and for
+        the same reasons.  Returns true to swallow the message -- see
+        sdk::install_command_interceptor for what that means and what it costs.
+    */
+    inline std::atomic<bool (*)(const char*)> g_command_callback{ nullptr };
+
 
     /*
         @brief The local player as a JNI reference, or nullptr.
@@ -405,23 +412,27 @@ namespace chatwire::sdk
     }
 
     /*
-        @brief Deoptimises the one method chatwire hooks.
+        @brief Deoptimises the methods chatwire hooks.
         @details
         vmhook's deoptimize_methods_if walks EVERY loaded class.  On a modded
         client that is tens of thousands of them, and it takes seconds, so it is
-        worth doing exactly once and only for what is actually hooked.
+        worth doing exactly once, for every hook target at once, and only for
+        what is actually hooked.  That "at once" is why both targets share one
+        predicate rather than getting a call each: the walk is the cost, and it
+        does not get cheaper the second time.
 
-        That used to be two methods — printChatMessage and runTick, the pump
-        target — walked together because doing it twice cost seconds twice.  The
-        pump is gone (chatwire calls Java on the calling thread now; see
-        attach_thread), so one target is left and the combined predicate with it.
+        The deopt is necessary because the targets are hot.  printChatMessage
+        runs on every message and is JIT-compiled long before anything injects;
+        sendChatMessage is compiled by the time a player has typed a few lines.
+        A compiled dispatch bypasses the i2i interpreter entry a vmhook detour
+        patches, so without this a hook installs successfully and simply never
+        fires -- which for the command interceptor would look exactly like a
+        plugin that registered a command nobody types.  vmhook holds NO_COMPILE
+        on a hooked Method, so the route stays put once established.
 
-        The deopt is necessary because the target is hot: printChatMessage runs
-        on every message and is JIT-compiled long before anything injects.  A
-        compiled dispatch bypasses the i2i interpreter entry a vmhook detour
-        patches, so without this the hook installs successfully and simply never
-        fires.  vmhook holds NO_COMPILE on a hooked Method, so the route stays
-        put once established.
+        The pump's target, Minecraft.runTick, used to be here too.  There is no
+        pump (chatwire calls Java on the calling thread now; see attach_thread),
+        so what walks the class graph is only ever what a feature hooks.
     */
     inline auto deoptimize_hook_targets() noexcept -> void
     {
@@ -430,13 +441,27 @@ namespace chatwire::sdk
         {
             const std::string chat_class{ map::resolve(map::gui_new_chat::clazz) };
             const std::string print{ map::resolve(map::gui_new_chat::print_chat_message) };
-            if (chat_class.empty() || print.empty()) { return; }
+            const std::string player_class{ map::resolve(map::entity_player_sp::clazz) };
+            const std::string send{ map::resolve(map::entity_player_sp::send_chat_message) };
+
+            const bool want_print{ !chat_class.empty() && !print.empty() };
+            const bool want_send{ !player_class.empty() && !send.empty() };
+            if (!want_print && !want_send) { return; }
 
             (void)vmhook::deoptimize_methods_if(
                 [&](const std::string& class_name, vmhook::hotspot::method* m) -> bool
                 {
                     if (!m) { return false; }
-                    return class_name == chat_class && m->get_name() == print;
+                    // Fetched ONCE, not once per target.  get_name() validates
+                    // the Method* and builds a std::string out of a JVM symbol,
+                    // and this predicate runs for every method of every loaded
+                    // class -- tens of thousands of them on a modded client.
+                    const std::string method_name{ m->get_name() };
+                    if (want_print && class_name == chat_class && method_name == print)
+                    {
+                        return true;
+                    }
+                    return want_send && class_name == player_class && method_name == send;
                 });
         }
         catch (...) { }
@@ -492,6 +517,96 @@ namespace chatwire::sdk
             if (!handle.installed()) { return false; }
             d::hooks().push_back(std::move(handle));
             chatwire::log::info("chat observer installed on {}.{}{}",
+                                class_name, method, descriptor);
+            return true;
+        }
+        catch (...) { return false; }
+    }
+
+    /*
+        @brief Offered every line the player sends; true SWALLOWS it.
+        @details
+        Runs INSIDE the sendChatMessage detour, on whichever thread is sending —
+        normally the game thread, since that is who processes the chat box.  It
+        must be quick and must not throw.
+
+        The return value is the whole point: true means the message never
+        reaches Minecraft's body at all, so it is not transmitted and nothing on
+        the server ever hears about it.  That is what makes a plugin's `/ping` a
+        command rather than a message that happens to be echoed back.
+    */
+    using command_callback = bool (*)(const char* message) noexcept;
+
+    /*
+        @brief Hooks EntityPlayerSP.sendChatMessage so `on_typed` can eat a line.
+        @details
+        This is the one hook chatwire installs that can CHANGE what the game
+        does, and it is worth being plain about that: every other detour
+        observes.  vmhook's return_value::cancel() suppresses the method body,
+        which for a void method means the call returns having done nothing --
+        the packet is never built and the server never sees the line.
+
+        WHY THIS METHOD.  It is where the client turns "the player pressed enter
+        in the chat box" into "send a packet", so it is the last place a line can
+        be stopped while still being exactly what the player typed.  Hooking the
+        GUI would catch keystrokes instead of messages; hooking the network layer
+        would catch chat that was never typed.
+
+        WHAT ELSE ARRIVES HERE.  Everything that reaches sendChatMessage,
+        including chatwire's OWN sdk::send_chat -- a client asking to say
+        "/ping" gets intercepted exactly as if the player had typed it.  That is
+        the honest behaviour for a command spelled "as if typed", and it is also
+        how a plugin can drive another plugin, but it does mean a client can be
+        answered `{"sent":true}` for a line that was swallowed on the way out.
+        A plugin that must not be intercepted should not name its output after a
+        registered command.
+
+        RE-ENTRANCY.  `on_typed` may end up back in the game (a plugin answering
+        on its own socket thread will call addChatMessage), but never on THIS
+        thread and never inside this frame: the callback only writes to a socket
+        and returns.  Nothing here calls Java, so this detour cannot recurse
+        into itself.
+    */
+    [[nodiscard]] inline auto install_command_interceptor(const command_callback on_typed) noexcept
+        -> bool
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        try
+        {
+            const auto class_name{ map::resolve(map::entity_player_sp::clazz) };
+            const auto method{ map::resolve(map::entity_player_sp::send_chat_message) };
+            if (class_name.empty() || method.empty()) { return false; }
+
+            d::g_command_callback.store(on_typed, std::memory_order_release);
+
+            // Deopt already done -- see deoptimize_hook_targets().
+
+            constexpr std::string_view descriptor{ "(Ljava/lang/String;)V" };
+            auto handle{ vmhook::scoped_hook<d::local_player>(
+                method, descriptor,
+                [](vmhook::return_value& ret,
+                   vmhook::borrowed<d::local_player>,
+                   std::string message) noexcept
+                {
+                    // Inside a detour, on the game thread.  Fully guarded: the
+                    // frame above is Minecraft's interpreter, which has no
+                    // handler for a C++ exception.
+                    try
+                    {
+                        const auto cb{ d::g_command_callback.load(std::memory_order_acquire) };
+                        if (!cb || message.empty()) { return; }
+                        // cancel() AFTER the callback has decided, and nothing
+                        // between the two: a throw here would leave the message
+                        // going to the server, which is the safe direction.
+                        if (cb(message.c_str())) { ret.cancel(); }
+                    }
+                    catch (...) { }
+                }) };
+
+            if (!handle.installed()) { return false; }
+            d::hooks().push_back(std::move(handle));
+            chatwire::log::info("command interceptor installed on {}.{}{}",
                                 class_name, method, descriptor);
             return true;
         }
@@ -871,6 +986,11 @@ namespace chatwire::sdk
     {
         namespace d = chatwire::sdk::detail;
         d::g_chat_callback.store(nullptr, std::memory_order_release);
+        // Cleared BEFORE the hooks come down, so a detour that is already
+        // running finds no callback and lets the message through rather than
+        // swallowing it on the way out.  A half-detached chatwire that eats the
+        // player's chat would be the worst possible parting gift.
+        d::g_command_callback.store(nullptr, std::memory_order_release);
         try { d::hooks().clear(); } catch (...) { }
     }
 }

@@ -62,6 +62,16 @@ namespace chatwire::ws::detail
     struct client
     {
         chatwire::net::socket_t sock{ chatwire::net::invalid_socket };
+        /*
+            A number that identifies this connection, and only this one.
+            Monotonic and never reused within a run, so a feature can hold onto
+            one after the client is gone and be told "no such client" rather
+            than reaching whoever inherited the slot.  That is the property the
+            `commands` feature needs: a registered command outlives the socket
+            write that delivered its last event, and delivering somebody else's
+            command to a new client would be worse than dropping it.
+        */
+        std::uint64_t id{ 0 };
         std::mutex write_mutex{};              // serialises frames on this socket
         std::atomic<bool> alive{ true };
 
@@ -126,8 +136,15 @@ namespace chatwire::ws
         A plain function pointer rather than std::function: the handler is
         installed once at startup and never changes, and a function pointer
         cannot throw on copy or dangle after a lambda's captures die.
+
+        `client` is the connection the message came in on.  Most commands do not
+        care -- the reply goes back down the same socket either way -- but one
+        that registers something on the caller's behalf has to know WHOSE
+        behalf, and a handler with no way to ask would have to invent a
+        correlation scheme of its own.
     */
-    using message_handler = std::string (*)(std::string_view request) noexcept;
+    using message_handler = std::string (*)(std::uint64_t client,
+                                            std::string_view request) noexcept;
 
     /*
         @brief Called when a client connects or disconnects, with the new total.
@@ -136,8 +153,14 @@ namespace chatwire::ws
         chatwire uses it to announce the connection in the player's chat, which
         it does the same way everything else reaches the game: by calling it
         from the thread it is already on.
+
+        The disconnect side is also where anything registered in that client's
+        name is dropped, which is why the id is passed: a plugin that registered
+        `/ping` and then died must not leave `/ping` swallowed forever with
+        nobody left to answer it.
     */
-    using presence_handler = void (*)(bool connected, std::size_t total) noexcept;
+    using presence_handler = void (*)(bool connected, std::uint64_t client,
+                                      std::size_t total) noexcept;
 
     class server
     {
@@ -342,6 +365,50 @@ namespace chatwire::ws
             }
         }
 
+        /*
+            @brief Sends `payload` to ONE client, by id.
+            @details
+            Same rules as broadcast() -- safe from any thread, including from
+            inside a game detour, and a failed write drops that client rather
+            than blocking the caller.  It is the delivery half of the `commands`
+            feature: a command belongs to the client that registered it, so its
+            event goes there and nowhere else.
+
+            Broadcasting instead would have been fewer lines and is the wrong
+            shape twice over: every other connected tool would see a command it
+            did not register, and two plugins registering the same name would
+            both act on it.
+
+            @return false when no such client is connected -- which is a normal
+                    outcome rather than an error, since a plugin can disconnect
+                    between the player typing and the event being delivered.
+        */
+        auto send_to(const std::uint64_t client, const std::string_view payload) noexcept
+            -> bool
+        {
+            detail::client_ptr target;
+            try
+            {
+                // The lookup holds the lock; the WRITE does not.  A send on a
+                // peer that has stopped reading can block for as long as its
+                // receive window stays full, and holding clients_mutex_ across
+                // that would stall every other client's dispatch behind it --
+                // and this is called from the game thread.
+                const std::lock_guard<std::mutex> guard{ this->clients_mutex_ };
+                for (const auto& c : this->clients_)
+                {
+                    if (c && c->id == client) { target = c; break; }
+                }
+            }
+            catch (...) { return false; }
+
+            if (!target) { return false; }
+            if (target->send_frame(opcode::text, payload)) { return true; }
+
+            this->drop(target);
+            return false;
+        }
+
         [[nodiscard]] auto client_count() const noexcept -> std::size_t
         {
             try
@@ -452,6 +519,9 @@ namespace chatwire::ws
                     continue;
                 }
                 c->sock = sock;
+                // Assigned here, before the client is reachable by anything
+                // else, and never reused: see client::id.
+                c->id = this->next_id_.fetch_add(1, std::memory_order_relaxed);
                 chatwire::net::prepare(sock);
 
                 // Registered BEFORE the handshake, not after it.  stop() wakes
@@ -522,7 +592,7 @@ namespace chatwire::ws
             // could wake it out of the handshake.  Only the announcement waits
             // for the handshake to have succeeded.
             chatwire::log::info("client connected ({} total)", this->client_count());
-            if (this->presence_) { this->presence_(true, this->client_count()); }
+            if (this->presence_) { this->presence_(true, c->id, this->client_count()); }
 
             std::vector<std::uint8_t> buffer;
             std::string               fragment;      // reassembled fragmented text
@@ -573,7 +643,7 @@ namespace chatwire::ws
 
             this->drop(c);
             chatwire::log::info("client disconnected ({} remain)", this->client_count());
-            if (this->presence_) { this->presence_(false, this->client_count()); }
+            if (this->presence_) { this->presence_(false, c->id, this->client_count()); }
         }
 
         /* @return false to close the connection. */
@@ -613,7 +683,7 @@ namespace chatwire::ws
                 std::string reply;
                 try
                 {
-                    reply = this->handler_(request);
+                    reply = this->handler_(c->id, request);
                 }
                 catch (...)
                 {
@@ -718,6 +788,9 @@ namespace chatwire::ws
         }
 
         chatwire::net::socket_t         listener_{ chatwire::net::invalid_socket };
+        /* Handed out by accept_loop().  Starts at 1 so that 0 is available as
+           "no client", which is what an unrouted command carries. */
+        std::atomic<std::uint64_t>      next_id_{ 1 };
         std::uint16_t                   bound_port_{ 0 };
         bool                            net_started_{ false };
         std::atomic<bool>               running_{ false };

@@ -1,20 +1,34 @@
-// chatwire-inject — a terminal injector for chatwire.dll.
+// chatwire.exe — chatwire, and the tool that puts it into the game, in one file.
 //
-// Finds the running Minecraft (a java.exe / javaw.exe), injects the DLL with the
-// classic LoadLibraryW remote thread, and reports what happened.  No GUI: this
-// is a tool you run and read, and a console makes it scriptable.
+// Finds the running Minecraft (a java.exe / javaw.exe), injects the library with
+// the classic LoadLibraryW remote thread, and reports what happened.  No GUI:
+// this is a tool you run and read, and a console makes it scriptable.
 //
 // USAGE
-//   chatwire-inject                     find Minecraft, inject chatwire.dll
-//   chatwire-inject --pid 1234          inject into a specific process
-//   chatwire-inject --dll path.dll      inject a different DLL
-//   chatwire-inject --port 9000         listen on a different port
-//   chatwire-inject --console           also open a console showing live chat
-//   chatwire-inject --list              list candidate processes and exit
+//   chatwire                     find Minecraft and inject
+//   chatwire --pid 1234          inject into a specific process
+//   chatwire --port 9000         listen on a different port
+//   chatwire --console           also open a console showing live chat
+//   chatwire --list              list candidate processes and exit
+//   chatwire --dll path.dll      inject a DLL from disk instead of the built-in
 //
-// No console by default: chatwire's interface is the websocket, and on a game
-// that already has a console (Lunar, or any java.exe launch) chatwire's output
-// has to share the window with the game's own logger.
+// ===========================================================================
+// THE DLL IS INSIDE THIS EXECUTABLE
+// ===========================================================================
+// chatwire.exe carries chatwire.dll as a Windows resource, so this is ONE FILE
+// you can hand to somebody.  There is no folder to keep together and, more to
+// the point, no way to end up running an injector from one build against a DLL
+// from another -- which produced exactly the kind of bug report that wastes an
+// evening: an injection that succeeds and a library that behaves like an older
+// version, because it was one.
+//
+// Injecting still needs a PATH, because LoadLibraryW takes one -- the target
+// process reads the file itself, and it cannot read our address space.  So the
+// resource is written to a temporary file first.  See extract_library() for
+// where it goes and why the name is what it is.
+//
+// --dll overrides all of that and injects a file from disk, which is what you
+// want while developing the library itself.
 //
 // WHY LoadLibraryW AND NOT SOMETHING CLEVERER
 // Manual mapping and thread hijacking exist to avoid detection.  chatwire is a
@@ -25,7 +39,9 @@
 #include "chatwire/config.hpp"
 
 #include <print>
+#include <cstdint>
 #include <cstring>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -293,6 +309,132 @@ namespace
         return ok;
     }
 
+    /*
+        @brief The library bytes carried in this executable, or empty.
+        @details
+        Empty when this was built without the resource, which is a supported
+        configuration rather than a broken one -- see the fallback in main().
+    */
+    auto embedded_library() -> std::span<const unsigned char>
+    {
+        // MAKEINTRESOURCEW(10) rather than RT_RCDATA: the RT_* macros follow
+        // the UNICODE define, and this project does not set it, so RT_RCDATA is
+        // the ANSI spelling and will not go into the W function.
+        const HRSRC found{ ::FindResourceW(nullptr, L"CHATWIRE_DLL",
+                                           MAKEINTRESOURCEW(10)) };
+        if (found == nullptr) { return {}; }
+
+        const DWORD size{ ::SizeofResource(nullptr, found) };
+        const HGLOBAL loaded{ ::LoadResource(nullptr, found) };
+        if (size == 0u || loaded == nullptr) { return {}; }
+
+        // LockResource does not lock anything and there is nothing to free: on
+        // modern Windows a resource is simply part of the mapped image, so this
+        // is a pointer into our own read-only pages that stays valid for the
+        // lifetime of the process.
+        const auto* const bytes{ static_cast<const unsigned char*>(::LockResource(loaded)) };
+        if (bytes == nullptr) { return {}; }
+        return { bytes, size };
+    }
+
+    /*
+        @brief A 64-bit FNV-1a hash of the embedded library.
+        @details
+        Used to NAME the directory the library is unpacked into, which turns a
+        nasty little problem into a non-problem.
+
+        The unpacked file cannot simply be overwritten on each run: a detached
+        chatwire stays mapped in the game (deliberately -- see the README), so
+        the file is locked for as long as that game is open.  Overwriting would
+        fail, and reusing whatever happens to be there would silently inject a
+        DIFFERENT BUILD than the one inside this executable.
+
+        Naming the directory after the contents makes those two cases the same
+        case: a path that already exists holds exactly these bytes, so a failed
+        write is not an error, it is proof the work was already done.  A new
+        build hashes differently and unpacks somewhere else, and never has to
+        touch a file the game is holding.
+
+        Not a cryptographic hash and does not need to be: it is protecting
+        against build A being mistaken for build B, not against somebody
+        constructing a collision on their own machine to attack themselves.
+    */
+    auto content_hash(const std::span<const unsigned char> bytes) -> std::uint64_t
+    {
+        std::uint64_t hash{ 0xcbf29ce484222325ull };
+        for (const unsigned char b : bytes)
+        {
+            hash ^= b;
+            hash *= 0x100000001b3ull;
+        }
+        return hash;
+    }
+
+    /*
+        @brief Writes the embedded library to a temporary file and returns it.
+        @details
+        The file is always called chatwire.dll, and the HASH goes in the
+        DIRECTORY name rather than the file name.  That is not cosmetic: the
+        loaded module takes the name of the file, and already_injected() below
+        recognises an existing chatwire by that name.  Putting the hash in the
+        file name would mean two different builds inject two modules with
+        different names, neither of which recognises the other, and the game
+        quietly ends up with two chatwires in it.
+
+        @return the full path, or empty on failure.
+    */
+    auto extract_library() -> std::wstring
+    {
+        const auto bytes{ embedded_library() };
+        if (bytes.empty()) { return {}; }
+
+        wchar_t temp[MAX_PATH]{};
+        if (::GetTempPathW(MAX_PATH, temp) == 0u) { return {}; }
+
+        wchar_t stamp[32]{};
+        (void)::swprintf(stamp, 32, L"%016llx",
+                         static_cast<unsigned long long>(content_hash(bytes)));
+
+        const std::wstring folder{ std::wstring{ temp } + L"chatwire\\" + stamp };
+        // Both levels, and neither failure is fatal on its own: ALREADY_EXISTS
+        // is the normal case on the second run.
+        (void)::CreateDirectoryW((std::wstring{ temp } + L"chatwire").c_str(), nullptr);
+        (void)::CreateDirectoryW(folder.c_str(), nullptr);
+
+        const std::wstring path{ folder + L"\\chatwire.dll" };
+
+        // CREATE_NEW, not CREATE_ALWAYS: if it is already there it is already
+        // right (the directory is named after these very bytes), and it may be
+        // mapped into a running game, where overwriting would fail anyway.
+        const HANDLE file{ ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                                         CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr) };
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            if (::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                return path;                       // already unpacked; identical
+            }
+            print_error("could not unpack the library");
+            return {};
+        }
+
+        DWORD written{ 0 };
+        const bool ok{ ::WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()),
+                                   &written, nullptr) != 0
+                       && written == bytes.size() };
+        ::CloseHandle(file);
+
+        if (!ok)
+        {
+            print_error("could not write the unpacked library");
+            // A half-written DLL is worse than none: it would load, or fail in
+            // a way that looks like a bug in chatwire rather than in the disk.
+            (void)::DeleteFileW(path.c_str());
+            return {};
+        }
+        return path;
+    }
+
     auto to_utf8(const std::wstring& text) -> std::string
     {
         if (text.empty()) { return {}; }
@@ -317,23 +459,28 @@ namespace
 
     auto usage() -> void
     {
-        std::println("chatwire-inject - inject chatwire into a running Minecraft\n"
+        std::println("chatwire - put chatwire into a running Minecraft 1.8.9\n"
             "\n"
-            "  chatwire-inject                 find Minecraft and inject chatwire.dll\n"
-            "  chatwire-inject --list          list candidate processes and exit\n"
-            "  chatwire-inject --pid <n>       inject into a specific process\n"
-            "  chatwire-inject --dll <path>    inject a different DLL\n"
-            "  chatwire-inject --port <n>      port for chatwire to listen on\n"
-            "  chatwire-inject --console       ALSO open a console showing chat\n"
-            "  chatwire-inject --verbose       show chatwire's start-up trace\n"
+            "  chatwire                 find Minecraft and inject\n"
+            "  chatwire --list          list candidate processes and exit\n"
+            "  chatwire --pid <n>       inject into a specific process\n"
+            "  chatwire --port <n>      port for chatwire to listen on\n"
+            "  chatwire --console       ALSO open a console showing chat\n"
+            "  chatwire --verbose       show chatwire's start-up trace\n"
+            "  chatwire --dll <path>    inject a DLL from disk instead of the\n"
+            "                           one built into this executable\n"
             "\n"
-            "The DLL defaults to chatwire.dll next to this executable.");
+            "The library is carried inside this file, so this is the only file\n"
+            "you need.  Then connect a WebSocket to ws://127.0.0.1:24455 and\n"
+            "drive the game from any language; the README has an example of\n"
+            "every command, and python/mcp_server.py exposes it to an AI.");
     }
 }
 
 int main(const int argc, char** const argv)
 {
-    std::wstring dll{ L"chatwire.dll" };
+    // Empty means "use the copy built into this executable".  --dll fills it in.
+    std::wstring dll{};
     DWORD        pid{ 0 };
     bool         list_only{ false };
     unsigned     port{ 0 };
@@ -372,13 +519,43 @@ int main(const int argc, char** const argv)
         }
     }
 
-    std::println("chatwire-inject\n");
+    std::println("chatwire\n");
 
-    // Resolve the DLL relative to the EXECUTABLE, not the working directory:
-    // the normal case is both sitting in the same folder, and a user running
-    // this from elsewhere should not have to care.
-    if (dll.find(L'\\') == std::wstring::npos && dll.find(L'/') == std::wstring::npos)
+    // Where the library comes from, in order of how much the user asked for it:
+    //
+    //   1. --dll <path>          exactly that file, for developing the library
+    //   2. the built-in copy      unpacked to a temp file; the normal case
+    //   3. chatwire.dll beside    the fallback for a build without the resource
+    //      this executable
+    //
+    // (3) is not dead code: -DCHATWIRE_EMBED_DLL=OFF is a supported way to
+    // build, and the two-file layout it produces is how this tool worked before
+    // the library moved inside it.
+    bool built_in{ false };
+    if (dll.empty())
     {
+        dll = extract_library();
+        built_in = !dll.empty();
+
+        if (dll.empty())
+        {
+            wchar_t self[MAX_PATH]{};
+            if (::GetModuleFileNameW(nullptr, self, MAX_PATH) > 0)
+            {
+                std::wstring folder{ self };
+                const std::size_t slash{ folder.find_last_of(L"\\/") };
+                if (slash != std::wstring::npos)
+                {
+                    dll = folder.substr(0, slash + 1) + L"chatwire.dll";
+                }
+            }
+        }
+    }
+    else if (dll.find(L'\\') == std::wstring::npos && dll.find(L'/') == std::wstring::npos)
+    {
+        // A bare name given to --dll is resolved against the EXECUTABLE, not the
+        // working directory: a user running this from elsewhere should not have
+        // to care where they happen to be standing.
         wchar_t self[MAX_PATH]{};
         if (::GetModuleFileNameW(nullptr, self, MAX_PATH) > 0)
         {
@@ -387,6 +564,13 @@ int main(const int argc, char** const argv)
             if (slash != std::wstring::npos) { dll = folder.substr(0, slash + 1) + dll; }
         }
     }
+
+    if (dll.empty())
+    {
+        std::println("  [error] this build carries no library and none was given.\n"
+                    "          Pass --dll <path>.");
+        return 1;
+    }
     dll = absolute_dll_path(dll);
 
     if (::GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES)
@@ -394,7 +578,7 @@ int main(const int argc, char** const argv)
         std::println("  [error] no such DLL: {}", to_utf8(dll));
         return 1;
     }
-    std::println("  dll   : {}", to_utf8(dll));
+    std::println("  library: {}{}", to_utf8(dll), built_in ? "   (built in)" : "");
 
     auto candidates{ find_java_processes() };
     annotate_with_titles(candidates);
@@ -418,7 +602,7 @@ int main(const int argc, char** const argv)
     }
 
     if (pid == 0) { pid = candidates.front().pid; }
-    std::println("  target: pid {}", pid);
+    std::println("  target : pid {}", pid);
 
     if (already_injected(pid, L"chatwire.dll"))
     {
@@ -455,7 +639,7 @@ int main(const int argc, char** const argv)
         }
         else
         {
-            std::println("  port  : {}{}{}", port != 0u ? port : 24455u, console ? "   (console)" : "   (no console)", verbose ? "   (verbose)" : "");
+            std::println("  port   : {}{}{}", port != 0u ? port : 24455u, console ? "   (console)" : "   (no console)", verbose ? "   (verbose)" : "");
         }
     }
 

@@ -287,7 +287,7 @@ namespace chatwire::features::chat
     }
 
     /*
-        @brief The counters, as the JSON body `system.stats` answers with.
+        @brief This feature's counters, as JSON fields WITHOUT the braces.
         @details
         Lives here because the numbers do, and is READ from the system feature
         rather than reachable as a chat command, because there is no Minecraft
@@ -295,14 +295,20 @@ namespace chatwire::features::chat
         wires the two together (see chatwire::features::system::set_stats_source)
         so that neither feature has to include the other.
 
+        A FRAGMENT rather than a finished object, because `system.stats` answers
+        for chatwire as a whole and more than one feature keeps counters now.
+        The host joins the fragments and wraps them once; the alternative was
+        every counter-keeping feature emitting a complete object and the host
+        unpicking the braces to merge them, which is a string surgery nobody
+        should have to read.
+
         Safe from any thread: three relaxed loads.  They are not a consistent
         snapshot of each other and do not need to be -- nothing here is a
         difference or a ratio.
     */
     [[nodiscard]] inline auto stats_json() -> std::string
     {
-        return chatwire::json::object(
-            chatwire::json::field("lines_seen",
+        return chatwire::json::field("lines_seen",
                 static_cast<std::int64_t>(
                     chatwire::features::g_lines_seen.load(std::memory_order_relaxed)))
             + "," + chatwire::json::field("sent",
@@ -310,7 +316,7 @@ namespace chatwire::features::chat
                     chatwire::features::g_sent.load(std::memory_order_relaxed)))
             + "," + chatwire::json::field("added",
                 static_cast<std::int64_t>(
-                    chatwire::features::g_added.load(std::memory_order_relaxed))));
+                    chatwire::features::g_added.load(std::memory_order_relaxed)));
     }
 
     /*
@@ -318,7 +324,7 @@ namespace chatwire::features::chat
         @details
         A function-local static, constructed on first call and never destroyed.
 
-        Registration is EXPLICIT — chatwire.ixx calls this and hands the result
+        Registration is EXPLICIT — src/chatwire.cpp calls this and hands the result
         to the registry — rather than automatic via a namespace-scope
         initialiser.  Two reasons, and the second is the one that matters:
 
@@ -329,7 +335,7 @@ namespace chatwire::features::chat
           2. GCC 15 ICEs (segfault) on a namespace-scope dynamic initialiser in a
              module interface unit, which is how this was written first.
 
-        Adding a feature is still two lines in chatwire.ixx: one import, one
+        Adding a feature is still two lines in src/chatwire.cpp: one include, one
         registry::add.
     */
     [[nodiscard]] inline auto instance() noexcept -> chatwire::feature*

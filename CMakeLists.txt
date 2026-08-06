@@ -33,7 +33,7 @@ endif()
 # chatwire builds on Windows, Linux and macOS.  What differs between them is not
 # the library -- every platform difference in it sits behind one of three
 # headers, chatwire/net.hpp, chatwire/module.hpp and chatwire/terminal.hpp --
-# but how it GETS INTO the game, which is why the injector is a Windows target
+# but how it GETS INTO the game, which is why chatwire.exe is a Windows target
 # and the others reach the game through the loader.  See the README.
 # ---------------------------------------------------------------------------
 if(WIN32)
@@ -58,9 +58,57 @@ find_package(Threads REQUIRED)
 # Build options.  Declared BEFORE the <print> check below, which is guarded on
 # them: a guard that reads an option not yet declared is silently always false.
 # ---------------------------------------------------------------------------
-option(CHATWIRE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
-option(CHATWIRE_BUILD_TOOLS        "Build the injector, client and mock" ON)
-option(CHATWIRE_BUILD_TESTS        "Build the no-Minecraft test suite"   ON)
+option(CHATWIRE_WARNINGS_AS_ERRORS "Treat warnings as errors"              OFF)
+option(CHATWIRE_BUILD_TOOLS        "Build chatwire.exe (Windows)"          ON)
+option(CHATWIRE_BUILD_TESTS        "Build the no-Minecraft test suite"     ON)
+option(CHATWIRE_EMBED_DLL          "Carry chatwire.dll inside chatwire.exe" ON)
+
+# ---------------------------------------------------------------------------
+# Where things land.
+#
+# The build directory should contain the thing you came for.  Configure into
+# `build/etc` and the executables appear in `build/`, with every generated file
+# CMake and Ninja need -- the cache, the rules, the object tree, the logs --
+# kept one level down in `build/etc` where nobody has to look at them:
+#
+#     cmake -S . -B build/etc -G Ninja
+#     cmake --build build/etc
+#     build/chatwire.exe
+#
+# It has to be this way round.  CMakeCache.txt, CMakeFiles/ and build.ninja are
+# not relocatable -- they live in the binary directory by definition -- so the
+# only way to keep them out of a directory is to make that directory the PARENT
+# of the binary one.  Hence `etc`: the name is the agreed marker, and it is the
+# only thing this branch keys on.
+#
+# Configuring straight into `build` still works and puts everything together,
+# which is the ordinary CMake behaviour and what a tool that invokes cmake
+# itself will expect.
+#
+# The DLL is an INTERMEDIATE on Windows now: it is carried inside the exe, so it
+# goes wherever the object files go rather than sitting next to the binary
+# pretending it is something you need to keep.
+# ---------------------------------------------------------------------------
+get_filename_component(CHATWIRE_BINARY_LEAF "${CMAKE_BINARY_DIR}" NAME)
+if(CHATWIRE_BINARY_LEAF STREQUAL "etc")
+    get_filename_component(CHATWIRE_OUTPUT_DIR "${CMAKE_BINARY_DIR}/.." ABSOLUTE)
+else()
+    set(CHATWIRE_OUTPUT_DIR "${CMAKE_BINARY_DIR}")
+endif()
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CHATWIRE_OUTPUT_DIR}")
+# Import libraries and static archives are build inputs, never deliverables.
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
+# The DLL's own destination is set on the target, not here: on Windows a shared
+# library's .dll is its RUNTIME artifact (the .lib is the "library" one), so the
+# global LIBRARY_OUTPUT_DIRECTORY would not move it and the global RUNTIME one
+# would drag every executable along with it.
+if(WIN32 AND CHATWIRE_EMBED_DLL)
+    set(CHATWIRE_DLL_OUTPUT_DIR "${CMAKE_BINARY_DIR}/lib")
+else()
+    set(CHATWIRE_DLL_OUTPUT_DIR "${CHATWIRE_OUTPUT_DIR}")
+endif()
 
 # ---------------------------------------------------------------------------
 # <print>, which is the one C++23 library feature this project actually leans on
@@ -203,7 +251,11 @@ add_library(chatwire SHARED ${CHATWIRE_ENTRY})
 target_link_libraries(chatwire PRIVATE chatwire::chatwire)
 set_target_properties(chatwire PROPERTIES
     PREFIX ""                       # chatwire.dll/.so/.dylib, never libchatwire
-    OUTPUT_NAME "chatwire")
+    OUTPUT_NAME "chatwire"
+    # Both, because which one applies is platform-dependent: RUNTIME is the
+    # .dll on Windows, LIBRARY is the .so / .dylib everywhere else.
+    RUNTIME_OUTPUT_DIRECTORY "${CHATWIRE_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY "${CHATWIRE_DLL_OUTPUT_DIR}")
 chatwire_apply_warnings(chatwire)
 
 if(WIN32)
@@ -243,15 +295,21 @@ endif()
 # ---------------------------------------------------------------------------
 # Tools.
 # ---------------------------------------------------------------------------
+#
+# There is ONE tool: chatwire.exe, which is the library plus the thing that puts
+# it into the game.  The consumer side is Python and lives in python/ -- it needs
+# no build step, and a client that has to be compiled is a poor advertisement for
+# an API whose whole claim is "anything that speaks WebSocket".
+#
 if(CHATWIRE_BUILD_TOOLS)
-    # Accumulated as the targets are declared, because which tools exist is
-    # platform-dependent: chatwire-inject is Windows-only.
-    set(CHATWIRE_TOOLS chatwire-mock chatwire-client)
-
     # chatwire-preload is a shell script, not a target: it sets two environment
     # variables and execs the game, and a compiled program to do that would only
     # be harder to read.  Copied next to the library because that is where it
     # looks for it -- see the script.
+    #
+    # This is the POSIX counterpart of chatwire.exe, not a demo: without it the
+    # .so and .dylib have no way into a game at all.  See the README on why
+    # attaching to a RUNNING process is Windows-only.
     if(NOT WIN32)
         add_custom_command(TARGET chatwire POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -270,45 +328,67 @@ if(CHATWIRE_BUILD_TOOLS)
     # where a hardened-runtime JVM refuses it outright.  Elsewhere chatwire is
     # preloaded at launch instead; see src/soload.cpp and the README.
     if(WIN32)
-        add_executable(chatwire-inject tools/injector.cpp)
-        target_include_directories(chatwire-inject PRIVATE
+        # The target is chatwire_exe and the FILE is chatwire.exe: two CMake
+        # targets cannot share a name, but chatwire.dll and chatwire.exe are
+        # different files and may.
+        add_executable(chatwire_exe tools/injector.cpp)
+        set_target_properties(chatwire_exe PROPERTIES OUTPUT_NAME "chatwire")
+        target_include_directories(chatwire_exe PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/include")
-        chatwire_apply_warnings(chatwire-inject)
-        list(APPEND CHATWIRE_TOOLS chatwire-inject)
-    endif()
+        chatwire_apply_warnings(chatwire_exe)
 
-    # The mock serves chatwire's protocol with synthetic chat, so a consumer can
-    # be built and tested without a Minecraft client open.  It links the REAL
-    # server and JSON, which is what keeps its wire format from drifting.
-    add_executable(chatwire-mock tools/mock.cpp)
-    target_link_libraries(chatwire-mock PRIVATE chatwire::chatwire)
-    chatwire_apply_warnings(chatwire-mock)
+        # -------------------------------------------------------------------
+        # The library, carried INSIDE the executable.
+        #
+        # A Windows resource rather than a generated C array, because the
+        # linker just copies the bytes in: a 3 MB DLL turned into a source
+        # file is a 20 MB source file, and every rebuild of the library makes
+        # the compiler chew through it again.
+        #
+        # The .rc names an absolute path in the BUILD tree, which the source
+        # tree cannot know, so it is configured at generate time.  Backslashes
+        # are doubled first: an .rc string escapes them the way C does, so a
+        # raw Windows path would turn \t into a tab.
+        # -------------------------------------------------------------------
+        if(CHATWIRE_EMBED_DLL)
+            enable_language(RC)
 
-    # The reference client speaks the protocol over a socket like any other
-    # consumer would -- it links no chatwire code on purpose, and takes the
-    # include path only for the socket and terminal shims.  If the reference
-    # client needed privileged access to the library, the API would not be one.
-    add_executable(chatwire-client tools/client.cpp)
-    target_include_directories(chatwire-client PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/include")
-    target_link_libraries(chatwire-client PRIVATE Threads::Threads)
-    if(WIN32)
-        target_link_libraries(chatwire-client PRIVATE ws2_32)
-    endif()
-    chatwire_apply_warnings(chatwire-client)
+            set(CHATWIRE_DLL_RC_PATH "${CHATWIRE_DLL_OUTPUT_DIR}/chatwire.dll")
+            string(REPLACE "/" "\\\\" CHATWIRE_DLL_RC_PATH "${CHATWIRE_DLL_RC_PATH}")
+            configure_file("${CMAKE_CURRENT_SOURCE_DIR}/tools/chatwire.rc.in"
+                           "${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc" @ONLY)
 
-    # Every tool that prints needs whatever <print> turned out to require; see
-    # the detection at the top of this file.
-    if(CHATWIRE_PRINT_LIBRARY)
-        foreach(tool ${CHATWIRE_TOOLS})
-            target_link_libraries(${tool} PRIVATE ${CHATWIRE_PRINT_LIBRARY})
-        endforeach()
-    endif()
+            target_sources(chatwire_exe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc")
 
-    if(MINGW)
-        foreach(tool ${CHATWIRE_TOOLS})
-            target_link_options(${tool} PRIVATE -static -static-libgcc -static-libstdc++)
-        endforeach()
+            # Two separate things, and BOTH are needed.  add_dependencies orders
+            # the two targets so the DLL exists before the resource compiler
+            # opens it; OBJECT_DEPENDS re-runs the resource compiler when the
+            # DLL's CONTENT changes, which ordering alone does not do -- without
+            # it, editing the library and rebuilding would relink an exe still
+            # carrying yesterday's bytes.  That is the exact stale-payload bug
+            # embedding the DLL was meant to make impossible.
+            # A plain path, not $<TARGET_FILE:chatwire>: OBJECT_DEPENDS is
+            # consumed by the generator before generator expressions are
+            # evaluated, so a genex here becomes a dependency on a file
+            # literally named "$<TARGET_FILE:chatwire>" and Ninja stops with
+            # "missing and no known rule to make it".
+            add_dependencies(chatwire_exe chatwire)
+            set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc"
+                PROPERTIES OBJECT_DEPENDS "${CHATWIRE_DLL_OUTPUT_DIR}/chatwire.dll")
+        endif()
+
+        # <print>, and whatever it turned out to need; see the top of this file.
+        if(CHATWIRE_PRINT_LIBRARY)
+            target_link_libraries(chatwire_exe PRIVATE ${CHATWIRE_PRINT_LIBRARY})
+        endif()
+
+        # Self-contained for the same reason the library is: this is a single
+        # file somebody is handed, and a missing libstdc++ DLL is an error
+        # message that looks nothing like its cause.
+        if(MINGW)
+            target_link_options(chatwire_exe PRIVATE
+                -static -static-libgcc -static-libstdc++)
+        endif()
     endif()
 endif()
 
@@ -327,6 +407,19 @@ if(CHATWIRE_BUILD_TESTS)
     endif()
     chatwire_apply_warnings(chatwire_test_server)
     add_test(NAME server COMMAND chatwire_test_server)
+
+    # The Python side is the only consumer that ships, so it is tested too --
+    # against a stub in tests/, not against a shipped fake.  Needs no build
+    # step and no packages; skipped rather than failed when there is no
+    # interpreter, since chatwire's own build has never required one.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME python
+                 COMMAND "${Python3_EXECUTABLE}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_python.py")
+    else()
+        message(STATUS "no Python 3 found; the Python client tests will not run")
+    endif()
 endif()
 
 message(STATUS "chatwire ${PROJECT_VERSION} - C++${CMAKE_CXX_STANDARD}, header-based, ${CHATWIRE_PLATFORM}")

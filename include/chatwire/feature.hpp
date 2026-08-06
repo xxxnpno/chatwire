@@ -67,6 +67,19 @@ namespace chatwire
            feature knows its own arguments and a shared schema would have to
            grow every time a feature did. */
         std::string_view body{};
+        /*
+            Which connection asked.  Zero when nothing did -- the console, a
+            test -- so a feature that needs an owner can refuse rather than
+            register something in nobody's name.
+
+            Almost no feature wants this: a reply goes back down the socket the
+            request arrived on, and the server handles that.  It matters for
+            anything that outlives the request, which today means `commands`:
+            a registered command belongs to the client that registered it, its
+            events go to that client alone, and it is withdrawn when that client
+            disconnects.
+        */
+        std::uint64_t client{ 0 };
     };
 
     /*

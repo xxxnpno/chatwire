@@ -12,6 +12,7 @@
 #include "chatwire/ansi.hpp"
 #include "chatwire/console.hpp"
 #include "chatwire/features/chat.hpp"
+#include "chatwire/features/commands.hpp"
 #include "chatwire/features/system.hpp"
 #include "chatwire/features/world.hpp"
 #include "chatwire/sdk.hpp"
@@ -48,6 +49,39 @@ namespace chatwire::detail
     inline auto broadcast_line(const std::string_view json_line) noexcept -> void
     {
         server_instance().broadcast(json_line);
+    }
+
+    /*
+        @brief The command sink: hands one command event to ONE client.
+        @details
+        The counterpart of broadcast_line, and deliberately not the same
+        function.  A chat line is something that happened to everyone watching;
+        a command belongs to the plugin that registered it, and delivering it
+        anywhere else would let one connected tool act on another's commands.
+
+        @return false when that client has gone, which the commands feature
+                treats as "let the line through to the server" rather than as an
+                error.
+    */
+    inline auto send_command_event(const std::uint64_t client,
+                                   const std::string_view json_event) noexcept -> bool
+    {
+        return server_instance().send_to(client, json_event);
+    }
+
+    /*
+        @brief Everything `system.stats` answers with, from every feature that
+               counts something.
+        @details
+        Composed HERE rather than in `system`, so that neither counter-keeping
+        feature has to include the other and `system` does not have to know how
+        many there are.  Each feature contributes JSON fields without braces;
+        this joins them and wraps once.
+    */
+    inline auto stats_json() -> std::string
+    {
+        return json::object(features::chat::stats_json() + ","
+                            + features::commands::stats_json());
     }
 
     /*
@@ -123,7 +157,8 @@ namespace chatwire::detail
         still reports it -- that is chatwire talking to its operator, not to the
         game.
     */
-    inline auto on_presence(const bool connected, const std::size_t total) noexcept -> void
+    inline auto on_presence(const bool connected, const std::uint64_t client,
+                            const std::size_t total) noexcept -> void
     {
         try
         {
@@ -135,6 +170,14 @@ namespace chatwire::detail
             }
             else
             {
+                // FIRST, and unconditionally: a plugin that has gone must stop
+                // owning commands immediately, whether or not chatwire is still
+                // running and before anything below can fail.  Leaving a name
+                // claimed by a dead client means the player types `/ping`, the
+                // line is swallowed, and nothing answers -- a game that has
+                // quietly stopped working, with no error anywhere.
+                features::commands::forget_client(client);
+
                 chatwire::console::event(std::format("client disconnected ({} left)", total));
                 if (live) { notify_in_game(std::format("a client disconnected ({} left)", total)); }
 
@@ -160,7 +203,8 @@ namespace chatwire::detail
         malformed messages get a shaped error rather than silence, because a
         client that gets nothing back cannot tell a typo from a hang.
     */
-    inline auto dispatch(const std::string_view request) noexcept -> std::string
+    inline auto dispatch(const std::uint64_t client, const std::string_view request) noexcept
+        -> std::string
     {
         const auto reply{ [](const bool ok, const std::string& body) -> std::string
         {
@@ -198,6 +242,9 @@ namespace chatwire::detail
             command parsed{};
             parsed.verb = cmd->substr(dot + 1u);
             parsed.body = request;
+            // Carried through so a feature that registers something on the
+            // caller's behalf knows whose behalf that is.  See command::client.
+            parsed.client = client;
 
             feature* const target{ registry::find(feature_name) };
             if (!target)
@@ -266,8 +313,9 @@ namespace chatwire
 
         // 2b. Register the features.  ADDING A FEATURE IS TWO LINES: the import
         //     at the top of this file, and one registry::add here.  Explicit
-        //     rather than self-registering — see features/chat.ixx for why.
+        //     rather than self-registering — see features/chat.hpp for why.
         registry::add(features::chat::instance());
+        registry::add(features::commands::instance());
         registry::add(features::system::instance());
         registry::add(features::world::instance());
 
@@ -310,6 +358,15 @@ namespace chatwire
 
 
 
+        // 4c. The command sink, BEFORE the features start.  Starting the
+        //     commands feature installs its detour on sendChatMessage, and from
+        //     that instant the game thread can be inside on_typed().  Nothing
+        //     is registered yet, so it would find no owner and let the line
+        //     through -- but installing the hook before its delivery route is a
+        //     window that exists for no reason, and windows like that are how
+        //     "it dropped exactly one message, once" bugs are made.
+        features::commands::set_sink(&detail::send_command_event);
+
         // 5. Features.  Installing a hook is metaspace work rather than a Java
         //    call, so it is safe on this thread and does not go through the
         //    pump -- and doing it here means a feature that fails is reported
@@ -325,6 +382,7 @@ namespace chatwire
         if (!detail::server_instance().start(bind_port, &detail::dispatch, &detail::on_presence))
         {
             log::error("websocket server failed to start; shutting down");
+            features::commands::set_sink(nullptr);
             registry::stop_all();
             sdk::remove_hooks();
             // Same reason as the detach at the end of stop(): a failed start
@@ -339,11 +397,11 @@ namespace chatwire
         features::system::set_status_port(detail::server_instance().port());
         features::system::set_can_call(sdk::can_call_into_game());
         features::system::set_client_counter(&chatwire::client_count);
-        // `system.stats` answers with the chat feature's counters.  The host
-        // wires the two together so that neither feature includes the other --
-        // the numbers live where they are counted, and are reported where the
-        // rest of chatwire's self-reporting is.
-        features::system::set_stats_source(&features::chat::stats_json);
+        // `system.stats` answers with every counter-keeping feature's numbers,
+        // joined here.  The host wires them together so that no feature has to
+        // include another -- the numbers live where they are counted, and are
+        // reported where the rest of chatwire's self-reporting is.
+        features::system::set_stats_source(&detail::stats_json);
 
         chatwire::console::banner(chatwire::version, detail::server_instance().port(),
                                   mapping::mode_name(mode));
@@ -422,6 +480,11 @@ namespace chatwire
         detail::server_instance().stop();
         features::chat::set_sink(nullptr);
         features::chat::set_console_sink(nullptr);
+        // Cleared AFTER the server has gone, like the chat sink: while clients
+        // still exist there is still somewhere for a command to be delivered,
+        // and clearing this early would make the interceptor let a claimed
+        // command through to the server instead.
+        features::commands::set_sink(nullptr);
         features::system::set_client_counter(nullptr);
         features::system::set_stats_source(nullptr);
 

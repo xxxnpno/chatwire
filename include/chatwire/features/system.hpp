@@ -47,11 +47,13 @@ namespace chatwire::features
         @brief Where `system.stats` gets its numbers.
         @details
         Returns a ready-made JSON object.  The counters belong to whichever
-        feature keeps them -- today the chat feature's lines/sent/added -- and
-        `system` is where they are ANSWERED, because they are chatwire's own
-        bookkeeping rather than anything the game has a name for.  A function
-        pointer the host installs keeps that from becoming an include from one
-        feature into another.
+        features keep them -- the chat feature's lines/sent/added, the commands
+        feature's run/dropped -- and `system` is where they are ANSWERED,
+        because they are chatwire's own bookkeeping rather than anything the game
+        has a name for.  A function pointer the host installs keeps that from
+        becoming an include from one feature into another, and keeps the JOINING
+        of several features' counters out of here too: `system` reports one
+        object and does not need to know how many places it came from.
     */
     using stats_source = std::string (*)();
 

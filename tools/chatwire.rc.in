@@ -1,0 +1,17 @@
+/* chatwire.rc — the DLL, carried inside the executable.
+
+   chatwire.exe is meant to be one file you can hand to somebody: no folder, no
+   "keep these two together", no way to end up with an injector and a DLL from
+   different builds.  A Windows resource is how a PE image carries a payload,
+   and it costs nothing at build time -- the linker copies the bytes in, which
+   is not true of the usual alternative (generating a C array), where a 3 MB DLL
+   becomes a 20 MB source file the compiler then has to chew through.
+
+   RCDATA is the raw-bytes resource type: no parsing, no interpretation, exactly
+   what was on disk.  The path is substituted by CMake at configure time because
+   the DLL lives in the build tree, which the source tree cannot name.
+
+   Backslashes in the path are doubled by CMake before substitution: an .rc
+   string literal escapes them the way C does, so a raw Windows path would turn
+   \t into a tab and fail to open a file with a very confusing name. */
+CHATWIRE_DLL RCDATA "@CHATWIRE_DLL_RC_PATH@"
