@@ -28,107 +28,123 @@ there is nothing to keep together and no way to run a new injector against an ol
 
 ## Features
 
-Every command is the fully-qualified **Java member it reaches**, so you can check what you are
-getting against Minecraft's source rather than trusting a summary. Bind them once:
-
-```python
-import asyncio, json, websockets                # pip install websockets
-
-PLAYER  = "net.minecraft.client.entity.EntityPlayerSP."
-SEND    = PLAYER + "sendChatMessage"
-ADD     = PLAYER + "addChatMessage"
-PLAYERS = "net.minecraft.world.World.playerEntities"
-CHAT    = "net.minecraft.client.gui.GuiNewChat.printChatMessage"
-
-async def call(ws, cmd, **args):
-    await ws.send(json.dumps({"cmd": cmd, **args}))
-    reply = json.loads(await ws.recv())
-    if not reply["ok"]:
-        raise RuntimeError(reply["error"])
-    return reply["result"]
-```
+Every command is the fully-qualified **Java member it reaches**, so you can check it against
+Minecraft's source. Each example below is complete and runnable — `pip install websockets`.
 
 ### `sendChatMessage` — say it to the server
 
-Public. Other players see it, and a leading `/` runs a real command. Refused over 100 characters.
+Public, as if typed. A leading `/` runs a real command. Max 100 characters, and **plain text only**:
+a `§` on the wire gets the player kicked.
 
 ```python
-await call(ws, SEND, text="hello everyone")            # {'sent': True}
-```
+import asyncio, json, websockets
 
-**Plain text only.** A `§` colour code here goes out on the wire, where a vanilla server treats it
-as an illegal chat character and kicks the player. Colours are for `addChatMessage`.
+async def main():
+    async with websockets.connect("ws://127.0.0.1:24455") as ws:
+        await ws.send(json.dumps({
+            "cmd": "net.minecraft.client.entity.EntityPlayerSP.sendChatMessage",
+            "text": "hello everyone"}))
+        print(json.loads(await ws.recv()))       # {'ok': True, 'result': {'sent': True}}
+
+asyncio.run(main())
+```
 
 ### `addChatMessage` — say it only to this player
 
-Nothing is transmitted. Draws a line in the local chat box and nothing more. `§a` is green.
+Nothing is transmitted. `§a` is green.
 
 ```python
-await call(ws, ADD, text="§athis is client-side only")  # {'added': True}
-```
+import asyncio, json, websockets
 
-These two are the easiest thing in the API to confuse, which is why they are separate commands
-rather than one with a flag.
+async def main():
+    async with websockets.connect("ws://127.0.0.1:24455") as ws:
+        await ws.send(json.dumps({
+            "cmd": "net.minecraft.client.entity.EntityPlayerSP.addChatMessage",
+            "text": "§athis is client-side only"}))
+        print(json.loads(await ws.recv()))       # {'ok': True, 'result': {'added': True}}
+
+asyncio.run(main())
+```
 
 ### `playerEntities` — who the client has loaded
 
-Name and UUID come from the same object in one pass, so an entry's halves always belong together.
+Players near enough to exist as entities. Not the server's roster.
 
 ```python
-result = await call(ws, PLAYERS)
-for who in result["players"]:
-    print(who["name"], who["uuid"])
-```
+import asyncio, json, websockets
 
-Not the server's roster: these are the players near enough to exist as entities, which on a big
-server is a small fraction of the tab list. The command is the field it reads for that reason.
+async def main():
+    async with websockets.connect("ws://127.0.0.1:24455") as ws:
+        await ws.send(json.dumps({"cmd": "net.minecraft.world.World.playerEntities"}))
+        for who in json.loads(await ws.recv())["result"]["players"]:
+            print(who["name"], who["uuid"])
+
+asyncio.run(main())
+```
 
 ### `printChatMessage` — every line in the chat box
 
-Server messages, mod output, client-side replies, death messages. One hook catches all of it, so
-this is what the **player** saw, not what the network carried.
+Pushed, unprompted. Everything the **player** saw, including lines that never crossed the network.
+`formatted` keeps the `§` codes, `plain` strips them.
 
 ```python
-async for raw in ws:
-    event = json.loads(raw)
-    if event.get("type") == CHAT:
-        print(event["plain"])          # "formatted" keeps the § colour codes
+import asyncio, json, websockets
+
+CHAT = "net.minecraft.client.gui.GuiNewChat.printChatMessage"
+
+async def main():
+    async with websockets.connect("ws://127.0.0.1:24455") as ws:
+        async for raw in ws:
+            event = json.loads(raw)
+            if event.get("type") == CHAT:
+                print(event["plain"])
+
+asyncio.run(main())
 ```
 
 ### `commands.register` — add a command to the game
 
-Claim a name. From then on the player typing it does not reach the server: chatwire swallows the
-line and pushes it to you with the arguments split.
+Claim a name and the player typing it never reaches the server: chatwire swallows the line and
+pushes it to you, arguments split. The claim is dropped when the connection closes.
 
 ```python
-async def plugin():
+import asyncio, json, websockets
+
+TYPED = "net.minecraft.client.entity.EntityPlayerSP.sendChatMessage"
+ADD   = "net.minecraft.client.entity.EntityPlayerSP.addChatMessage"
+
+async def main():
     async with websockets.connect("ws://127.0.0.1:24455") as ws:
-        await call(ws, "commands.register", name="ping")
+        await ws.send(json.dumps({"cmd": "commands.register", "name": "ping"}))
 
         async for raw in ws:
             event = json.loads(raw)
-            if event.get("type") == SEND and event.get("command") == "ping":
+            if event.get("type") == TYPED and event.get("command") == "ping":
                 who = event["args"][0] if event["args"] else "world"
                 await ws.send(json.dumps({"cmd": ADD, "text": f"§apong, {who}"}))
 
-asyncio.run(plugin())
+asyncio.run(main())
 ```
 
-`/ping alpha` now prints `pong, alpha` in the chat box. Also `commands.unregister` and
-`commands.list`, both optional — a claim is dropped when the connection closes, so a crashed
-script cannot leave `/ping` swallowed with nobody left to answer.
+`/ping alpha` prints `pong, alpha`. Also `commands.unregister` and `commands.list`.
 
-Note that `sendChatMessage` is intercepted too: a client asking to say `/ping` is swallowed exactly
-as if the player had typed it. Do not name a plugin's output after a command it registered.
+`sendChatMessage` is intercepted too, so do not name a plugin's output after a command it claimed.
 
 ### `system.*` — chatwire itself
 
 ```python
-await call(ws, "system.status")   # version, mapping, port, clients, can_call
-await call(ws, "system.stats")    # lines seen, sent, added, commands run/dropped
-await call(ws, "system.ping")     # {'pong': True}
-await call(ws, "system.detach")   # stops chatwire; the connection then closes
+import asyncio, json, websockets
+
+async def main():
+    async with websockets.connect("ws://127.0.0.1:24455") as ws:
+        for verb in ("status", "stats", "ping"):
+            await ws.send(json.dumps({"cmd": f"system.{verb}"}))
+            print(verb, json.loads(await ws.recv())["result"])
+
+asyncio.run(main())
 ```
+
+`system.detach` stops chatwire; the connection then closes.
 
 ## An AI in the game
 
@@ -178,64 +194,47 @@ Java member to name them after and nothing for a reader to check.
 
 ## chatwire is not a proxy
 
-The usual way to automate Minecraft chat is a proxy — prismarine, `node-minecraft-protocol`, a
-server plugin. Those speak the **network protocol**. chatwire runs **inside the client**.
+A proxy (prismarine, `node-minecraft-protocol`, a server plugin) speaks the network protocol and
+can only see what was **transmitted**. Mod output, client-side command replies and warnings the
+client generated never cross the network, so no proxy can observe them. chatwire hooks the method
+that *renders* chat and sees both.
 
-The difference that matters: a proxy can only see what was **transmitted**. A large share of what
-appears in a Minecraft chat box never crossed the network — mod output, client-side command
-replies, warnings the client generated. Those begin and end inside the client, and no proxy can
-observe them. chatwire hooks the method that *renders* chat, so it sees both, in the order the
-player saw them, colour codes intact.
-
-Use a proxy for headless bots, multi-version support, or anything that must run with no game
-window — or on anything that is not Windows. Use chatwire when you care what the player saw, or
-when you are working with a client whose behaviour is not visible on the wire.
+Use a proxy for headless bots, multi-version support, or anything that is not Windows.
 
 ## Design notes
 
-**Calling the game from a socket thread.** A Java call needs a JavaThread, so the old rule was
-"only call Java from inside a hook" and chatwire carried a pump on `Minecraft.runTick`. There is no
-pump: vmhook enters Java from any thread, by pure VMStructs where the VM publishes a usable polling
-page (Java 8–20) and by minimal JNI everywhere else — including Java 17, which Lunar uses. Commands
-are synchronous and report what actually happened.
+**Any thread can call Java.** vmhook enters via pure VMStructs where the VM publishes a usable
+polling page (Java 8–20) and minimal JNI everywhere else, including Java 17. There is no pump and
+no tick to wait for, so commands are synchronous and report what happened.
 
-**What the VM permits is not what Minecraft permits.** `sendChatMessage` is genuinely thread-safe:
-it reaches `NetworkManager.sendPacket`, which hands off to the channel's event loop. `addChatMessage`
-races cosmetically — it inserts at the front of the lists the client renders from, and the worst
-outcome is one line drawn twice for a frame.
+**What the VM permits is not what Minecraft permits.** `sendChatMessage` is genuinely thread-safe —
+it hands off to the netty event loop. `addChatMessage` races cosmetically: worst case, one line
+drawn twice for a frame.
 
-**It runs inside someone's game**, so: no exception ever reaches the JVM; a client pays for its own
-commands; nothing blocks the game thread; hooks come down before anything unloads, with a wait,
-because removing them stops threads *entering* a trampoline but cannot evict one already inside.
-`system.detach` stops chatwire but leaves the library mapped — unloading it while a game thread
-might be inside produced a DEP violation on Minecraft's own thread, twice.
+**It runs inside someone's game.** No exception reaches the JVM. Nothing blocks the game thread.
+`system.detach` stops chatwire but leaves the module mapped — unloading while a game thread might
+be inside a trampoline produced a DEP violation on Minecraft's own thread, twice.
 
 **Swallowing a chat message needs a reason; letting one through needs none.** The command
-interceptor is the only hook that changes what the game does. Every failure in it ends with the
+interceptor is the only hook that changes what the game does, and every failure in it ends with the
 player's line going to the server.
 
-**Layering.** `src/chatwire/sdk.hpp` is the only header that includes vmhook (24k lines — putting it
-in more than one TU is more than today's compilers can take). `net.hpp` is the only one that
-includes Winsock. `chatwire.hpp` includes neither, so a consumer pays for neither.
+**Layering.** `sdk.hpp` is the only header that includes vmhook; `net.hpp` the only one that
+includes Winsock; `chatwire.hpp` neither.
 
 ## Security
 
-**The server binds `127.0.0.1` only, and that is not configurable.** This socket can send chat as
-the player and read everything they see. There is no authentication, and that is only defensible
-*because* of the bind address.
+**Binds `127.0.0.1` only, and that is not configurable.** This socket sends chat as the player and
+reads everything they see. There is no authentication, and that is only defensible because of the
+bind address.
 
-Chat text is attacker-controlled — any player can say anything — and it flows into the JSON
-chatwire emits, so output is escaped.
+Chat text is attacker-controlled and flows into the JSON chatwire emits, so output is escaped.
 
 ## Requirements
 
-- **Windows**, x86-64, on a HotSpot JVM. Configure refuses anything else rather than failing
-  later in a wall of missing headers.
-- **CMake 3.20+** and a C++23 compiler with a working `<print>`: GCC 14+ (developed against GCC
-  15.2 via MSYS2) or MSVC 19.37+.
-
-No package manager. `vmhook` is vendored in `ext/`; the only library linked is `ws2_32`. Python is
-needed only for the MCP server.
+**Windows**, x86-64, HotSpot JVM. **CMake 3.20+** and GCC 14+ (developed against GCC 15.2 via
+MSYS2) or MSVC 19.37+ — C++23 with a working `<print>`. No package manager; `vmhook` is vendored
+in `ext/` and the only library linked is `ws2_32`.
 
 | Option | |
 |---|---|
@@ -244,9 +243,8 @@ needed only for the MCP server.
 
 ## Status
 
-Chat and runtime commands work end to end, verified by injecting into a real Minecraft.
-[CI](.github/workflows/ci.yml) builds and checks that chatwire.exe comes out carrying its library;
-everything past that needs a live game and is checked by hand.
+Works end to end, verified by injecting into a real Minecraft. There is no CI: everything that
+matters here needs a live game.
 
 ## Licence
 
