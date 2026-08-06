@@ -115,7 +115,11 @@ asyncio.run(plugin())
 ```
 
 `/ping alpha` now prints `pong, alpha` in the chat box. Also `commands.unregister` and
-`commands.list`, both optional — a claim is dropped when the connection closes.
+`commands.list`, both optional — a claim is dropped when the connection closes, so a crashed
+script cannot leave `/ping` swallowed with nobody left to answer.
+
+Note that `sendChatMessage` is intercepted too: a client asking to say `/ping` is swallowed exactly
+as if the player had typed it. Do not name a plugin's output after a command it registered.
 
 ### `system.*` — chatwire itself
 
@@ -125,47 +129,6 @@ await call(ws, "system.stats")    # lines seen, sent, added, commands run/droppe
 await call(ws, "system.ping")     # {'pong': True}
 await call(ws, "system.detach")   # stops chatwire; the connection then closes
 ```
-
-## Plugins
-
-A plugin is a program holding a socket open. No plugin format, no manifest, nothing to compile,
-nothing to restart. Three steps, and chatwire only does the first two:
-
-**1. You register a name.**
-
-```json
-{"cmd":"commands.register","name":"ping"}
-```
-
-**2. chatwire pushes the invocation** when the player types it:
-
-```json
-{"type":"net.minecraft.client.entity.EntityPlayerSP.sendChatMessage",
- "command":"ping","args":["alpha","beta"],"raw":"/ping alpha beta"}
-```
-
-`args` is whitespace-split with empties dropped. `raw` is the line as typed — quoting is absent on
-purpose, since every quoting scheme differs and guessing wrong would mangle somebody's argument.
-
-**3. You answer however you like**, with an ordinary command:
-
-```json
-{"cmd":"net.minecraft.client.entity.EntityPlayerSP.addChatMessage","text":"pong"}
-```
-
-Step 3 is deliberately not chatwire's business. A canned reply built into the register call would
-be cheaper and is a language: it grows placeholders, then conditionals, and ends as a small
-interpreter nobody asked for.
-
-**A command belongs to the connection that registered it.** Its events go there alone — broadcasting
-would let every connected tool act on commands it did not register. Ownership is also why
-withdrawal is automatic: when a client disconnects its commands go with it, so a crashed plugin
-cannot leave `/ping` swallowed with nobody left to answer. If a claimed command cannot be delivered,
-the line goes to the server rather than being eaten; `system.stats` counts those as
-`commands_dropped`.
-
-**chatwire's own `sendChatMessage` is intercepted too.** A client asking to say `/ping` is swallowed
-exactly as if the player had typed it. Do not name a plugin's output after a registered command.
 
 ## An AI in the game
 
