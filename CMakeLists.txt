@@ -28,23 +28,17 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # ---------------------------------------------------------------------------
-# Platforms.
+# Windows only.
 #
-# chatwire builds on Windows, Linux and macOS.  What differs between them is not
-# the library -- every platform difference in it sits behind one of three
-# headers, chatwire/net.hpp, chatwire/module.hpp and chatwire/terminal.hpp --
-# but how it GETS INTO the game, which is why chatwire.exe is a Windows target
-# and the others reach the game through the loader.  See the README.
+# Not a gap in a port -- chatwire needs to load a library into a game that is
+# ALREADY RUNNING, and that is `CreateRemoteThread` + `LoadLibrary` here.  The
+# equivalents elsewhere are a debugger attaching to a live game (ptrace, on
+# Linux) or something a hardened-runtime JVM refuses outright (task_for_pid, on
+# macOS).  Refused at configure time rather than failing later in a wall of
+# missing headers.
 # ---------------------------------------------------------------------------
-if(WIN32)
-    set(CHATWIRE_PLATFORM "windows")
-elseif(APPLE)
-    set(CHATWIRE_PLATFORM "macos")
-elseif(UNIX)
-    set(CHATWIRE_PLATFORM "linux")
-else()
-    message(FATAL_ERROR
-        "chatwire supports Windows, Linux and macOS; this is none of them.")
+if(NOT WIN32)
+    message(FATAL_ERROR "chatwire is Windows-only.")
 endif()
 
 # Threads are used by every target here.  THREADS_PREFER_PTHREAD_FLAG asks for
@@ -189,26 +183,7 @@ target_include_directories(chatwire_lib PUBLIC
 target_link_libraries(chatwire_lib PUBLIC vmhook::vmhook Threads::Threads)
 target_compile_features(chatwire_lib PUBLIC cxx_std_23)
 
-# This archive is linked INTO a shared library, so its objects have to be
-# position-independent -- a static library is not PIC by default and CMake will
-# not infer it.  On Windows nothing notices, because a PE image is relocated
-# wholesale and there is no such distinction; on ELF the link fails outright:
-#
-#   relocation R_X86_64_TPOFF32 against symbol `...attached_by_us' can not be
-#   used when making a shared object; recompile with -fPIC
-#
-# TPOFF32 is a thread-local relocation, which is why vmhook's per-thread state
-# is what happened to name itself in the error.
-set_target_properties(chatwire_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-if(WIN32)
-    target_link_libraries(chatwire_lib PUBLIC ws2_32)
-else()
-    # dl: chatwire/module.hpp uses dladdr to find its own path on disk, the way
-    # the Windows build uses GetModuleHandleEx.  Folded into libc on glibc 2.34+
-    # and on macOS, still a separate library on anything older.
-    target_link_libraries(chatwire_lib PUBLIC ${CMAKE_DL_LIBS})
-endif()
+target_link_libraries(chatwire_lib PUBLIC ws2_32)
 
 # ---------------------------------------------------------------------------
 # Warnings.
@@ -240,13 +215,7 @@ chatwire_apply_warnings(chatwire_lib)
 # ---------------------------------------------------------------------------
 # The injectable DLL.
 # ---------------------------------------------------------------------------
-if(WIN32)
-    set(CHATWIRE_ENTRY src/dllmain.cpp)
-else()
-    set(CHATWIRE_ENTRY src/soload.cpp)
-endif()
-
-add_library(chatwire SHARED ${CHATWIRE_ENTRY})
+add_library(chatwire SHARED src/dllmain.cpp)
 target_link_libraries(chatwire PRIVATE chatwire::chatwire)
 set_target_properties(chatwire PROPERTIES
     PREFIX ""                       # chatwire.dll/.so/.dylib, never libchatwire
@@ -257,38 +226,19 @@ set_target_properties(chatwire PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CHATWIRE_DLL_OUTPUT_DIR}")
 chatwire_apply_warnings(chatwire)
 
-if(WIN32)
-    # A detached chatwire stays mapped in the game (see src/entry.hpp), which
-    # locks chatwire.dll against being overwritten.  Rename the old one out of
-    # the way before linking so "rebuild while Minecraft is open" just works.
-    # POSIX needs nothing here: unlinking a mapped file detaches the name from
-    # the inode the process is still running out of, so the link just succeeds.
-    add_custom_command(TARGET chatwire PRE_LINK
+# A detached chatwire stays mapped in the game (see src/entry.hpp), which locks
+# chatwire.dll against being overwritten.  Rename the old one out of the way
+# before linking so "rebuild while Minecraft is open" just works.
+add_custom_command(TARGET chatwire PRE_LINK
         COMMAND ${CMAKE_COMMAND} -DDLL=$<TARGET_FILE:chatwire>
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/unlock_output.cmake"
-        COMMENT "Moving any mapped chatwire.dll aside")
-endif()
+    COMMENT "Moving any mapped chatwire.dll aside")
 
 # Self-contained: loaded into a process whose library search path we do not
 # control, where a missing libstdc++/libgcc fails with an error that looks
-# nothing like its cause.  Only the GNU toolchains can do this -- Apple ships no
-# static libc++, and -static-libstdc++ is not a clang-on-macOS option.
+# nothing like its cause.
 if(MINGW)
     target_link_options(chatwire PRIVATE -static -static-libgcc -static-libstdc++)
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
-    target_link_options(chatwire PRIVATE -static-libgcc -static-libstdc++)
-endif()
-
-if(NOT WIN32)
-    # Default-hidden, so the only symbols the game's dynamic linker can see are
-    # the two this library exports on purpose.  It matters far more here than in
-    # an ordinary shared library: chatwire is PRELOADED, which puts it first in
-    # the lookup order, and a preloaded library exporting everything it happens
-    # to define is how an unrelated `start` or `log` silently interposes on the
-    # host program's own.
-    set_target_properties(chatwire PROPERTIES
-        CXX_VISIBILITY_PRESET hidden
-        VISIBILITY_INLINES_HIDDEN ON)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -302,93 +252,68 @@ endif()
 # "anything that speaks WebSocket".
 #
 if(CHATWIRE_BUILD_TOOLS)
-    # chatwire-preload is a shell script, not a target: it sets two environment
-    # variables and execs the game, and a compiled program to do that would only
-    # be harder to read.  Copied next to the library because that is where it
-    # looks for it -- see the script.
-    #
-    # This is the POSIX counterpart of chatwire.exe, not a demo: without it the
-    # .so and .dylib have no way into a game at all.  See the README on why
-    # attaching to a RUNNING process is Windows-only.
-    if(NOT WIN32)
-        add_custom_command(TARGET chatwire POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/chatwire-preload"
-                    "$<TARGET_FILE_DIR:chatwire>/chatwire-preload"
-            COMMAND ${CMAKE_COMMAND} -E chdir "$<TARGET_FILE_DIR:chatwire>"
-                    chmod +x chatwire-preload
-            COMMENT "Placing chatwire-preload beside the library")
-    endif()
-
     # The injector talks to the OS, not to chatwire -- but it does share the
     # config format, so it needs the include path (header-only, no link).
-    # Windows only, and that is a property of the platform rather than a gap in
-    # the port: attaching to a process that is ALREADY RUNNING needs
-    # CreateRemoteThread here, ptrace on Linux, and task_for_pid on macOS --
-    # where a hardened-runtime JVM refuses it outright.  Elsewhere chatwire is
-    # preloaded at launch instead; see src/soload.cpp and the README.
-    if(WIN32)
-        # The target is chatwire_exe and the FILE is chatwire.exe: two CMake
-        # targets cannot share a name, but chatwire.dll and chatwire.exe are
-        # different files and may.
-        add_executable(chatwire_exe tools/injector.cpp)
-        set_target_properties(chatwire_exe PROPERTIES OUTPUT_NAME "chatwire")
-        target_include_directories(chatwire_exe PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}/src")
-        chatwire_apply_warnings(chatwire_exe)
+    # The target is chatwire_exe and the FILE is chatwire.exe: two CMake
+    # targets cannot share a name, but chatwire.dll and chatwire.exe are
+    # different files and may.
+    add_executable(chatwire_exe tools/injector.cpp)
+    set_target_properties(chatwire_exe PROPERTIES OUTPUT_NAME "chatwire")
+    target_include_directories(chatwire_exe PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    chatwire_apply_warnings(chatwire_exe)
 
-        # -------------------------------------------------------------------
-        # The library, carried INSIDE the executable.
-        #
-        # A Windows resource rather than a generated C array, because the
-        # linker just copies the bytes in: a 3 MB DLL turned into a source
-        # file is a 20 MB source file, and every rebuild of the library makes
-        # the compiler chew through it again.
-        #
-        # The .rc names an absolute path in the BUILD tree, which the source
-        # tree cannot know, so it is configured at generate time.  Backslashes
-        # are doubled first: an .rc string escapes them the way C does, so a
-        # raw Windows path would turn \t into a tab.
-        # -------------------------------------------------------------------
-        if(CHATWIRE_EMBED_DLL)
-            enable_language(RC)
+    # -------------------------------------------------------------------
+    # The library, carried INSIDE the executable.
+    #
+    # A Windows resource rather than a generated C array, because the
+    # linker just copies the bytes in: a 3 MB DLL turned into a source
+    # file is a 20 MB source file, and every rebuild of the library makes
+    # the compiler chew through it again.
+    #
+    # The .rc names an absolute path in the BUILD tree, which the source
+    # tree cannot know, so it is configured at generate time.  Backslashes
+    # are doubled first: an .rc string escapes them the way C does, so a
+    # raw Windows path would turn \t into a tab.
+    # -------------------------------------------------------------------
+    if(CHATWIRE_EMBED_DLL)
+        enable_language(RC)
 
-            set(CHATWIRE_DLL_RC_PATH "${CHATWIRE_DLL_OUTPUT_DIR}/chatwire.dll")
-            string(REPLACE "/" "\\\\" CHATWIRE_DLL_RC_PATH "${CHATWIRE_DLL_RC_PATH}")
-            configure_file("${CMAKE_CURRENT_SOURCE_DIR}/tools/chatwire.rc.in"
-                           "${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc" @ONLY)
+        set(CHATWIRE_DLL_RC_PATH "${CHATWIRE_DLL_OUTPUT_DIR}/chatwire.dll")
+        string(REPLACE "/" "\\\\" CHATWIRE_DLL_RC_PATH "${CHATWIRE_DLL_RC_PATH}")
+        configure_file("${CMAKE_CURRENT_SOURCE_DIR}/tools/chatwire.rc.in"
+                       "${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc" @ONLY)
 
-            target_sources(chatwire_exe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc")
+        target_sources(chatwire_exe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc")
 
-            # Two separate things, and BOTH are needed.  add_dependencies orders
-            # the two targets so the DLL exists before the resource compiler
-            # opens it; OBJECT_DEPENDS re-runs the resource compiler when the
-            # DLL's CONTENT changes, which ordering alone does not do -- without
-            # it, editing the library and rebuilding would relink an exe still
-            # carrying yesterday's bytes.  That is the exact stale-payload bug
-            # embedding the DLL was meant to make impossible.
-            # A plain path, not $<TARGET_FILE:chatwire>: OBJECT_DEPENDS is
-            # consumed by the generator before generator expressions are
-            # evaluated, so a genex here becomes a dependency on a file
-            # literally named "$<TARGET_FILE:chatwire>" and Ninja stops with
-            # "missing and no known rule to make it".
-            add_dependencies(chatwire_exe chatwire)
-            set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc"
-                PROPERTIES OBJECT_DEPENDS "${CHATWIRE_DLL_OUTPUT_DIR}/chatwire.dll")
-        endif()
+        # Two separate things, and BOTH are needed.  add_dependencies orders
+        # the two targets so the DLL exists before the resource compiler
+        # opens it; OBJECT_DEPENDS re-runs the resource compiler when the
+        # DLL's CONTENT changes, which ordering alone does not do -- without
+        # it, editing the library and rebuilding would relink an exe still
+        # carrying yesterday's bytes.  That is the exact stale-payload bug
+        # embedding the DLL was meant to make impossible.
+        # A plain path, not $<TARGET_FILE:chatwire>: OBJECT_DEPENDS is
+        # consumed by the generator before generator expressions are
+        # evaluated, so a genex here becomes a dependency on a file
+        # literally named "$<TARGET_FILE:chatwire>" and Ninja stops with
+        # "missing and no known rule to make it".
+        add_dependencies(chatwire_exe chatwire)
+        set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc"
+            PROPERTIES OBJECT_DEPENDS "${CHATWIRE_DLL_OUTPUT_DIR}/chatwire.dll")
+    endif()
 
-        # <print>, and whatever it turned out to need; see the top of this file.
-        if(CHATWIRE_PRINT_LIBRARY)
-            target_link_libraries(chatwire_exe PRIVATE ${CHATWIRE_PRINT_LIBRARY})
-        endif()
+    # <print>, and whatever it turned out to need; see the top of this file.
+    if(CHATWIRE_PRINT_LIBRARY)
+        target_link_libraries(chatwire_exe PRIVATE ${CHATWIRE_PRINT_LIBRARY})
+    endif()
 
-        # Self-contained for the same reason the library is: this is a single
-        # file somebody is handed, and a missing libstdc++ DLL is an error
-        # message that looks nothing like its cause.
-        if(MINGW)
-            target_link_options(chatwire_exe PRIVATE
-                -static -static-libgcc -static-libstdc++)
-        endif()
+    # Self-contained for the same reason the library is: this is a single
+    # file somebody is handed, and a missing libstdc++ DLL is an error
+    # message that looks nothing like its cause.
+    if(MINGW)
+        target_link_options(chatwire_exe PRIVATE
+            -static -static-libgcc -static-libstdc++)
     endif()
 endif()
 

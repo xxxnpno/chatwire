@@ -2,8 +2,7 @@
 
 // chatwire.terminal — the two things a command-line tool must ask the OS.
 //
-// Both are Windows-only problems that POSIX solved by default, which is exactly
-// why they belong behind a call rather than behind an #if at each use:
+// Both are things a Windows console will not do until asked:
 //
 //   ANSI and UTF-8.  A Unix terminal has understood escape sequences and UTF-8
 //   for decades.  A Windows console understands neither until asked: without
@@ -21,11 +20,7 @@
 // none -- and lives in console.hpp.
 #include "chatwire/common.hpp"
 
-#if defined(_WIN32)
-    #include <windows.h>
-#else
-    #include <unistd.h>
-#endif
+#include <windows.h>
 
 namespace chatwire::terminal
 {
@@ -38,7 +33,6 @@ namespace chatwire::terminal
     */
     inline auto enable_ansi() noexcept -> void
     {
-#if defined(_WIN32)
         if (const ::HANDLE out{ ::GetStdHandle(STD_OUTPUT_HANDLE) };
             out != INVALID_HANDLE_VALUE)
         {
@@ -49,18 +43,13 @@ namespace chatwire::terminal
             }
         }
         (void)::SetConsoleOutputCP(CP_UTF8);
-#endif
     }
 
     /* @brief True when stdin is a terminal a human could press enter at. */
     [[nodiscard]] inline auto stdin_is_interactive() noexcept -> bool
     {
-#if defined(_WIN32)
         const ::HANDLE in{ ::GetStdHandle(STD_INPUT_HANDLE) };
         ::DWORD        mode{ 0 };
         return in != INVALID_HANDLE_VALUE && ::GetConsoleMode(in, &mode) != 0;
-#else
-        return ::isatty(STDIN_FILENO) == 1;
-#endif
     }
 }

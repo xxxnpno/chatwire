@@ -1,62 +1,16 @@
 // chatwire/console.hpp — the console attached to the injected game.
 //
-// ===========================================================================
-// TWO PLATFORMS, TWO VERY DIFFERENT PROBLEMS
-// ===========================================================================
-// On Windows a game launched through javaw.exe has NO console at all, so one
-// has to be created before anything can be printed -- and a created console
-// brings a close button that kills the game, which is the whole subject of the
-// next section.
+// A game launched through javaw.exe has NO console at all, so one has to be
+// created before anything can be printed -- and a created console brings a
+// close button that kills the game, which is the subject of the next section.
+// A game launched through java.exe already has one, and chatwire is a guest on
+// it: it prints and nothing more.
 //
-// On Linux and macOS none of that applies, and the difference is not a gap in
-// the port.  A process cannot conjure a terminal for itself: it inherits the
-// one it was launched from or it has none, and a library injected into someone
-// else's process has no business opening a window.  So on POSIX chatwire is
-// ALWAYS a guest on the game's own stdout -- which is precisely the "borrowed
-// console" case this file already had to handle on Windows, for a game started
-// from java.exe rather than javaw.exe.  It prints, and that is all: it never
-// reads stdin (that belongs to whatever launched the game) and it installs no
-// signal handler (process-wide signal disposition belongs to the host program,
-// for the same reason chatwire suppresses SIGPIPE per-socket rather than
-// per-process -- see net.hpp).  `detach` there lives on the websocket.
-//
-// ===========================================================================
-// WHY THE X IS DISABLED, AND WHAT TO DO INSTEAD  (Windows)
-// ===========================================================================
-// Closing a console window sends CTRL_CLOSE_EVENT to every process attached to
-// it, and Windows then TERMINATES those processes -- roughly five seconds later,
-// whatever the handler returns.  That is not something a handler can decline;
-// it is the documented behaviour of closing a console.
-//
-// The process attached to this console is Minecraft.  So a console with a
-// working close button is a button that kills the game, and no amount of
-// cleanup in a CTRL_CLOSE_EVENT handler changes that -- the cleanup runs, and
-// then the game dies anyway.
-//
-// chatwire therefore REMOVES the close button (which also disables Alt+F4, since
-// both route through SC_CLOSE), and gives you a command instead:
-//
-//     detach      unload chatwire cleanly and close this window
-//
-// That does what closing the window was meant to do -- stop chatwire, put the
-// hooks back, let go of the game -- and the game keeps running.
-//
-// The CTRL_CLOSE_EVENT handler is still installed, as a safety net for the paths
-// that can still reach it (Task Manager closing the window, a console host
-// crash).  It performs the same clean shutdown, so if the game is going to die
-// it at least dies with its hooks removed rather than with detours pointing into
-// a DLL that is being unloaded.
-#pragma once
-
 #include "chatwire/common.hpp"
 #include "chatwire/ansi.hpp"
 #include "chatwire/log.hpp"
 
-#if defined(_WIN32)
     #include <windows.h>
-#else
-    #include <unistd.h>
-#endif
 
 namespace chatwire::console
 {
@@ -107,11 +61,6 @@ namespace chatwire::console
             Falls back to stdout when there is no console handle, which is the case
             for the tools that share this header but run in an ordinary terminal.
 
-            None of this exists off Windows: a POSIX terminal has been UTF-8 for
-            decades and takes bytes, so the fallback path IS the implementation
-            there.  The only decision left is whether to keep the escapes, and
-            that is answered by asking whether stdout is a terminal at all --
-            chatwire's output is often being redirected into the launcher's log.
         */
         inline auto write_line(const std::string_view utf8) noexcept -> void
         {
@@ -121,10 +70,6 @@ namespace chatwire::console
                                             ? std::string{ utf8 }
                                             : strip_ansi(utf8) };
 
-#if !defined(_WIN32)
-                std::fprintf(stdout, "%.*s\n", static_cast<int>(text.size()), text.data());
-                std::fflush(stdout);
-#else
                 const HANDLE out{ ::GetStdHandle(STD_OUTPUT_HANDLE) };
                 DWORD        mode{ 0 };
                 if (out == INVALID_HANDLE_VALUE || out == nullptr || !::GetConsoleMode(out, &mode))
@@ -150,7 +95,6 @@ namespace chatwire::console
                 DWORD written{ 0 };
                 (void)::WriteConsoleW(out, wide.data(), static_cast<DWORD>(wide.size()),
                                       &written, nullptr);
-#endif
             }
             catch (...) { }
         }
@@ -200,15 +144,12 @@ namespace chatwire::console
             }
         }
 
-#if defined(_WIN32)
         /*
             @brief The safety net for closes chatwire cannot refuse.
             @details
-            Windows only, and deliberately not mirrored with a SIGINT handler on
-            POSIX.  This one is installed on a console chatwire CREATED and owns;
-            a POSIX signal disposition is process-wide and belongs to the game,
-            and an injected library that quietly took over SIGINT would break
-            Ctrl+C for whoever launched it.
+            Installed only on a console chatwire CREATED and owns.  It is not
+            installed on a borrowed one: that window belongs to whoever launched
+            the game, and taking over its close button would be rude at best.
         */
         inline auto WINAPI ctrl_handler(const DWORD event) -> BOOL
         {
@@ -226,7 +167,6 @@ namespace chatwire::console
                 return FALSE;
             }
         }
-#endif
 
         /*
             @brief Reads console commands until `detach` or the console goes away.
@@ -302,20 +242,6 @@ namespace chatwire::console
     {
         if (detail::g_attached.load(std::memory_order_acquire)) { return true; }
 
-#if !defined(_WIN32)
-        // POSIX: there is nothing to allocate and nothing to own.  chatwire
-        // writes to whatever stdout the game was given -- see the file header --
-        // so the only question is whether escapes will be rendered or read as
-        // literal text by whatever is capturing that stream.
-        (void)on_detach;
-        detail::g_owned.store(false, std::memory_order_release);
-        detail::g_colour.store(::isatty(STDOUT_FILENO) == 1, std::memory_order_release);
-        detail::g_attached.store(true, std::memory_order_release);
-        chatwire::log::warn("console: sharing the game's output - chat will appear "
-                            "here, but send system.detach over the websocket to "
-                            "unload");
-        return true;
-#else
         const bool had_console{ ::GetConsoleWindow() != nullptr };
         if (!had_console && !::AllocConsole()) { return false; }
         const bool owned{ !had_console };
@@ -389,7 +315,6 @@ namespace chatwire::console
                                 "'detach' will not work");
         }
         return true;
-#endif
     }
 
     /* @brief Writes one line to the console.  See detail::write_line. */
@@ -455,12 +380,6 @@ namespace chatwire::console
     {
         if (!detail::g_attached.exchange(false, std::memory_order_acq_rel)) { return; }
 
-#if !defined(_WIN32)
-        // Nothing was taken, so there is nothing to give back: no console was
-        // allocated, no handler installed, and no reader started on a stdin that
-        // belongs to whoever launched the game.
-        return;
-#else
         // Unhook the CTRL handler before anything else: it is a function in this
         // module, and the module is about to stop existing.
         (void)::SetConsoleCtrlHandler(&detail::ctrl_handler, FALSE);
@@ -519,6 +438,5 @@ namespace chatwire::console
             (void)::DrawMenuBar(window);
         }
         (void)::FreeConsole();
-#endif
     }
 }

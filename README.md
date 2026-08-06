@@ -1,14 +1,13 @@
 # chatwire
 
-A live WebSocket API into a running **Minecraft 1.8.9** client. Run one exe, connect a socket, and
-read and drive the game from any language.
-
-You can also **add commands to the game while it runs**: claim `/ping` over the socket and chatwire
-stops the line before it reaches the server and hands it to you. See [Plugins](#plugins).
+A live WebSocket API into a running **Minecraft 1.8.9** client, on **Windows**. Run one exe,
+connect a socket, and read and drive the game from any language.
 
 C++23, built on [vmhook](https://github.com/xxxnpno/vmhook): HotSpot introspection, no JVMTI, no
 mod loader, minimal JNI. Handles all three 1.8.9 mappings (MCP/SRG/OBF), so it attaches to vanilla,
-Forge and Lunar the same way — and to whatever JVM they run on, Java 8 through 26.
+Forge and Lunar the same way — and to whatever JVM they run on, Java 8 through 26. It attaches to a
+game that is **already running**, which is why it is Windows-only — see
+[Why Windows only](#why-windows-only).
 
 ```
 ┌──────────────┐    ws://127.0.0.1:24455    ┌──────────────────────────────────┐
@@ -26,21 +25,6 @@ cmake --build build/etc
 
 `build/chatwire.exe` is the only file you need — the library is carried inside it as a resource, so
 there is nothing to keep together and no way to run a new injector against an old library.
-
-Start Minecraft, then:
-
-```
-> build\chatwire.exe
-
-  library: C:\...\Temp\chatwire\5d48b3d0\chatwire.dll   (built in)
-  target : pid 18244
-  port   : 24455
-
-  injected.  connect to  ws://127.0.0.1:24455
-```
-
-On Linux and macOS the library goes in at launch instead — see
-[Getting in](#getting-chatwire-into-the-game).
 
 ## Features
 
@@ -235,46 +219,27 @@ you can send; that is not a clash — `type` is what happened, `cmd` is what you
 `system` and `commands` are the only short prefixes. They reach nothing in the game, so there is no
 Java member to name them after and nothing for a reader to check.
 
-## Getting chatwire into the game
+## Why Windows only
 
-| | Windows | Linux | macOS |
-|---|---|---|---|
-| Attach to a game **already running** | ✅ `chatwire.exe` | ⚠️ possible, not implemented | ❌ refused by the OS |
-| Start the game **with** chatwire | ✅ | ✅ `chatwire-preload` | ✅ `chatwire-preload` |
-| Everything past that point | identical | identical | identical |
+chatwire loads a library into a game that is **already running**. Windows has a supported way to do
+that — `CreateRemoteThread` plus `LoadLibrary` — so you start Minecraft, run `chatwire.exe`, and
+you are attached.
 
-**Windows** has a supported way to load a library into another process — `CreateRemoteThread` plus
-`LoadLibrary` — so chatwire attaches to a game you are already playing.
+The other two are not a gap in a port:
 
-**Linux can do it**, and the ⚠️ is honest rather than polite: `ptrace` into the process and make it
-call `dlopen`, which is exactly what `gdb -p` does. It needs ptrace permission
-(`/proc/sys/kernel/yama/ptrace_scope` turned down, or root) and hand-written per-architecture code
-to hijack a thread. It is not shipped because the launch-time route costs one word on a command
-line and this one has a corrupted game as its failure mode — not because it cannot be done.
+- **Linux could.** `ptrace` into the process and make it call `dlopen`, which is what `gdb -p` does.
+  It needs ptrace permission and hand-written per-architecture code to hijack a thread, and its
+  failure mode is a corrupted game. Possible, not shipped.
+- **macOS cannot**, for the JVMs anyone actually plays on. It needs `task_for_pid`, which a
+  hardened-runtime binary refuses no matter who is asking, root included. Only disabling SIP
+  changes that, and nobody should disable SIP to read chat.
 
-**macOS genuinely cannot**, for the JVMs people actually play on. It needs `task_for_pid`, which a
-**hardened-runtime** binary refuses no matter who is asking, root included. Only disabling SIP
-changes that, and nobody should disable SIP to read chat.
+An earlier version reached the game at launch through `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES`. That
+worked, but it meant starting the game *through* chatwire — a different product from "attach to the
+game you are already playing", and two of them to keep working. It is gone.
 
-So off Windows chatwire goes in through the dynamic loader — `LD_PRELOAD` on Linux,
-`DYLD_INSERT_LIBRARIES` on macOS:
-
-```bash
-chatwire-preload [--port N] [--console] [--timeout SECONDS] -- <command to start the game>
-chatwire-preload -- java -jar launcher.jar
-```
-
-Being present before the JVM exists is fine: `chatwire::start` polls for Minecraft's classes with a
-timeout, because on Windows it already had to cope with being injected into a game on its launcher
-screen.
-
-**One macOS caveat.** `dyld` strips every `DYLD_*` variable when it execs a hardened binary. A JDK
-you unpacked yourself works; the `java` inside a signed launcher bundle does not, and the symptom
-is chatwire never appearing with no error anywhere.
-
-**After `system.detach`, on POSIX**, starting again means restarting the game: a second `LD_PRELOAD`
-is not something that can happen to a running process. On Windows, running `chatwire.exe` again
-wakes the resident copy.
+`system.detach` stops chatwire but leaves the module mapped; running `chatwire.exe` again wakes the
+resident copy. See [Design notes](#design-notes) for why it does not unload.
 
 ## All three mappings
 
@@ -306,40 +271,8 @@ observe them. chatwire hooks the method that *renders* chat, so it sees both, in
 player saw them, colour codes intact.
 
 Use a proxy for headless bots, multi-version support, or anything that must run with no game
-window. Use chatwire when you care what the player saw, or when you are working with a client
-whose behaviour is not visible on the wire.
-
-## Adding a feature
-
-One file, one line. A feature declares the classes it claims and a handler; routing, the socket,
-getting onto the game thread and the lifecycle already exist.
-
-```cpp
-// src/chatwire/features/inventory.hpp
-class inventory_feature final : public chatwire::feature
-{
-    auto name() const noexcept -> std::string_view override { return "inventory"; }
-
-    auto claims(std::string_view prefix) const noexcept -> bool override
-    {
-        return prefix == "net.minecraft.entity.player.InventoryPlayer";
-    }
-
-    auto start() noexcept -> bool override { return true; }
-    auto stop()  noexcept -> void override { }
-    auto handle(const chatwire::command& cmd) noexcept -> chatwire::response override
-    {
-        if (cmd.verb == "mainInventory") { return chatwire::response::success(R"({"items":[]})"); }
-        return chatwire::response::failure("unknown member");
-    }
-};
-```
-
-Then in `src/chatwire.cpp`: one `#include`, one `registry::add(...)`.
-
-`handle()` runs on the asking client's own socket thread and may call Java straight from it — the
-sdk attaches the thread to the VM first. That does **not** make Minecraft thread-safe: check
-whether the method you are calling tolerates being called off the client thread.
+window — or on anything that is not Windows. Use chatwire when you care what the player saw, or
+when you are working with a client whose behaviour is not visible on the wire.
 
 ## Design notes
 
@@ -365,8 +298,8 @@ interceptor is the only hook that changes what the game does. Every failure in i
 player's line going to the server.
 
 **Layering.** `src/chatwire/sdk.hpp` is the only header that includes vmhook (24k lines — putting it
-in more than one TU is more than today's compilers can take). `net.hpp` is the only one that knows
-sockets differ. `chatwire.hpp` includes neither, so a consumer pays for neither.
+in more than one TU is more than today's compilers can take). `net.hpp` is the only one that
+includes Winsock. `chatwire.hpp` includes neither, so a consumer pays for neither.
 
 ## Security
 
@@ -379,12 +312,13 @@ chatwire emits, so output is escaped.
 
 ## Requirements
 
-- **Windows, Linux or macOS**, x86-64 or arm64, on a HotSpot JVM.
-- **CMake 3.20+** and a C++23 compiler with a working `<print>`: GCC 14+, Clang 18+ with its own
-  libc++, or MSVC 19.37+. On macOS use Homebrew LLVM — the system Apple Clang has no `<print>`.
+- **Windows**, x86-64, on a HotSpot JVM. Configure refuses anything else rather than failing
+  later in a wall of missing headers.
+- **CMake 3.20+** and a C++23 compiler with a working `<print>`: GCC 14+ (developed against GCC
+  15.2 via MSYS2) or MSVC 19.37+.
 
-No package manager. `vmhook` is vendored in `ext/`; the only libraries linked are the platform's
-own. Python is needed only for the MCP server.
+No package manager. `vmhook` is vendored in `ext/`; the only library linked is `ws2_32`. Python is
+needed only for the MCP server.
 
 | Option | |
 |---|---|
@@ -393,10 +327,9 @@ own. Python is needed only for the MCP server.
 
 ## Status
 
-Chat and runtime commands work end to end. The game side is verified by injecting into a real
-Minecraft, which has been done on **Windows**. Linux and macOS build and load into a host process
-in [CI](.github/workflows/ci.yml) but have not been pointed at a real game; if you try it, mapping
-detection is the part most likely to surprise us.
+Chat and runtime commands work end to end, verified by injecting into a real Minecraft.
+[CI](.github/workflows/ci.yml) builds and checks that chatwire.exe comes out carrying its library;
+everything past that needs a live game and is checked by hand.
 
 ## Licence
 

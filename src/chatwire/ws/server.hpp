@@ -42,9 +42,8 @@
 //   * a client that stops reading cannot stall the game: writes are best-effort
 //     and a failed write closes that client rather than blocking the broadcaster.
 //
-// Sockets themselves are Winsock on Windows and BSD everywhere else; every
-// difference between them is resolved in chatwire/net.hpp and none of it leaks
-// into this file.
+// Winsock itself stays behind chatwire/net.hpp; none of it leaks into this
+// file.
 #include "chatwire/common.hpp"
 
 #include "chatwire/log.hpp"
@@ -270,22 +269,18 @@ namespace chatwire::ws
             point: nothing may join a thread that has not been given a way out,
             or join() hangs forever and the game freezes on unload.
 
-            The two waking mechanisms are NOT the same, and assuming they were is
-            what made the first version of this Windows-only:
+            The two waking mechanisms are NOT the same:
 
               * the ACCEPT thread leaves on its own.  It polls the listener with
                 a timeout and re-reads `running_` between polls, so clearing the
-                flag is enough.  Closing the listener under it -- which is what
-                this used to do, and which does wake accept() on Windows -- is on
-                POSIX both a hang and a use-after-free: the descriptor number is
-                handed back to the OS while a thread is still blocked on it, free
-                to be reused by any other thread that opens a file.  So the
-                listener is closed AFTER that thread is joined, never before.
+                flag is enough.  The listener is closed AFTER that thread is
+                joined, never before: closing a descriptor somebody is blocked on
+                hands its number back to the OS while it is still held.
 
-              * the CLIENT readers are woken by shutdown(), which does return a
-                blocked recv() on all three platforms.  shutdown() rather than
-                close(): the reader still owns the descriptor and closes it on
-                the way out, so again nobody frees a number somebody else holds.
+              * the CLIENT readers are woken by shutdown(), which returns a
+                blocked recv().  shutdown() rather than close(): the reader still
+                owns the descriptor and closes it on the way out, so again nobody
+                frees a number somebody else holds.
         */
         auto stop() noexcept -> void
         {

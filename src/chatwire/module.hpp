@@ -7,19 +7,15 @@
 // where it was loaded from.  See config.hpp for why the settings travel as a
 // file at all.
 //
-// Neither platform lets a library ask this question directly of itself; both
-// answer it by asking "which module contains this address?" and passing an
+// Windows does not let a DLL ask this directly of itself; it answers "which
+// module contains this address?", so the question is asked by passing an
 // address inside the library.  That is what `marker` below is for -- its own
 // address is the question.  A string literal would not do: literals can be
 // merged, folded into another section, or shared with a different module
 // entirely, and the answer would be that module's path.
 #include "chatwire/common.hpp"
 
-#if defined(_WIN32)
-    #include <windows.h>
-#else
-    #include <dlfcn.h>
-#endif
+#include <windows.h>
 
 namespace chatwire::module
 {
@@ -36,8 +32,8 @@ namespace chatwire::module
         config file" rather than as a failure -- a chatwire loaded by some means
         that leaves no path behind should still start on its defaults.
 
-        On Windows this deliberately takes the module handle by ADDRESS lookup
-        rather than from a DllMain-captured HMODULE.  The captured handle was
+        This deliberately takes the module handle by ADDRESS lookup rather
+        than from a DllMain-captured HMODULE.  The captured handle was
         fine but had to be threaded through every caller, and it does not exist
         at all in a build with no DllMain -- the test binaries, for one.
 
@@ -50,7 +46,6 @@ namespace chatwire::module
     {
         try
         {
-#if defined(_WIN32)
             ::HMODULE self{ nullptr };
             if (!::GetModuleHandleExA(
                     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
@@ -64,15 +59,6 @@ namespace chatwire::module
             const ::DWORD n{ ::GetModuleFileNameA(self, buffer, MAX_PATH) };
             if (n == 0u || n >= MAX_PATH) { return {}; }
             return std::string{ buffer, n };
-#else
-            ::Dl_info info{};
-            if (::dladdr(reinterpret_cast<const void*>(&detail::marker), &info) == 0
-                || info.dli_fname == nullptr)
-            {
-                return {};
-            }
-            return std::string{ info.dli_fname };
-#endif
         }
         catch (...) { return {}; }
     }
@@ -80,9 +66,9 @@ namespace chatwire::module
     /*
         @brief `<the directory this library is in>/<name>`.
         @details
-        Splits on both separators regardless of platform: a Windows path can
-        legally contain forward slashes, and a path that arrived from a config
-        file or a launcher often does.
+        Splits on both separators: a Windows path can legally contain forward
+        slashes, and one that arrived from a config file or a launcher often
+        does.
     */
     [[nodiscard]] inline auto sibling(const std::string_view name) noexcept -> std::string
     {

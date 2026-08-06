@@ -44,12 +44,11 @@ namespace chatwire::config
         /*
             @brief Seconds to wait for Minecraft's classes.  0 means "unset".
             @details
-            Matters much more when chatwire arrives through LD_PRELOAD than when
-            it is injected: preloading puts it in the process before the JVM
-            exists, so the wait covers the whole of start-up rather than the
-            moment between "the game is running" and "the classes are loaded".
-            A launcher that sits on a login screen can outlast any fixed default,
-            which is why this is reachable from the environment.
+            Covers the gap between "the game's process exists" and "Minecraft's
+            classes are loaded", which is the whole of a launcher's start-up if
+            chatwire is run against a game still sitting on its login screen.
+            That can outlast any fixed default, which is why this is reachable
+            from the environment.
         */
         std::uint32_t timeout_seconds{ 0 };
     };

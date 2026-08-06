@@ -1,13 +1,9 @@
 # chatwire CI.
 #
-# This file exists because chatwire claims to build on three platforms and the
-# author has one.  A claim like that is worth exactly as much as the machine
-# that checks it, so every platform in the README is a job here.
-#
-# It checks that chatwire compiles on a compiler that is not the author's, and
-# that the shared library actually loads.  Everything that needs a running
-# Minecraft -- the mappings, the hooks, every Java call -- is verified by
-# injecting into a real game, by hand.
+# One job, because chatwire is Windows-only.  It checks that the thing compiles
+# on a machine that is not the author's and that chatwire.exe comes out carrying
+# its library.  Everything that needs a running Minecraft -- the mappings, the
+# hooks, every Java call -- is verified by injecting into a real game, by hand.
 name: ci
 
 on:
@@ -18,52 +14,16 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # One platform failing should not hide the other two.
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-gcc14
-            os: ubuntu-latest
-          - name: macos-clang
-            os: macos-latest
-          - name: windows-mingw
-            os: windows-latest
+    name: windows-mingw
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      # GCC 14, not the distribution default: <print> is a C++23 library feature
-      # that GCC 13 does not have, and chatwire's tools use std::println.
-      - name: Install GCC 14 and Ninja (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y g++-14 ninja-build
-          echo "CC=gcc-14"  >> "$GITHUB_ENV"
-          echo "CXX=g++-14" >> "$GITHUB_ENV"
-
-      # Homebrew LLVM, not Apple Clang: the system compiler on a current macOS
-      # still ships a libc++ without <print>, and configure refuses rather than
-      # failing later in a wall of template output.  -DCMAKE_CXX_FLAGS points it
-      # at its own headers and libraries instead of the SDK's.
-      - name: Install LLVM and Ninja (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          brew install llvm ninja
-          PREFIX="$(brew --prefix llvm)"
-          echo "CC=$PREFIX/bin/clang"    >> "$GITHUB_ENV"
-          echo "CXX=$PREFIX/bin/clang++" >> "$GITHUB_ENV"
-          echo "LDFLAGS=-L$PREFIX/lib/c++ -L$PREFIX/lib -Wl,-rpath,$PREFIX/lib/c++" \
-              >> "$GITHUB_ENV"
-
       # MSYS2 rather than MSVC: it is the toolchain chatwire is developed
-      # against, so a green Windows job here means the same thing the author's
-      # machine means.
-      - name: Install MSYS2 toolchain (Windows)
-        if: matrix.os == 'windows-latest'
+      # against, so a green job here means the same thing the author's machine
+      # means.
+      - name: Install MSYS2 toolchain
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -73,18 +33,7 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
 
-      - name: Configure and build (POSIX)
-        if: matrix.os != 'windows-latest'
-        run: |
-          # Not -DCHATWIRE_WARNINGS_AS_ERRORS=ON.  chatwire's own TUs include
-          # vmhook, and -Werror on a 26k-line third-party header turns somebody
-          # else's diagnostic -- or the standard library's own inlining noise --
-          # into a red build for this project.  Warnings are still printed.
-          cmake -S . -B build/etc -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build/etc
-
-      - name: Configure and build (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Configure and build
         shell: msys2 {0}
         run: |
           # Not -DCHATWIRE_WARNINGS_AS_ERRORS=ON.  chatwire's own TUs include
@@ -94,18 +43,12 @@ jobs:
           cmake -S . -B build/etc -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build/etc
 
-      # The one check that actually exercises how chatwire GETS INTO a game on
-      # these platforms.  Preloading it into /bin/sh is not a Minecraft, and the
-      # library will sit there waiting for classes that never arrive -- but the
-      # dynamic loader still has to MAP it, resolve every symbol it imports, and
-      # run its initialiser.  A .so with an unresolved symbol fails right here,
-      # loudly, which is the failure this project is most likely to ship: the
-      # Windows build links against a static libstdc++ and would not have told
-      # us.  CHATWIRE_TIMEOUT keeps the doomed start-up poll short.
-      - name: The library actually preloads (POSIX)
-        if: matrix.os != 'windows-latest'
-        timeout-minutes: 2
+      # The exe carries the DLL as a resource, and a build where that silently
+      # did not happen would still produce a working-looking chatwire.exe --
+      # right up until somebody ran it on a machine with no build tree.  So the
+      # size is checked: the injector on its own is nowhere near this big.
+      - name: chatwire.exe carries its library
+        shell: msys2 {0}
         run: |
-          ./build/chatwire-preload --timeout 1 --port 9001 -- \
-              sh -c 'echo "PORT=$CHATWIRE_PORT"' | tee pre.txt
-          grep -q "PORT=9001" pre.txt
+          ls -l build/chatwire.exe
+          test "$(stat -c%s build/chatwire.exe)" -gt 5000000

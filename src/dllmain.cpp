@@ -1,6 +1,5 @@
 // dllmain — the Windows injection entry point.
 //
-// Compiled on Windows only; src/soload.cpp is the Linux and macOS counterpart.
 // Everything both of them do once they are off the loader lock lives in
 // src/entry.hpp, including the argument for why chatwire never unloads itself.
 //

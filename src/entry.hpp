@@ -1,20 +1,13 @@
 #pragma once
 
-// entry — everything the two loader entry points have in common.
+// entry — what DllMain does once it is off the loader lock.
 //
-// chatwire is woken by its platform's loader: DllMain on Windows, an ELF/Mach-O
-// initialiser on Linux and macOS.  Those two are genuinely different and get a
-// file each (src/dllmain.cpp, src/soload.cpp).  Everything they then DO is the
-// same, and lives here rather than being written twice and drifting.
-//
-// The rule both entry points obey is also the same, and it is the only thing
-// about loader callbacks worth memorising: THEY RUN UNDER THE LOADER LOCK.
-// Anything that waits, starts a thread and joins it, allocates through another
-// module, or calls into the JVM can deadlock the whole process there -- and
-// chatwire's start-up does most of those.  So each entry point spawns a thread
-// and returns, and every piece of real work happens on that thread, outside the
-// lock.  Windows calls it the loader lock and POSIX calls it dl_load_lock; the
-// hazard is identical.
+// The one thing about loader callbacks worth memorising: DllMain RUNS UNDER THE
+// LOADER LOCK.  Anything that waits, starts a thread and joins it, allocates
+// through another module, or calls into the JVM can deadlock the whole process
+// there -- and chatwire's start-up does most of those.  So src/dllmain.cpp
+// spawns a thread and returns, and everything below happens on that thread,
+// outside the lock.
 #include "chatwire/chatwire.hpp"
 #include "chatwire/config.hpp"
 #include "chatwire/console.hpp"
@@ -23,9 +16,7 @@
 
 #include <cstdlib>
 
-#if defined(_WIN32)
-    #include <windows.h>
-#endif
+#include <windows.h>
 
 namespace chatwire::entry
 {
@@ -53,10 +44,8 @@ namespace chatwire::entry
            environment is fixed at creation, so a flag cannot be delivered as an
            environment variable to something already running.
         2. CHATWIRE_PORT / CHATWIRE_CONSOLE / CHATWIRE_BACKGROUND /
-           CHATWIRE_VERBOSE in the game's own environment, for anyone launching
-           the game themselves -- which on Linux and macOS is the ordinary way
-           in, since chatwire arrives there through LD_PRELOAD or
-           DYLD_INSERT_LIBRARIES on a command line the user wrote.
+           CHATWIRE_VERBOSE in the game's own environment, for anyone who
+           launches the game themselves and can set them beforehand.
         3. The defaults.
     */
     [[nodiscard]] inline auto load_settings() noexcept -> chatwire::config::settings
@@ -135,14 +124,11 @@ namespace chatwire::entry
         so there is no instant at which unloading is provably safe while the game
         is running.  Waiting first only shrinks the window.
 
-        The argument is not Windows-specific and neither is the conclusion:
-        dlclose() on Linux and macOS unmaps exactly the same way, and a thread
-        inside a trampoline dies exactly the same way.  So chatwire stops but
-        stays mapped on all three.  What that costs is about a megabyte of
-        address space until the game exits.  What it buys is that `system.detach`
-        cannot kill the process it is detaching from -- and everything observable
-        is gone either way: the socket is closed, the hooks are out, and start()
-        can be called again.
+        So chatwire stops but stays mapped.  What that costs is about a
+        megabyte of address space until the game exits.  What it buys is that
+        `system.detach` cannot kill the process it is detaching from -- and
+        everything observable is gone either way: the socket is closed, the
+        hooks are out, and start() can be called again.
     */
     inline auto detach_worker() noexcept -> void
     {
@@ -165,7 +151,6 @@ namespace chatwire::entry
     */
     inline auto request_detach() noexcept -> void
     {
-#if defined(_WIN32)
         // A raw CreateThread rather than a detached std::thread, and that is a
         // deliberate holdover: std::thread's trampoline is code in THIS module,
         // so a detached one is a thread executing here after the object that
@@ -177,17 +162,6 @@ namespace chatwire::entry
             [](::LPVOID) noexcept -> ::DWORD { detach_worker(); return 0u; },
             nullptr, 0, nullptr) };
         if (thread != nullptr) { (void)::CloseHandle(thread); }
-#else
-        try
-        {
-            std::thread{ &detach_worker }.detach();
-        }
-        catch (...)
-        {
-            chatwire::log::error("could not start the detach thread; chatwire is "
-                                 "still running");
-        }
-#endif
     }
 
     /*
