@@ -6,20 +6,31 @@ project(chatwire
     LANGUAGES    CXX)
 
 # ---------------------------------------------------------------------------
-# C++23, header-based.
+# C++26, header-based.
 #
-# chatwire was originally built as C++26 named modules.  That is gone: GCC 15
-# and Clang 19 both fall over on this shape -- segfaults instantiating vmhook
-# inside a module, a hard failure for any TU that both imports a module and
-# includes <windows.h>, duplicate symbols from module-attached inline statics.
-# None of it was a defect in this code, and all of it was time spent on the
-# build rather than on the library.
+# chatwire was originally built as C++26 named MODULES.  That is still gone, and
+# the reasons have not changed: GCC 15 and Clang 19 both fell over on that shape
+# -- segfaults instantiating vmhook inside a module, a hard failure for any TU
+# that both imports a module and includes <windows.h>, duplicate symbols from
+# module-attached inline statics.  Headers build with no workarounds, and the
+# layering the modules forced -- one boundary for vmhook, one for Winsock --
+# survives as ordinary include discipline.
 #
-# Headers build everywhere, today, with no workarounds.  The layering the
-# modules forced -- one boundary for vmhook, one for Winsock -- was worth
-# keeping, and survives as ordinary include discipline.
+# What HAS changed is the language level.  chatwire is C++26 for one feature it
+# actually uses: static reflection (P2996).  Every JSON object this project puts
+# on the wire is now a struct whose field names ARE its member names, written by
+# chatwire/json.hpp walking `std::meta::nonstatic_data_members_of`.  What that
+# replaced was a positional `std::format("{},{},{}", field(...), field(...),
+# field(...))` per message -- where the count of `{}` and the count of arguments
+# were two facts a human had to keep equal, and where a mistyped key was a wire
+# format change nothing could catch.  See the top of chatwire/json.hpp.
+#
+# Reflection is a HARD requirement rather than a nicety with a fallback: a
+# fallback would be a second implementation of the wire format, and two
+# implementations of one rule is the exact drift this codebase refuses
+# elsewhere.  It is detected below and refused at configure time.
 # ---------------------------------------------------------------------------
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -104,6 +115,78 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Static reflection, which is the one C++26 feature this project leans on and
+# the reason it is C++26 at all.
+#
+# Compiled rather than inferred from the compiler VERSION, because the two do
+# not line up: GCC 16 has it behind a FLAG (-freflection) and says
+# `'std::meta' has not been declared` without it, which reads like a missing
+# header rather than a missing flag.  Clang 22 accepts -std=c++26 and has no
+# <meta> at all.  So the probe is the whole feature -- a reflection, a splice,
+# and the non-transient-allocation dance that std::define_static_array exists
+# for -- and not just the header's presence.
+#
+# CMAKE_REQUIRED_FLAGS carries the flag into the check and nothing else does:
+# check_cxx_source_compiles honours CMAKE_CXX_STANDARD (CMP0067) but knows
+# nothing about a flag that standard needs.
+#
+# The flag lands on chatwire's own targets, never globally: a global
+# -freflection would also reach every OTHER try_compile CMake runs -- including
+# the <print> check below, which does not set the standard the flag requires and
+# would fail with "-freflection only supported with -std=c++26", diagnosing a
+# missing <print> that is right there.
+# ---------------------------------------------------------------------------
+include(CheckCXXSourceCompiles)
+
+set(CHATWIRE_REFLECTION_PROGRAM [[
+#include <meta>
+#include <string_view>
+struct probe { int first; bool second; };
+consteval auto names() {
+    return std::define_static_array(
+        std::meta::nonstatic_data_members_of(^^probe,
+                                             std::meta::access_context::current()));
+}
+int main() {
+    constexpr probe value{ 7, true };
+    int seen = 0;
+    template for (constexpr auto member : names()) {
+        std::string_view key{ std::define_static_string(std::meta::identifier_of(member)) };
+        seen += static_cast<int>(key.size()) + static_cast<int>(sizeof(value.[:member:]));
+    }
+    return seen == 0 ? 1 : 0;
+}
+]])
+
+set(CMAKE_REQUIRED_QUIET ON)
+set(CMAKE_REQUIRED_FLAGS "-freflection")
+check_cxx_source_compiles("${CHATWIRE_REFLECTION_PROGRAM}" CHATWIRE_REFLECTION_FLAGGED)
+unset(CMAKE_REQUIRED_FLAGS)
+
+if(CHATWIRE_REFLECTION_FLAGGED)
+    set(CHATWIRE_REFLECTION_OPTIONS "-freflection")
+else()
+    # Some compiler may one day have it on by default; ask before refusing.
+    check_cxx_source_compiles("${CHATWIRE_REFLECTION_PROGRAM}" CHATWIRE_REFLECTION_PLAIN)
+    if(CHATWIRE_REFLECTION_PLAIN)
+        set(CHATWIRE_REFLECTION_OPTIONS "")
+    else()
+        message(FATAL_ERROR
+            "chatwire needs C++26 static reflection (P2996), and this compiler "
+            "(${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}) has none. "
+            "GCC 16 or newer, which is what implements it today -- Clang 22 does "
+            "not. On Windows, MSYS2 does not ship GCC 16 yet; the winlibs builds "
+            "do (https://winlibs.com), and are a self-contained directory you "
+            "point CMAKE_CXX_COMPILER at:\n"
+            "  -DCMAKE_CXX_COMPILER=C:/tools/mingw64/bin/g++.exe\n"
+            "There is no non-reflection build. The wire format is generated from "
+            "the structs that describe it, and a fallback would be a second "
+            "implementation of it.")
+    endif()
+endif()
+unset(CMAKE_REQUIRED_QUIET)
+
+# ---------------------------------------------------------------------------
 # <print>, which is the one C++23 library feature this project actually leans on
 # and the one most likely to be missing.
 #
@@ -127,8 +210,7 @@ endif()
 # anyway would refuse a configuration that would have worked.
 # ---------------------------------------------------------------------------
 if(CHATWIRE_BUILD_TOOLS)
-    include(CheckCXXSourceCompiles)
-
+    # CheckCXXSourceCompiles is already included, by the reflection probe above.
     set(CHATWIRE_PRINT_PROGRAM "#include <print>\nint main() { std::println(\"{}\", 1); }")
 
     set(CMAKE_REQUIRED_QUIET ON)
@@ -181,7 +263,14 @@ add_library(chatwire::chatwire ALIAS chatwire_lib)
 target_include_directories(chatwire_lib PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src>")
 target_link_libraries(chatwire_lib PUBLIC vmhook::vmhook Threads::Threads)
-target_compile_features(chatwire_lib PUBLIC cxx_std_23)
+target_compile_features(chatwire_lib PUBLIC cxx_std_26)
+
+# PUBLIC, and that is not tidiness: chatwire/json.hpp is part of the public
+# surface and its writer is a template, so the reflection in it is compiled in
+# the CONSUMER's translation unit, not in this library's.  A consumer built
+# without the flag gets `'std::meta' has not been declared` from a header it
+# only meant to include.
+target_compile_options(chatwire_lib PUBLIC ${CHATWIRE_REFLECTION_OPTIONS})
 
 target_link_libraries(chatwire_lib PUBLIC ws2_32)
 
@@ -251,6 +340,11 @@ if(CHATWIRE_BUILD_TOOLS)
     set_target_properties(chatwire_exe PROPERTIES OUTPUT_NAME "chatwire")
     target_include_directories(chatwire_exe PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src")
+    # It does not LINK chatwire_lib, so it does not inherit the flag from it --
+    # but it includes chatwire/config.hpp, whose reader and writer are both
+    # generated from the settings struct.  Same flag, stated again because the
+    # usage requirement has nowhere else to travel from.
+    target_compile_options(chatwire_exe PRIVATE ${CHATWIRE_REFLECTION_OPTIONS})
     chatwire_apply_warnings(chatwire_exe)
 
     # -------------------------------------------------------------------
@@ -307,4 +401,14 @@ if(CHATWIRE_BUILD_TOOLS)
     endif()
 endif()
 
-message(STATUS "chatwire ${PROJECT_VERSION} - C++${CMAKE_CXX_STANDARD}, header-based, ${CHATWIRE_PLATFORM}")
+# CHATWIRE_PLATFORM used to be interpolated here and was never set anywhere, so
+# this line has been printing a trailing comma and a blank for as long as it has
+# existed.  It says the two things that vary instead: which compiler, and how
+# reflection had to be asked for.
+if(CHATWIRE_REFLECTION_OPTIONS)
+    set(CHATWIRE_REFLECTION_NOTE "reflection via ${CHATWIRE_REFLECTION_OPTIONS}")
+else()
+    set(CHATWIRE_REFLECTION_NOTE "reflection on by default")
+endif()
+message(STATUS "chatwire ${PROJECT_VERSION} - C++${CMAKE_CXX_STANDARD}, header-based, "
+               "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}, ${CHATWIRE_REFLECTION_NOTE}")

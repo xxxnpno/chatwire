@@ -14,10 +14,19 @@ Built on [vmhook](https://github.com/xxxnpno/vmhook). Works on any Minecraft 1.8
 
 ## Quick start
 
+Needs a compiler with **C++26 static reflection** (P2996), which today means **GCC 16 or newer** —
+every JSON object chatwire puts on the wire is generated from the struct that describes it. MSYS2
+does not ship GCC 16 yet; the [winlibs](https://winlibs.com) builds do, and are a self-contained
+directory you unpack and point at.
+
 ```bash
-cmake -S . -B build/etc -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build/etc -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_COMPILER=C:/tools/mingw64/bin/g++.exe
 cmake --build build/etc
 ```
+
+A compiler without reflection is refused at configure time, with the above in the error. There is no
+fallback build: a second way to write the wire format is a second thing to keep correct.
 
 `build/chatwire.exe` is the only file you need — the library is carried inside it as a resource, so
 there is nothing to keep together and no way to run a new injector against an old library.
