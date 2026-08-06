@@ -242,22 +242,20 @@ if(MINGW)
 endif()
 
 # ---------------------------------------------------------------------------
-# Tools.
-# ---------------------------------------------------------------------------
+# chatwire.exe — the library, plus the thing that puts it into the game.
 #
-# There is ONE tool: chatwire.exe, which is the library plus the thing that puts
-# it into the game.  The consumer side is a socket: see the README, and mcp/
-# for an MCP server.  Neither needs a build step, and a client that had to be
-# compiled would be a poor advertisement for an API whose whole claim is
+# The only binary that ships.  The consumer side is a socket: see the README,
+# and mcp/ for an MCP server.  Neither needs a build step, and a client that had
+# to be compiled would be a poor advertisement for an API whose whole claim is
 # "anything that speaks WebSocket".
-#
+# ---------------------------------------------------------------------------
 if(CHATWIRE_BUILD_TOOLS)
     # The injector talks to the OS, not to chatwire -- but it does share the
     # config format, so it needs the include path (header-only, no link).
     # The target is chatwire_exe and the FILE is chatwire.exe: two CMake
     # targets cannot share a name, but chatwire.dll and chatwire.exe are
     # different files and may.
-    add_executable(chatwire_exe tools/injector.cpp)
+    add_executable(chatwire_exe src/injector.cpp)
     set_target_properties(chatwire_exe PROPERTIES OUTPUT_NAME "chatwire")
     target_include_directories(chatwire_exe PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -281,7 +279,7 @@ if(CHATWIRE_BUILD_TOOLS)
 
         set(CHATWIRE_DLL_RC_PATH "${CHATWIRE_DLL_OUTPUT_DIR}/chatwire.dll")
         string(REPLACE "/" "\\\\" CHATWIRE_DLL_RC_PATH "${CHATWIRE_DLL_RC_PATH}")
-        configure_file("${CMAKE_CURRENT_SOURCE_DIR}/tools/chatwire.rc.in"
+        configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/chatwire.rc.in"
                        "${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc" @ONLY)
 
         target_sources(chatwire_exe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/chatwire.rc")
