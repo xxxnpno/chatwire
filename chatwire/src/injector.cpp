@@ -397,9 +397,11 @@ namespace
         // and with them the only way this could have truncated.  swprintf's 32
         // wide characters were never too few for sixteen hex digits, but that is
         // a fact a reader had to check rather than one the code stated.
-        const std::wstring stamp{ std::format(L"{:016x}",
-                                              static_cast<unsigned long long>(
-                                                  content_hash(bytes))) };
+        //
+        // The `unsigned long long` cast went with them.  It was there to satisfy
+        // `%llx`, which is a promise about a varargs argument's type that only
+        // the programmer can make; std::format takes the argument's own type.
+        const std::wstring stamp{ std::format(L"{:016x}", content_hash(bytes)) };
 
         // std::format has a wide overload, so a path built from wchar_t buffers
         // needs no widening dance: the literal is L"" and the result is a
