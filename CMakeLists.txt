@@ -226,14 +226,6 @@ set_target_properties(chatwire PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CHATWIRE_DLL_OUTPUT_DIR}")
 chatwire_apply_warnings(chatwire)
 
-# A detached chatwire stays mapped in the game (see src/entry.hpp), which locks
-# chatwire.dll against being overwritten.  Rename the old one out of the way
-# before linking so "rebuild while Minecraft is open" just works.
-add_custom_command(TARGET chatwire PRE_LINK
-        COMMAND ${CMAKE_COMMAND} -DDLL=$<TARGET_FILE:chatwire>
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/unlock_output.cmake"
-    COMMENT "Moving any mapped chatwire.dll aside")
-
 # Self-contained: loaded into a process whose library search path we do not
 # control, where a missing libstdc++/libgcc fails with an error that looks
 # nothing like its cause.
