@@ -1,4 +1,33 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+export module chatwire.log;
 
 // chatwire.core.log — diagnostics that cannot take the host process down.
 //
@@ -11,8 +40,8 @@
 //     entirely (a logger that outlives its mutex is a crash at exit);
 //   * writes are serialised, because a torn line from two threads is worse than
 //     no line.
-#include "chatwire/common.hpp"
-namespace chatwire::log
+
+export namespace chatwire::log
 {
     /*
         @brief How much noise reaches the console.
@@ -51,16 +80,12 @@ namespace chatwire::log
     }
 }
 
-namespace chatwire::log::detail
+export namespace chatwire::log::detail
 {
     // Deliberately leaked: `new` with no delete.  A destroyed mutex that a
     // detour still logs through is a use-after-free in a foreign process; a
     // leaked one at exit is nothing, because the process is going away.
-    inline auto sink_mutex() noexcept -> std::mutex&
-    {
-        static std::mutex* const m{ new std::mutex{} };
-        return *m;
-    }
+    [[nodiscard]] auto sink_mutex() noexcept -> std::mutex&;
 
     inline auto enabled(const chatwire::log::level at) noexcept -> bool
     {
@@ -96,7 +121,7 @@ namespace chatwire::log::detail
     }
 }
 
-namespace chatwire::log
+export namespace chatwire::log
 {
     /*
         @brief Formatted logging that never throws and never escapes.

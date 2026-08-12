@@ -1,4 +1,37 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+export module chatwire.api;
+import chatwire.feature;
+import chatwire.json;
+import chatwire.log;
+import chatwire.mapping;
 
 // chatwire — a live WebSocket API for Minecraft 1.8.9.
 //
@@ -23,11 +56,11 @@
 // into a JavaThread on demand — so the hook in the client's main loop went with
 // it, along with the queue, the tick of latency and the "queued" reply.  What is
 // left is one hook, on the one method chatwire actually wants to observe.
-#include "chatwire/common.hpp"
-#include "chatwire/feature.hpp"
-#include "chatwire/json.hpp"
-#include "chatwire/log.hpp"
-#include "chatwire/mapping.hpp"
+
+
+
+
+
 // The public surface: a consumer includes this one header and gets logging,
 // the feature interface, the JSON helpers and the mapping tables.
 //
@@ -36,7 +69,7 @@
 // chatwire through start()/stop() and the feature interface, never through
 // vmhook or a socket -- so a consumer's build should not pay for either.
 // src/chatwire.cpp is the only translation unit that includes them.
-namespace chatwire
+export namespace chatwire
 {
     /* @brief chatwire's own version. */
     inline constexpr std::string_view version{ "0.3.0" };

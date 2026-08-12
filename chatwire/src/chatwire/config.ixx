@@ -1,3 +1,50 @@
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+// <meta> HERE TOO.  A reflection template is instantiated in the unit that
+// CALLS it, not in the one that defines it, so every module that reaches
+// json::object or config's walkers needs the header in its own fragment --
+// importing chatwire.reflect is not enough, and GCC's error points into
+// libstdc++ rather than at the missing include.
+#include <meta>
+
+// Win32 has no module, so it lives here -- and AFTER the standard library,
+// which is the ordering rule chatwire/common.hpp used to exist for: a std
+// declaration first seen from inside <windows.h>'s extern "C" block can pick
+// up C language linkage.
+#include <windows.h>
+
+#include <cstdio>
+
+export module chatwire.config;
+import chatwire.reflect;
+import chatwire.module;
+
 // chatwire/config.hpp — settings handed from the injector to the injected DLL.
 //
 // ===========================================================================
@@ -41,20 +88,11 @@
 // somewhere else: chatwire.dll is carried inside chatwire.exe as a resource
 // (see CMakeLists.txt), so the writer and the reader are always the same build,
 // and the file lives for about a second between them.
-#pragma once
-
-#include "chatwire/common.hpp"
-
 // Brings <meta> with it, deliberately here rather than in common.hpp: see the
 // note at the bottom of that file.  Before module.hpp, which reaches windows.h,
 // so the ordering rule still holds.
-#include "chatwire/reflect.hpp"
 
-#include "chatwire/module.hpp"
-
-#include <cstdio>
-
-namespace chatwire::config
+export namespace chatwire::config
 {
     struct settings
     {
@@ -135,10 +173,10 @@ namespace chatwire::config
             template for (constexpr auto member : members_of())
             {
                 constexpr std::string_view name{
-                    std::define_static_string(std::meta::identifier_of(member)) };
+                    chatwire::reflect::identifier<member>() };
                 if (key == name)
                 {
-                    using field_type = [:std::meta::type_of(member):];
+                    using field_type = [:chatwire::reflect::type_of_member<member>():];
 
                     if constexpr (std::same_as<field_type, bool>)
                     {
@@ -311,8 +349,8 @@ namespace chatwire::config
             template for (constexpr auto member : detail::members_of())
             {
                 constexpr std::string_view name{
-                    std::define_static_string(std::meta::identifier_of(member)) };
-                using field_type = [:std::meta::type_of(member):];
+                    chatwire::reflect::identifier<member>() };
+                using field_type = [:chatwire::reflect::type_of_member<member>():];
 
                 if constexpr (std::same_as<field_type, bool>)
                 {

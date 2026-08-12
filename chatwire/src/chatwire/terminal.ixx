@@ -1,4 +1,35 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <windows.h>
+
+export module chatwire.terminal;
 
 // chatwire.terminal — the two things a command-line tool must ask the OS.
 //
@@ -18,11 +49,8 @@
 // This is for the standalone tools.  chatwire's own in-game console has a
 // harder job -- it may have to ALLOCATE a console inside a process that has
 // none -- and lives in console.hpp.
-#include "chatwire/common.hpp"
 
-#include <windows.h>
-
-namespace chatwire::terminal
+export namespace chatwire::terminal
 {
     /*
         @brief Makes this process's stdout able to show colour and UTF-8.

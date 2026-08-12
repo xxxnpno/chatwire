@@ -1,4 +1,44 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+// <meta> HERE TOO.  A reflection template is instantiated in the unit that
+// CALLS it, not in the one that defines it, so every module that reaches
+// json::object or config's walkers needs the header in its own fragment --
+// importing chatwire.reflect is not enough, and GCC's error points into
+// libstdc++ rather than at the missing include.
+#include <meta>
+
+export module chatwire.features.world;
+import chatwire.feature;
+import chatwire.json;
+import chatwire.log;
+import chatwire.mapping;
+import chatwire.sdk;
 
 // chatwire.features.world — what the client can see of the world.
 //
@@ -45,15 +85,12 @@
 // It is also the only POSITIVE report of a disconnect chatwire has.  Everything
 // else — `in_world()`, "not in a world" on a chat command — is the absence of a
 // player, which a client can only discover by asking at the right moment.
-#include "chatwire/common.hpp"
 
-#include "chatwire/feature.hpp"
-#include "chatwire/json.hpp"
-#include "chatwire/log.hpp"
-#include "chatwire/mapping.hpp"
-#include "chatwire/sdk.hpp"
 
-namespace chatwire::features
+
+
+
+export namespace chatwire::features
 {
     inline std::atomic<std::uint64_t> g_player_queries{ 0 };
     /* How many times a client asked what the local player is. */
@@ -360,7 +397,7 @@ namespace chatwire::features
     };
 }
 
-namespace chatwire::features::world
+export namespace chatwire::features::world
 {
     /* @brief Installs the sink every observed world change is handed to. */
     inline auto set_sink(const chatwire::features::world_sink sink) noexcept -> void

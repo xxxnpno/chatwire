@@ -1,4 +1,47 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+// <meta> HERE TOO.  A reflection template is instantiated in the unit that
+// CALLS it, not in the one that defines it, so every module that reaches
+// json::object or config's walkers needs the header in its own fragment --
+// importing chatwire.reflect is not enough, and GCC's error points into
+// libstdc++ rather than at the missing include.
+#include <meta>
+
+#include <cstdlib>
+#include <windows.h>
+
+export module chatwire.entry;
+import chatwire.api;
+import chatwire.config;
+import chatwire.console;
+import chatwire.features.system;
+import chatwire.log;
 
 // entry — what DllMain does once it is off the loader lock.
 //
@@ -8,17 +51,8 @@
 // there -- and chatwire's start-up does most of those.  So src/dllmain.cpp
 // spawns a thread and returns, and everything below happens on that thread,
 // outside the lock.
-#include "chatwire/chatwire.hpp"
-#include "chatwire/config.hpp"
-#include "chatwire/console.hpp"
-#include "chatwire/features/system.hpp"
-#include "chatwire/log.hpp"
 
-#include <cstdlib>
-
-#include <windows.h>
-
-namespace chatwire::entry
+export namespace chatwire::entry
 {
     inline std::atomic<bool> g_started{ false };
 

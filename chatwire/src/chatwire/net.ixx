@@ -1,4 +1,36 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+export module chatwire.net;
 
 // chatwire.net — Winsock, behind a small vocabulary.
 //
@@ -21,13 +53,11 @@
 //   does wake accept() on Windows -- but chatwire polls with wait_readable()
 //   instead, so the accept thread owns its own exit and nothing ever closes a
 //   descriptor another thread is blocked on.  See ws/server.hpp.
-#include "chatwire/common.hpp"
 
 // Platform headers strictly after the standard ones -- see common.hpp.
-#include <winsock2.h>
-#include <ws2tcpip.h>
 
-namespace chatwire::net
+
+export namespace chatwire::net
 {
     using socket_t = ::SOCKET;
     using addr_len = int;

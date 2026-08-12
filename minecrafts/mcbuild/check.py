@@ -202,7 +202,7 @@ def _index(doc: dict) -> tuple[dict, dict, dict]:
 
 
 def check(header: Path | None = None) -> int:
-    header = header or (paths.ROOT.parent / "chatwire" / "src" / "chatwire" / "mapping.hpp")
+    header = header or (paths.ROOT.parent / "chatwire" / "src" / "chatwire" / "mapping.ixx")
     doc_path = paths.MAPPINGS / f"{paths.VERSION}-mappings.json"
     if not doc_path.is_file():
         raise SystemExit(f"{doc_path} is missing -- run `python mc.py setup` first")

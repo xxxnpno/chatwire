@@ -1,3 +1,38 @@
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <windows.h>
+
+export module chatwire.console;
+import chatwire.ansi;
+import chatwire.log;
+
 // chatwire/console.hpp — the console attached to the injected game.
 //
 // A game launched through javaw.exe has NO console at all, so one has to be
@@ -6,13 +41,8 @@
 // A game launched through java.exe already has one, and chatwire is a guest on
 // it: it prints and nothing more.
 //
-#include "chatwire/common.hpp"
-#include "chatwire/ansi.hpp"
-#include "chatwire/log.hpp"
 
-    #include <windows.h>
-
-namespace chatwire::console
+export namespace chatwire::console
 {
     namespace detail
     {

@@ -1,4 +1,33 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+export module chatwire.command_line;
 
 // chatwire.command_line — turning a typed line into a command and its arguments.
 //
@@ -21,8 +50,8 @@
 // order to be a useful stand-in.  It used to hold a hand-copied normalise() --
 // two implementations of one rule, which is exactly the drift a mock is
 // supposed to be defended against.
-#include "chatwire/common.hpp"
-namespace chatwire::command_line
+
+export namespace chatwire::command_line
 {
     /* Long enough for any plausible command, short enough to be a name. */
     inline constexpr std::size_t max_name_length{ 64 };

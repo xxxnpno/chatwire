@@ -1,4 +1,34 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+export module chatwire.feature;
+import chatwire.log;
 
 // chatwire.core.feature — the extension point.
 //
@@ -45,10 +75,8 @@
 // call, the game may still not, and which game state tolerates it is a
 // per-method question — see the notes on send_chat and add_chat in sdk.hpp for
 // the shape of that argument.
-#include "chatwire/common.hpp"
 
-#include "chatwire/log.hpp"
-namespace chatwire
+export namespace chatwire
 {
     /*
         @brief One command from a client, already parsed.
@@ -176,11 +204,7 @@ namespace chatwire
             // initialisers in other TUs, and a namespace-scope container would
             // be a static-init-order race with them.  This is the standard
             // construct-on-first-use fix.
-            inline auto storage() noexcept -> std::vector<feature*>&
-            {
-                static auto* const v{ new std::vector<feature*>{} };
-                return *v;
-            }
+            [[nodiscard]] auto storage() noexcept -> std::vector<feature*>&;
         }
 
         /*
@@ -222,11 +246,7 @@ namespace chatwire
                 without restarting the ones that did -- starting a feature twice
                 installs its hook twice.
             */
-            inline auto started() noexcept -> std::vector<feature*>&
-            {
-                static auto* const v{ new std::vector<feature*>{} };
-                return *v;
-            }
+            [[nodiscard]] auto started() noexcept -> std::vector<feature*>&;
 
             [[nodiscard]] inline auto has_started(feature* const f) noexcept -> bool
             {
