@@ -1,33 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 export module chatwire.ws.websocket;
+import std;
 
 // chatwire.ws.websocket — RFC 6455 handshake and framing, by hand.
 //
@@ -38,7 +10,7 @@ export module chatwire.ws.websocket;
 // pulls in is a library that has to agree with whatever the host process
 // already loaded, and a CRT or OpenSSL mismatch inside a foreign process is a
 // crash with no useful stack.  The server is also local-only and unencrypted by
-// design (see ws/server.hpp), so the parts of a real WebSocket library that earn
+// design (see chatwire.ws.server), so the parts of a real WebSocket library that earn
 // their weight — TLS, permessage-deflate, proxy handling — are exactly the
 // parts this does not want.
 //

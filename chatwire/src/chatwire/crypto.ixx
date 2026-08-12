@@ -1,33 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 export module chatwire.crypto;
+import std;
 
 // chatwire.crypto — SHA-256, HMAC, and the two comparisons that must not leak.
 //
@@ -73,7 +45,7 @@ export module chatwire.crypto;
 // this file except random_hex() is pure arithmetic that runs at compile time,
 // and including <windows.h> here dragged it into every translation unit that
 // wanted a hash -- which broke the project's own ordering rule immediately:
-// <windows.h> before <winsock2.h> is an error, and ws/server.hpp needs both a
+// <windows.h> before <winsock2.h> is an error, and chatwire.ws.server needs both a
 // hash and a socket.
 //
 // So the one OS function is declared rather than included.  Its signature is
@@ -303,7 +275,7 @@ export namespace chatwire::crypto
 
         Returns "" rather than falling back to something weaker if the OS
         refuses.  A caller that cannot get a nonce must refuse the connection,
-        which is what server.hpp does: no nonce, no session, and the failure is
+        which is what chatwire.ws.server does: no nonce, no session, and the failure is
         loud instead of silently downgrading everyone's authentication.
     */
     [[nodiscard]] inline auto random_hex(const std::size_t count) -> std::string

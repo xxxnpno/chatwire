@@ -1,39 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> HERE TOO.  A reflection template is instantiated in the unit that
-// CALLS it, not in the one that defines it, so every module that reaches
-// json::object or config's walkers needs the header in its own fragment --
-// importing chatwire.reflect is not enough, and GCC's error points into
-// libstdc++ rather than at the missing include.
-#include <meta>
-
 export module chatwire.features.world;
+import std;
 import chatwire.feature;
 import chatwire.json;
 import chatwire.log;
@@ -44,7 +10,7 @@ import chatwire.sdk;
 //
 // The third feature, and the one that makes the extension-point claim concrete:
 // nothing in the server, the dispatcher, the protocol or the injection path
-// changed to add it.  A new file, and one `registry::add` in src/chatwire.cpp.
+// changed to add it.  A new module, and one `registry::add` in chatwire.ixx.
 //
 // ===========================================================================
 // WHAT IT DOES
@@ -85,9 +51,6 @@ import chatwire.sdk;
 // It is also the only POSITIVE report of a disconnect chatwire has.  Everything
 // else — `in_world()`, "not in a world" on a chat command — is the absence of a
 // player, which a client can only discover by asking at the right moment.
-
-
-
 
 
 export namespace chatwire::features
@@ -409,7 +372,7 @@ export namespace chatwire::features::world
         @brief This feature's counters, for `system.stats`.
         @details
         One of several structs the host flattens into a single object -- see the
-        same function in features/chat.hpp.  `player_queries` counted from the
+        same function in chatwire.features.chat.  `player_queries` counted from the
         day this feature existed and had nowhere to be reported until there was
         a second number here to report it with.
     */

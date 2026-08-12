@@ -1,39 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> HERE TOO.  A reflection template is instantiated in the unit that
-// CALLS it, not in the one that defines it, so every module that reaches
-// json::object or config's walkers needs the header in its own fragment --
-// importing chatwire.reflect is not enough, and GCC's error points into
-// libstdc++ rather than at the missing include.
-#include <meta>
-
 export module chatwire.features.chat;
+import std;
 import chatwire.feature;
 import chatwire.json;
 import chatwire.log;
@@ -84,9 +50,6 @@ import chatwire.sdk;
 // so a verb answers with what actually happened rather than with "accepted".
 
 
-
-
-
 export namespace chatwire::features
 {
     namespace map = chatwire::mapping;
@@ -114,7 +77,7 @@ export namespace chatwire::features
     /*
         @brief The messages this feature puts on the wire.
         @details
-        These structs ARE the wire format -- chatwire/json.hpp writes each one
+        These structs ARE the wire format -- chatwire.json writes each one
         by walking its members, so a key on the socket is a member name here and
         the two cannot drift.  Adding a field to an event is adding a member.
 
@@ -411,7 +374,7 @@ export namespace chatwire::features::chat
         @details
         A function-local static, constructed on first call and never destroyed.
 
-        Registration is EXPLICIT — src/chatwire.cpp calls this and hands the result
+        Registration is EXPLICIT — chatwire::start() calls this and hands the result
         to the registry — rather than automatic via a namespace-scope
         initialiser.  Two reasons, and the second is the one that matters:
 
@@ -422,7 +385,7 @@ export namespace chatwire::features::chat
           2. GCC 15 ICEs (segfault) on a namespace-scope dynamic initialiser in a
              module interface unit, which is how this was written first.
 
-        Adding a feature is still two lines in src/chatwire.cpp: one include, one
+        Adding a feature is still two lines in chatwire.ixx: one import, one
         registry::add.
     */
     [[nodiscard]] inline auto instance() noexcept -> chatwire::feature*

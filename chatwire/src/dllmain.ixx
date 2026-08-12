@@ -1,7 +1,24 @@
-// dllmain — the Windows injection entry point.
+module;
+
+// Win32 has no module, so the platform headers live here, in the global module
+// fragment.  That is the one place a #include belongs in this codebase.
 //
-// Everything both of them do once they are off the loader lock lives in
-// src/entry.hpp, including the argument for why chatwire never unloads itself.
+// <cstdlib> leads, and is not decoration -- see chatwire/net.ixx for the
+// language-linkage clash it defuses.
+#include <cstdlib>
+#include <windows.h>
+
+export module chatwire.dllmain;
+import std;
+import chatwire.entry;
+import chatwire.api;
+import chatwire.log;
+import chatwire.config;
+
+// chatwire.dllmain — the Windows injection entry point.
+//
+// Everything this file's threads do once they are off the loader lock lives in
+// chatwire.entry, including the argument for why chatwire never unloads itself.
 //
 // ===========================================================================
 // WHY DllMain DOES ALMOST NOTHING
@@ -13,53 +30,23 @@
 // So DllMain does exactly two things: spawn threads, and return.  Every piece
 // of real work happens on those threads, outside the lock.
 //
-// Standard headers first, then chatwire, then Windows: <windows.h> declares its
-// world inside `extern "C"`, and a std declaration first seen from inside that
-// block can pick up C language linkage.
-// The standard library FIRST -- before <windows.h> and before any import.
-// This is the rule chatwire/common.hpp existed to enforce: <windows.h>
-// declares its world inside extern "C", and a std declaration first seen
-// from in there picks up C language linkage, which then conflicts with the
-// same declaration arriving through an import.  A module does not re-export
-// what its own fragment included, so each of these units needs its own list.
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> here too: a reflection template instantiates in the unit that CALLS
-// it, and json::object is called from this one.
-#include <meta>
-
-
-#include <windows.h>
-
-
-import chatwire.entry;
-import chatwire.api;
-import chatwire.log;
-import chatwire.config;
+// ===========================================================================
+// WHY THE ENTRY POINTS SAY `extern "C++"` AND `extern "C"`
+// ===========================================================================
+// This is a module unit, and a declaration in a module's purview is ATTACHED to
+// that module: its symbol carries the module name, and nothing outside can find
+// it.  For an ordinary function that is the point.  For an entry point somebody
+// ELSE calls by name it is fatal, silently — the loader would call mingw's
+// default do-nothing DllMain and chatwire would simply never start.
+//
+// A linkage-specification detaches a declaration from the module and attaches it
+// to the global module instead, which is exactly the old behaviour:
+//
+//   * `extern "C"` for the two exported functions, whose names an injector looks
+//     up with GetProcAddress and which must not be mangled at all;
+//   * `extern "C++"` for DllMain, which mingw's CRT startup calls under its C++
+//     mangled name — MEASURED: a plain C++-linkage DllMain in a non-module TU is
+//     the one that runs, so `extern "C"` here would be a change, not a fix.
 
 namespace
 {
@@ -67,25 +54,22 @@ namespace
     {
         return chatwire::entry::start_now() ? 0u : 1u;
     }
-}
 
-/*
-    @brief The name of the restart event for a given process.
-    @details
-    Per-process, in the Local namespace, so two games do not share one and no
-    privilege is needed to open it.
-*/
-auto restart_event_name(const DWORD pid) -> std::string
-{
-    return std::format("Local\\chatwire.restart.{}", pid);
-}
+    /*
+        @brief The name of the restart event for a given process.
+        @details
+        Per-process, in the Local namespace, so two games do not share one and no
+        privilege is needed to open it.
+    */
+    auto restart_event_name(const DWORD pid) -> std::string
+    {
+        return std::format("Local\\chatwire.restart.{}", pid);
+    }
 
-namespace
-{
     /*
         @brief Waits to be told to start chatwire again, forever.
         @details
-        Detaching leaves the module MAPPED (see entry.hpp), so a second
+        Detaching leaves the module MAPPED (see chatwire.entry), so a second
         `chatwire-inject` cannot use LoadLibrary to wake us -- the loader sees the
         module already present and never runs DllMain again.
 
@@ -142,7 +126,7 @@ extern "C" __declspec(dllexport) auto chatwire_is_running() -> int
     return chatwire::is_running() ? 1 : 0;
 }
 
-BOOL WINAPI DllMain(const HINSTANCE, const DWORD reason, LPVOID)
+extern "C++" BOOL WINAPI DllMain(const HINSTANCE, const DWORD reason, LPVOID)
 {
     switch (reason)
     {

@@ -1,39 +1,20 @@
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
+// Win32 has no module, so the platform headers live here, in the global module
+// fragment.  That is the one place a #include belongs in this codebase.
+//
+// <cstdlib> leads, and is not decoration -- see chatwire/net.ixx for the
+// language-linkage clash it defuses.
 #include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include <windows.h>
 
 export module chatwire.console;
+import std;
 import chatwire.ansi;
+import chatwire.stdio;
 import chatwire.log;
 
-// chatwire/console.hpp — the console attached to the injected game.
+// chatwire.console — the console attached to the injected game.
 //
 // A game launched through javaw.exe has NO console at all, so one has to be
 // created before anything can be printed -- and a created console brings a
@@ -89,7 +70,7 @@ export namespace chatwire::console
             else is disturbed.
 
             Falls back to stdout when there is no console handle, which is the case
-            for the tools that share this header but run in an ordinary terminal.
+            for the tools that import this module but run in an ordinary terminal.
 
         */
         inline auto write_line(const std::string_view utf8) noexcept -> void
@@ -104,8 +85,8 @@ export namespace chatwire::console
                 DWORD        mode{ 0 };
                 if (out == INVALID_HANDLE_VALUE || out == nullptr || !::GetConsoleMode(out, &mode))
                 {
-                    std::fprintf(stdout, "%.*s\n", static_cast<int>(text.size()), text.data());
-                    std::fflush(stdout);
+                    std::println(chatwire::stdio::out(), "{}", text);
+                    std::fflush(chatwire::stdio::out());
                     return;
                 }
 
@@ -209,7 +190,8 @@ export namespace chatwire::console
             std::array<char, 256> line{};
             while (g_attached.load(std::memory_order_acquire))
             {
-                if (std::fgets(line.data(), static_cast<int>(line.size()), stdin) == nullptr)
+                if (std::fgets(line.data(), static_cast<int>(line.size()),
+                               chatwire::stdio::in()) == nullptr)
                 {
                     break;                       // stdin closed
                 }
@@ -277,10 +259,14 @@ export namespace chatwire::console
         const bool owned{ !had_console };
         detail::g_owned.store(owned, std::memory_order_release);
 
-        FILE* stream{ nullptr };
-        (void)::freopen_s(&stream, "CONOUT$", "w", stdout);
-        (void)::freopen_s(&stream, "CONOUT$", "w", stderr);
-        (void)::freopen_s(&stream, "CONIN$",  "r", stdin);
+        // The three streams by name rather than by macro, and the reopen through
+        // the same module because freopen_s is not a std:: name either; see
+        // chatwire/stdio.ixx.  Failures are ignored exactly as before: a stream
+        // that would not repoint leaves the console without that direction, and
+        // that is not a reason to refuse to attach.
+        (void)chatwire::stdio::reopen(chatwire::stdio::out(), "CONOUT$", "w");
+        (void)chatwire::stdio::reopen(chatwire::stdio::err(), "CONOUT$", "w");
+        (void)chatwire::stdio::reopen(chatwire::stdio::in(),  "CONIN$",  "r");
 
         // Try for colour, and REMEMBER whether we got it.  An old console host
         // rejects the flag, and emitting escapes it cannot render is worse than
@@ -318,7 +304,7 @@ export namespace chatwire::console
         detail::g_on_detach.store(on_detach, std::memory_order_release);
         (void)::SetConsoleCtrlHandler(&detail::ctrl_handler, TRUE);
 
-        // Remove the close button.  See the header comment: closing a console
+        // Remove the close button.  See the note at the top of this file: closing a console
         // terminates the processes attached to it, and the process attached to
         // this one is the game.
         if (const HWND window{ ::GetConsoleWindow() }; window != nullptr)

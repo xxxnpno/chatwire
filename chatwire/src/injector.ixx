@@ -36,54 +36,19 @@
 // from — and LoadLibraryW is the one technique the loader itself performs, which
 // means the DLL gets a real module handle, real TLS, and a real DllMain.  Every
 // stealthier method gives up one of those and buys nothing here.
-// The standard library FIRST -- before <windows.h> and before any import.
-// This is the rule chatwire/common.hpp existed to enforce: <windows.h>
-// declares its world inside extern "C", and a std declaration first seen
-// from in there picks up C language linkage, which then conflicts with the
-// same declaration arriving through an import.  A module does not re-export
-// what its own fragment included, so each of these units needs its own list.
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
+module;
+
+// Win32 has no module, so the platform headers live here, in the global module
+// fragment.  That is the one place a #include belongs in this codebase.
+//
+// <cstdlib> leads, and is not decoration -- see chatwire/net.ixx for the
+// language-linkage clash it defuses.
 #include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> here too: a reflection template instantiates in the unit that CALLS
-// it, and json::object is called from this one.
-#include <meta>
-
-
-#include <print>
-#include <cstdint>
-#include <cstring>
-#include <span>
-#include <string>
-#include <vector>
-
 #include <windows.h>
 #include <tlhelp32.h>
 
-
+export module chatwire.injector;
+import std;
 import chatwire.config;
 
 namespace
@@ -233,7 +198,7 @@ namespace
     */
     auto signal_restart(const DWORD pid) -> bool
     {
-        // Spelled exactly as dllmain.cpp's restart_event_name() spells it; the
+        // Spelled exactly as dllmain.ixx's restart_event_name() spells it; the
         // two are separate binaries, so the format string is the contract.
         const std::string name{ std::format("Local\\chatwire.restart.{}", pid) };
         const HANDLE signal{ ::OpenEventA(EVENT_MODIFY_STATE, FALSE, name.c_str()) };
@@ -536,7 +501,13 @@ namespace
     }
 }
 
-int main(const int argc, char** const argv)
+// `extern "C++"`, and it is not optional.  main may not be attached to a named
+// module -- GCC says so in as many words, "cannot attach '::main' to a named
+// module", and then tells you the fix.  A linkage-specification puts the
+// declaration back in the global module, which is where the runtime start-up
+// looks for it.  It stays C++ linkage: the standard forbids declaring main with
+// C linkage, and `extern "C++"` is the identity, not a change.
+extern "C++" int main(const int argc, char** const argv)
 {
     // Empty means "use the copy built into this executable".  --dll fills it in.
     std::wstring dll{};

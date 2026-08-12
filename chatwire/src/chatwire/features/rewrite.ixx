@@ -1,39 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> HERE TOO.  A reflection template is instantiated in the unit that
-// CALLS it, not in the one that defines it, so every module that reaches
-// json::object or config's walkers needs the header in its own fragment --
-// importing chatwire.reflect is not enough, and GCC's error points into
-// libstdc++ rather than at the missing include.
-#include <meta>
-
 export module chatwire.features.rewrite;
+import std;
 import chatwire.feature;
 import chatwire.json;
 import chatwire.log;
@@ -118,8 +84,6 @@ import chatwire.sdk;
 // command.  That is deliberate rather than convenient: a rule nobody owns is a
 // game quietly lying to its player with no way left to ask why.  A tool that
 // wants a rewrite to outlive it should stay connected.
-
-
 
 
 export namespace chatwire::features
@@ -213,8 +177,18 @@ export namespace chatwire::features
             same reason the feature registry is: this is read from a detour that
             can run before or after any other translation unit's static
             initialisation.
+
+            NOT `inline` -- see the note on chatwire::registry::detail::storage()
+            in chatwire.feature.  One rule set per consumer would mean the rules
+            a client adds and the rules the detour reads are different objects.
         */
-        [[nodiscard]] auto rules() noexcept -> std::atomic<std::shared_ptr<const rule_set>>&;
+        [[nodiscard]] auto rules() noexcept -> std::atomic<std::shared_ptr<const rule_set>>&
+        {
+            static auto* const live{
+                new std::atomic<std::shared_ptr<const rule_set>>{
+                    std::make_shared<const rule_set>() } };
+            return *live;
+        }
 
         inline std::atomic<std::uint64_t> g_next_id{ 1 };
         inline std::atomic<std::uint64_t> g_applied{ 0 };

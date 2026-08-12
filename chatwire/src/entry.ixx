@@ -1,42 +1,15 @@
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> HERE TOO.  A reflection template is instantiated in the unit that
-// CALLS it, not in the one that defines it, so every module that reaches
-// json::object or config's walkers needs the header in its own fragment --
-// importing chatwire.reflect is not enough, and GCC's error points into
-// libstdc++ rather than at the missing include.
-#include <meta>
-
+// Win32 has no module, so the platform headers live here, in the global module
+// fragment.  That is the one place a #include belongs in this codebase.
+//
+// <cstdlib> leads, and is not decoration -- see chatwire/net.ixx for the
+// language-linkage clash it defuses.
 #include <cstdlib>
 #include <windows.h>
 
 export module chatwire.entry;
+import std;
 import chatwire.api;
 import chatwire.config;
 import chatwire.console;
@@ -48,7 +21,7 @@ import chatwire.log;
 // The one thing about loader callbacks worth memorising: DllMain RUNS UNDER THE
 // LOADER LOCK.  Anything that waits, starts a thread and joins it, allocates
 // through another module, or calls into the JVM can deadlock the whole process
-// there -- and chatwire's start-up does most of those.  So src/dllmain.cpp
+// there -- and chatwire's start-up does most of those.  So chatwire.dllmain
 // spawns a thread and returns, and everything below happens on that thread,
 // outside the lock.
 

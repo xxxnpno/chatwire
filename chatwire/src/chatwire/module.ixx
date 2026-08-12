@@ -1,41 +1,21 @@
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
+// Win32 has no module, so the platform headers live here, in the global module
+// fragment.  That is the one place a #include belongs in this codebase.
+//
+// <cstdlib> leads, and is not decoration -- see chatwire/net.ixx for the
+// language-linkage clash it defuses.
 #include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include <windows.h>
 
 export module chatwire.module;
+import std;
 
 // chatwire.module — where am I on disk?
 //
 // chatwire needs its own path for one reason: the injector leaves a settings
 // file NEXT TO the library, and the library has to find it without being told
-// where it was loaded from.  See config.hpp for why the settings travel as a
+// where it was loaded from.  See chatwire.config for why the settings travel as a
 // file at all.
 //
 // Windows does not let a DLL ask this directly of itself; it answers "which

@@ -1,35 +1,15 @@
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
+// Win32 has no module, so the platform headers live here, in the global module
+// fragment.  That is the one place a #include belongs in this codebase.
+//
+// <cstdlib> leads, and is not decoration -- see chatwire/net.ixx for the
+// language-linkage clash it defuses.
 #include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include <windows.h>
 
 export module chatwire.terminal;
+import std;
 
 // chatwire.terminal — the two things a command-line tool must ask the OS.
 //
@@ -48,7 +28,7 @@ export module chatwire.terminal;
 //
 // This is for the standalone tools.  chatwire's own in-game console has a
 // harder job -- it may have to ALLOCATE a console inside a process that has
-// none -- and lives in console.hpp.
+// none -- and lives in chatwire.console.
 
 export namespace chatwire::terminal
 {

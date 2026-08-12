@@ -1,39 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> HERE TOO.  A reflection template is instantiated in the unit that
-// CALLS it, not in the one that defines it, so every module that reaches
-// json::object or config's walkers needs the header in its own fragment --
-// importing chatwire.reflect is not enough, and GCC's error points into
-// libstdc++ rather than at the missing include.
-#include <meta>
-
 export module chatwire.features.commands;
+import std;
 import chatwire.command_line;
 import chatwire.feature;
 import chatwire.json;
@@ -119,9 +85,6 @@ import chatwire.sdk;
 // things that are each individually correct.
 
 
-
-
-
 export namespace chatwire::features
 {
     /*
@@ -167,10 +130,23 @@ export namespace chatwire::features
             PLAYER types, there will be a handful of entries, and preserving
             registration order makes `commands.list` read the way a plugin
             author registered them.
-        */
-        [[nodiscard]] auto table() noexcept -> std::vector<registration>&;
 
-        [[nodiscard]] auto table_mutex() noexcept -> std::mutex&;
+            NOT `inline` -- see the note on chatwire::registry::detail::storage()
+            in chatwire.feature.  An inline function's local static is emitted
+            into every consumer's object too, and a registry each consumer has
+            its own copy of registers nothing anybody else can find.
+        */
+        [[nodiscard]] auto table() noexcept -> std::vector<registration>&
+        {
+            static auto* const t{ new std::vector<registration>{} };
+            return *t;
+        }
+
+        [[nodiscard]] auto table_mutex() noexcept -> std::mutex&
+        {
+            static auto* const m{ new std::mutex{} };
+            return *m;
+        }
 
         /*
             A ceiling, so one confused client cannot make every line the player
@@ -223,7 +199,7 @@ export namespace chatwire::features
 
         // The three text decisions -- what a typed line invokes, what its
         // arguments are, and what a registerable name looks like -- live in
-        // chatwire/command_line.hpp, spelled out in full at every use below.
+        // chatwire.command_line, spelled out in full at every use below.
         // They are the only part of this feature that means anything without a
         // JVM, which is why they are somewhere a test can reach them, and where
         // chatwire-mock takes them from rather than keeping a second copy of
@@ -516,8 +492,9 @@ export namespace chatwire::features::commands
                 const auto first_gone{ std::remove_if(table.begin(), table.end(),
                     [client](const auto& entry) noexcept { return entry.client == client; }) };
                 // Subtraction rather than std::distance: these are vector
-                // iterators, so it is the same answer without <iterator>, which
-                // chatwire/common.hpp does not include.
+                // iterators, so it is the same answer with less indirection.
+                // (It used to also save an #include; `import std;` ended that
+                // half of the argument, and the other half still stands.)
                 dropped = static_cast<std::size_t>(table.end() - first_gone);
                 table.erase(first_gone, table.end());
             }

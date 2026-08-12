@@ -1,33 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 export module chatwire.command_line;
+import std;
 
 // chatwire.command_line — turning a typed line into a command and its arguments.
 //
@@ -36,7 +8,7 @@ export module chatwire.command_line;
 // ===========================================================================
 // It is the only part of the `commands` feature that is pure text: no JVM, no
 // vmhook, no socket.  Everything else in that feature needs a running game to
-// mean anything, and `sdk.hpp` -- which the feature includes -- is the one
+// mean anything, and `chatwire.sdk` -- which the feature includes -- is the one
 // header in the project allowed to pull in vmhook's 24,000 lines.
 //
 // Splitting these three functions out is what lets them be TESTED.  They decide

@@ -1,51 +1,19 @@
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
+// Win32 has no module, so the platform headers live here, in the global module
+// fragment.  That is the one place a #include belongs in this codebase.
+//
+// <cstdlib> leads, and is not decoration -- see chatwire/net.ixx for the
+// language-linkage clash it defuses.
 #include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> HERE TOO.  A reflection template is instantiated in the unit that
-// CALLS it, not in the one that defines it, so every module that reaches
-// json::object or config's walkers needs the header in its own fragment --
-// importing chatwire.reflect is not enough, and GCC's error points into
-// libstdc++ rather than at the missing include.
-#include <meta>
-
-// Win32 has no module, so it lives here -- and AFTER the standard library,
-// which is the ordering rule chatwire/common.hpp used to exist for: a std
-// declaration first seen from inside <windows.h>'s extern "C" block can pick
-// up C language linkage.
 #include <windows.h>
 
-#include <cstdio>
-
 export module chatwire.config;
+import std;
 import chatwire.reflect;
 import chatwire.module;
 
-// chatwire/config.hpp — settings handed from the injector to the injected DLL.
+// chatwire.config — settings handed from the injector to the injected DLL.
 //
 // ===========================================================================
 // WHY A FILE
@@ -88,9 +56,9 @@ import chatwire.module;
 // somewhere else: chatwire.dll is carried inside chatwire.exe as a resource
 // (see CMakeLists.txt), so the writer and the reader are always the same build,
 // and the file lives for about a second between them.
-// Brings <meta> with it, deliberately here rather than in common.hpp: see the
-// note at the bottom of that file.  Before module.hpp, which reaches windows.h,
-// so the ordering rule still holds.
+// Reflection needs no include and no ordering care any more: `import std;`
+// carries std::meta, so this unit reflects over `settings` without a header and
+// without a rule about where that header may sit relative to <windows.h>.
 
 export namespace chatwire::config
 {
@@ -149,7 +117,7 @@ export namespace chatwire::config
 
     namespace detail
     {
-        /* @brief `settings`' members, at compile time.  See reflect.hpp. */
+        /* @brief `settings`' members, at compile time.  See chatwire.reflect. */
         consteval auto members_of()
         {
             return chatwire::reflect::members_of<settings>();

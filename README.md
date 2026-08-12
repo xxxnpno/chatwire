@@ -144,12 +144,14 @@ anything.
 
 ## Quick start
 
-Needs **GCC 16.2 or newer** and **CMake 3.28+**. chatwire is written as C++26 **modules** —
-26 `.ixx` interface units, no headers, and no preprocessor outside each unit's global module
-fragment, where `<windows.h>` has nowhere else to live. It also needs **static reflection**
-(P2996): every JSON object on the wire is generated from the struct that describes it, and a
-compiler without it is refused at configure time. MSYS2 does not ship GCC 16; the
-[winlibs](https://winlibs.com) builds do.
+Needs **GCC 16.2 or newer** and **CMake 3.28+**. chatwire is written as C++26 **modules, all the
+way down** — 30 `.ixx` module interface units, **no headers and no `.cpp` at all**, with the
+standard library arriving as `import std;`. The preprocessor survives in exactly nine lines
+across eight files: the `<windows.h>`/`<winsock2.h>` includes in a global module fragment, where
+Win32 has nowhere else to live, and one `<cstdio>` for the three stream macros a module cannot
+export. It also needs **static reflection** (P2996): every JSON object on the wire is generated
+from the struct that describes it, and a compiler without it is refused at configure time. MSYS2
+does not ship GCC 16; the [winlibs](https://winlibs.com) builds do.
 
 ```bash
 cmake -S . -B build/etc -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -157,11 +159,18 @@ cmake -S . -B build/etc -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build/etc
 ```
 
-The build links with `-Wl,--allow-multiple-definition`, which is working around a GCC 16.2 bug
-rather than a design choice: a function-local `static` in an inline function in a module's
-purview is emitted into the module's object *and* every consumer's. Anything that holds **state**
-that way is declared in its interface and defined in an implementation unit, because letting the
-linker pick one of two copies is fine for code and silently splits state.
+The build compiles libstdc++'s own `bits/std.cc` into a `chatwire_std` target, because nothing
+else does: `import std;` without a compiled `std.gcm` fails with *"failed to read compiled
+module"*, which reads like a broken install and is not one. CMake can do this itself via
+`CXX_MODULE_STD`, but only behind an experimental gate whose value is a UUID that changes every
+release, and a build that breaks when you upgrade CMake is worse than eight explicit lines.
+
+It also links with `-Wl,--allow-multiple-definition`, working around a GCC 16.2 bug rather than
+by choice: a function-local `static` in an **inline** function in a module's purview is emitted
+into the module's object *and* every consumer's, and letting the linker pick one of two copies is
+fine for code but silently splits state. So the rule in this codebase is that any function
+holding state is **not inline** — a non-inline definition in an interface unit is emitted exactly
+once. That is what let four `*_impl.cpp` files disappear rather than being renamed.
 
 `build/chatwire.exe` is the only file you need — the library is carried inside it as a resource,
 so there is nothing to keep together and no way to run a new injector against an old library.
@@ -665,7 +674,7 @@ not sit between you and the server, cannot read packets the client discards, and
 anything the server never sent. The scoreboard is the client's copy — a server that hides an
 objective from you has hidden it from chatwire too.
 
-**Adding a feature** is a new file and two lines in `chatwire.cpp`. A feature declares what it
+**Adding a feature** is a new module and two lines in `chatwire.ixx`. A feature declares what it
 is called, which command prefixes it answers to, how to start and stop, and how to handle one
 command. Nothing in the server, the dispatcher or the protocol changes.
 

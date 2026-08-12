@@ -1,35 +1,7 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 export module chatwire.ansi;
+import std;
 
-// chatwire/ansi.hpp — Minecraft's section-sign colour codes, as ANSI.
+// chatwire.ansi — Minecraft's section-sign colour codes, as ANSI.
 //
 // Shared by the in-game console and the reference client, because a chat line
 // without its colours looks broken to anyone who knows Minecraft, and having two

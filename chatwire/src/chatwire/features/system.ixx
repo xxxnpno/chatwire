@@ -1,40 +1,6 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> HERE TOO.  A reflection template is instantiated in the unit that
-// CALLS it, not in the one that defines it, so every module that reaches
-// json::object or config's walkers needs the header in its own fragment --
-// importing chatwire.reflect is not enough, and GCC's error points into
-// libstdc++ rather than at the missing include.
-#include <meta>
-
 export module chatwire.features.system;
-import chatwire.api;
+import std;
+import chatwire.version;
 import chatwire.feature;
 import chatwire.json;
 import chatwire.log;
@@ -55,12 +21,10 @@ import chatwire.mapping;
 // It is also the second feature, which is the point at which "adding one is a
 // new file and two lines" stops being a claim and starts being a fact.  Nothing
 // in the server, the dispatcher or the protocol changed to make `system.*` work.
-// The root header, for chatwire::version.  Not a layering violation and not a
-// cycle: chatwire.hpp is the PUBLIC surface and includes no feature, so a
-// feature reading a constant out of it depends on nothing that depends back.
-
-
-
+// chatwire.version, for chatwire::version.  It used to be chatwire.api -- which
+// was fine while that module was a pure surface, and became a CYCLE the moment
+// start()'s body moved into it and it began importing every feature, this one
+// included.  The constants moved to a leaf instead; see chatwire/version.ixx.
 
 
 export namespace chatwire::features

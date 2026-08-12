@@ -9,24 +9,45 @@ project(chatwire
     LANGUAGES    CXX)
 
 # ---------------------------------------------------------------------------
-# C++26, header-based.
+# C++26, and MODULES ALL THE WAY DOWN.
 #
-# chatwire was originally built as C++26 named MODULES.  That is still gone, and
-# the reasons have not changed: GCC 15 and Clang 19 both fell over on that shape
-# -- segfaults instantiating vmhook inside a module, a hard failure for any TU
-# that both imports a module and includes <windows.h>, duplicate symbols from
-# module-attached inline statics.  Headers build with no workarounds, and the
-# layering the modules forced -- one boundary for vmhook, one for Winsock --
-# survives as ordinary include discipline.
+# There is no header in this project and no .cpp either.  Every translation unit
+# is a module interface unit named .ixx, every dependency between them is an
+# `import`, and the standard library arrives as `import std;`.  The preprocessor
+# survives in exactly one place -- the global module fragment of the eight units
+# that need Win32, because <windows.h> has no module and nobody can give it one.
 #
-# What HAS changed is the language level.  chatwire is C++26 for one feature it
-# actually uses: static reflection (P2996).  Every JSON object this project puts
-# on the wire is now a struct whose field names ARE its member names, written by
-# chatwire/json.hpp walking `std::meta::nonstatic_data_members_of`.  What that
-# replaced was a positional `std::format("{},{},{}", field(...), field(...),
-# field(...))` per message -- where the count of `{}` and the count of arguments
-# were two facts a human had to keep equal, and where a mistyped key was a wire
-# format change nothing could catch.  See the top of chatwire/json.hpp.
+# This was tried before and abandoned, and the notes explaining why are worth
+# keeping because they were TRUE OF GCC 15: vmhook segfaulted the compiler when
+# instantiated inside a module, any TU that both imported a module and included
+# <windows.h> failed outright, and module-attached inline statics produced
+# duplicate symbols.  GCC 16.2 fixes the first two.  The third is still real and
+# is handled by two things rather than wished away: `--allow-multiple-definition`
+# below, and a rule in the code that state-holding functions are never `inline`
+# (see chatwire::registry::detail::storage() in chatwire.feature).
+#
+# What modules buy, concretely:
+#
+#   * `import std;` replaced a 30-line #include block copied into every one of
+#     the 27 units -- roughly 800 lines of preprocessor whose only job was to be
+#     identical everywhere, and which had already drifted;
+#   * the include ORDER rules are gone with it.  "standard library before
+#     <windows.h>", "winsock2.h before windows.h", "<meta> in every unit that
+#     instantiates a reflection template" were three invariants a human enforced
+#     across 30 files.  Two are now nobody's problem, and the third survives
+#     only inside the Win32 fragments;
+#   * start() and stop() moved back into chatwire.api.  As a header this file
+#     could not afford their bodies -- they reach vmhook and Winsock -- and a
+#     BMI has no such cost.
+#
+# C++26 is not for modules, though: it is for static reflection (P2996).  Every
+# JSON object this project puts on the wire is a struct whose field names ARE
+# its member names, written by chatwire.json walking
+# `std::meta::nonstatic_data_members_of`.  What that replaced was a positional
+# `std::format("{},{},{}", field(...), field(...), field(...))` per message --
+# where the count of `{}` and the count of arguments were two facts a human had
+# to keep equal, and where a mistyped key was a wire format change nothing could
+# catch.  See the top of chatwire/json.ixx.
 #
 # Reflection is a HARD requirement rather than a nicety with a fallback: a
 # fallback would be a second implementation of the wire format, and two
@@ -191,60 +212,122 @@ endif()
 unset(CMAKE_REQUIRED_QUIET)
 
 # ---------------------------------------------------------------------------
-# <print>, which is the one C++23 library feature this project actually leans on
-# and the one most likely to be missing.
+# <print>, and the library it hides in.
 #
-# The tools print with std::println.  Three things vary and all three have bitten
-# a real build:
+# The tools print with std::println.  Two things vary and both have bitten a
+# real build:
 #
 #   * the header may not exist at all (Apple Clang lags libc++ by a year or so,
 #     and the system compiler on a current macOS may simply not have it);
 #   * on libstdc++ the terminal path lives in a SEPARATE library, libstdc++exp,
 #     and without it the link fails on __open_terminal / __write_to_terminal --
-#     a link error that names symbols no source file mentions;
-#   * which of those is true is not predictable from the compiler VERSION, so it
-#     is compiled rather than assumed.
+#     a link error that names symbols no source file mentions.
 #
-# Detected once, here, so a missing <print> is a clear message at configure time
-# instead of five hundred lines of template output later.
+# Which of those is true is not predictable from the compiler VERSION, so it is
+# compiled rather than assumed, once, here, where a missing <print> is a clear
+# message at configure time instead of five hundred lines of template output.
 #
-# Only when something that PRINTS is being built.  The library itself does not
-# use <print> -- it reports through chatwire/log.hpp -- so
-# `-DCHATWIRE_BUILD_TOOLS=OFF` genuinely drops the requirement, and checking
-# anyway would refuse a configuration that would have worked.
+# This USED to be conditional on CHATWIRE_BUILD_TOOLS, on the grounds that the
+# library itself never prints.  `import std;` ended that: the std module is one
+# module, it contains <print> whether a given unit calls it or not, and the
+# symbols it needs have to be linkable for anything built here.  So the check is
+# unconditional now, and -DCHATWIRE_BUILD_TOOLS=OFF no longer buys an escape
+# from it.  The probe still #includes the header rather than importing it --
+# try_compile runs before the std module target exists, and cannot use it.
 # ---------------------------------------------------------------------------
-if(CHATWIRE_BUILD_TOOLS)
-    # CheckCXXSourceCompiles is already included, by the reflection probe above.
-    set(CHATWIRE_PRINT_PROGRAM "#include <print>\nint main() { std::println(\"{}\", 1); }")
+# CheckCXXSourceCompiles is already included, by the reflection probe above.
+set(CHATWIRE_PRINT_PROGRAM "#include <print>\nint main() { std::println(\"{}\", 1); }")
 
-    set(CMAKE_REQUIRED_QUIET ON)
-    check_cxx_source_compiles("${CHATWIRE_PRINT_PROGRAM}" CHATWIRE_PRINT_PLAIN)
+set(CMAKE_REQUIRED_QUIET ON)
+check_cxx_source_compiles("${CHATWIRE_PRINT_PROGRAM}" CHATWIRE_PRINT_PLAIN)
 
-    if(NOT CHATWIRE_PRINT_PLAIN)
-        set(CMAKE_REQUIRED_LIBRARIES stdc++exp)
-        check_cxx_source_compiles("${CHATWIRE_PRINT_PROGRAM}" CHATWIRE_PRINT_WITH_EXP)
-        unset(CMAKE_REQUIRED_LIBRARIES)
+if(NOT CHATWIRE_PRINT_PLAIN)
+    set(CMAKE_REQUIRED_LIBRARIES stdc++exp)
+    check_cxx_source_compiles("${CHATWIRE_PRINT_PROGRAM}" CHATWIRE_PRINT_WITH_EXP)
+    unset(CMAKE_REQUIRED_LIBRARIES)
 
-        if(CHATWIRE_PRINT_WITH_EXP)
-            set(CHATWIRE_PRINT_LIBRARY stdc++exp)
-        else()
-            message(FATAL_ERROR
-                "chatwire.exe needs a working C++23 <print>, and this "
-                "compiler (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}) "
-                "has none. GCC 14+, LLVM/Clang 18+ with its own libc++, or "
-                "MSVC 19.37+. On macOS the system Apple Clang is usually too old: "
-                "`brew install llvm` and configure with "
-                "-DCMAKE_CXX_COMPILER=$(brew --prefix llvm)/bin/clang++. "
-                "Or build just the library, which needs none of it: "
-                "-DCHATWIRE_BUILD_TOOLS=OFF.")
-        endif()
+    if(CHATWIRE_PRINT_WITH_EXP)
+        set(CHATWIRE_PRINT_LIBRARY stdc++exp)
+    else()
+        message(FATAL_ERROR
+            "chatwire needs a working C++23 <print>, and this "
+            "compiler (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}) "
+            "has none. GCC 14+, LLVM/Clang 18+ with its own libc++, or "
+            "MSVC 19.37+.")
     endif()
-    unset(CMAKE_REQUIRED_QUIET)
+endif()
+unset(CMAKE_REQUIRED_QUIET)
+
+# ---------------------------------------------------------------------------
+# `import std;` — the standard library as a module, built here.
+#
+# libstdc++ ships the module's SOURCE, bits/std.cc, and nothing builds it for
+# you: `import std;` without a compiled std.gcm fails with "failed to read
+# compiled module", which reads like a broken install and is not one.
+#
+# CMake does have a built-in path for this -- set CXX_MODULE_STD on a target and
+# it finds libstdc++.modules.json itself -- but as of CMake 4.3 that path is
+# still behind the CMAKE_EXPERIMENTAL_CXX_IMPORT_STD gate, whose value is a UUID
+# that changes with every CMake release.  A build that stops working when the
+# user upgrades CMake is worse than eight lines that say what they do.
+#
+# So: an ordinary STATIC library whose one module interface unit is the one
+# libstdc++ shipped.  CMake scans it, sees `export module std;`, builds it
+# before anything that imports it, and hands consumers the module mapper.
+# ---------------------------------------------------------------------------
+get_filename_component(CHATWIRE_CXX_BINDIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+find_file(CHATWIRE_STD_MODULE_SOURCE std.cc
+    HINTS "${CHATWIRE_CXX_BINDIR}/../include/c++/${CMAKE_CXX_COMPILER_VERSION}/bits"
+          "${CHATWIRE_CXX_BINDIR}/../include/c++/${CMAKE_CXX_COMPILER_VERSION}"
+    DOC   "libstdc++'s source for the std module (bits/std.cc)")
+
+if(NOT CHATWIRE_STD_MODULE_SOURCE)
+    message(FATAL_ERROR
+        "Could not find libstdc++'s bits/std.cc, which is the source of the "
+        "`std` module. Every translation unit in chatwire says `import std;`, "
+        "so there is no build without it. It ships with libstdc++ 15 and newer, "
+        "at <prefix>/include/c++/<version>/bits/std.cc. Point at it with "
+        "-DCHATWIRE_STD_MODULE_SOURCE=/path/to/std.cc if it lives somewhere "
+        "this did not look.")
+endif()
+
+get_filename_component(CHATWIRE_STD_MODULE_DIR "${CHATWIRE_STD_MODULE_SOURCE}" DIRECTORY)
+
+add_library(chatwire_std STATIC)
+target_sources(chatwire_std PUBLIC
+    FILE_SET CXX_MODULES
+    BASE_DIRS "${CHATWIRE_STD_MODULE_DIR}"
+    FILES     "${CHATWIRE_STD_MODULE_SOURCE}")
+target_compile_features(chatwire_std PUBLIC cxx_std_26)
+# GCC needs -fmodules on every TU that imports, not only on interface units.
+target_compile_options(chatwire_std PUBLIC -fmodules)
+
+# -freflection HERE, and it is load bearing rather than tidy.  std.cc exports
+# <meta> only when the compiler that builds it has reflection on; without the
+# flag the std module is built WITHOUT std::meta, and every unit that uses a
+# reflection then fails with `'std::meta' has not been declared` -- the same
+# message a missing flag on the consumer gives, pointing at the wrong file.
+target_compile_options(chatwire_std PUBLIC ${CHATWIRE_REFLECTION_OPTIONS})
+
+# GCC 16.2 emits a function-local `static` from an inline function into the
+# module's object AND into every consumer's, so the linker sees each one twice.
+# It happens inside libstdc++'s own std::format, so no source change of ours
+# avoids it; the definitions are identical, which is what makes letting the
+# linker pick one safe.  chatwire's OWN state does not rely on this -- the
+# functions that hold it are deliberately not inline -- so what this pardons is
+# libstdc++'s duplicates and nothing else.  Remove it when GCC stops.
+#
+# PUBLIC on the std module because every target here links it, which makes this
+# the one place the option has to be stated.
+target_link_options(chatwire_std PUBLIC "-Wl,--allow-multiple-definition")
+
+if(CHATWIRE_PRINT_LIBRARY)
+    target_link_libraries(chatwire_std PUBLIC ${CHATWIRE_PRINT_LIBRARY})
 endif()
 
 
 # ---------------------------------------------------------------------------
-# vmhook — vendored, header-only.
+# vmhook — vendored, and a module of its own.
 #
 # Pinned rather than fetched: chatwire depends on invocation working pure-VM,
 # and on vmhook::attach_current_thread, without which a Java call would once
@@ -269,26 +352,36 @@ target_compile_options(vmhook PUBLIC -fmodules)
 # flag belongs on ITS target too -- not only on chatwire_lib.
 target_compile_options(vmhook PUBLIC ${CHATWIRE_REFLECTION_OPTIONS})
 
-# ---------------------------------------------------------------------------
-# The library.  Header-based, with one .cpp for the bodies that should not be
-# duplicated into every consumer (start/stop and the wiring they use).
-# ---------------------------------------------------------------------------
-# The implementation units carry the state their interfaces only declare -- see
-# the note at the top of each.  They are ordinary sources, not module interfaces.
-add_library(chatwire_lib STATIC
-    chatwire/src/chatwire.cpp
-    chatwire/src/chatwire/feature_impl.cpp
-    chatwire/src/chatwire/log_impl.cpp
-    chatwire/src/chatwire/features/commands_impl.cpp
-    chatwire/src/chatwire/features/rewrite_impl.cpp)
+# vmhook does NOT link chatwire_std, and that is deliberate.  It is VENDORED --
+# developed at C:/repos/cpp/vmhook and copied in here -- so it keeps upstream's
+# shape: standard headers in its global module fragment rather than `import
+# std;`.  Editing the copy would fork it silently, and the next re-vendor would
+# overwrite the change with nothing to say so.  Nothing textual crosses a BMI,
+# so a consumer that imports vmhook AND imports std is unaffected by the choice.
 
-# EVERY header is a module interface unit now.  CMake scans them, works out the
-# order and builds them before whatever imports them; there is no list to keep
-# in dependency order by hand.
+# ---------------------------------------------------------------------------
+# The library.  Twenty-five module interface units and NOTHING ELSE.
+#
+# There is no source list here beside the file set, because there is no source
+# that is not a module.  Five files used to sit outside it: chatwire.cpp, which
+# held start()/stop(), and four *_impl.cpp that existed purely so their
+# function-local statics were emitted once.  The first folded into chatwire.ixx
+# once a BMI made its dependencies free; the other four folded into their own
+# interfaces once the rule "state-holding functions are never inline" replaced
+# the file-based workaround.  See chatwire::registry::detail::storage().
+#
+# CMake scans the set, works out the order and builds each unit before whatever
+# imports it.  The list below is alphabetical-ish for reading, NOT dependency
+# order -- there is no dependency order to keep by hand any more.
+# ---------------------------------------------------------------------------
+add_library(chatwire_lib STATIC)
+
 target_sources(chatwire_lib PUBLIC
     FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src"
     FILES
+        chatwire/src/chatwire/version.ixx
+        chatwire/src/chatwire/stdio.ixx
         chatwire/src/chatwire/reflect.ixx
         chatwire/src/chatwire/crypto.ixx
         chatwire/src/chatwire/json.ixx
@@ -315,24 +408,19 @@ target_sources(chatwire_lib PUBLIC
         chatwire/src/chatwire/features/world.ixx
         chatwire/src/entry.ixx)
 
-# GCC 16.2 emits a function-local `static` from an inline function into the
-# module's object AND into every consumer's, so the linker sees each one twice.
-# It happens inside libstdc++'s own std::format as well, so no source change
-# avoids it; the definitions are identical, which is what makes letting the
-# linker pick one safe.  Remove this when GCC stops doing it.
-target_link_options(chatwire_lib PUBLIC "-Wl,--allow-multiple-definition")
 add_library(chatwire::chatwire ALIAS chatwire_lib)
 
-target_include_directories(chatwire_lib PUBLIC
-    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src>")
-target_link_libraries(chatwire_lib PUBLIC vmhook::vmhook Threads::Threads)
+# No target_include_directories.  Nothing includes anything -- a consumer says
+# `import chatwire.api;` and CMake hands the compiler a module mapper, so there
+# is no path for a header search to be wrong about.
+target_link_libraries(chatwire_lib PUBLIC chatwire_std vmhook::vmhook Threads::Threads)
 target_compile_features(chatwire_lib PUBLIC cxx_std_26)
 
-# PUBLIC, and that is not tidiness: chatwire/json.hpp is part of the public
-# surface and its writer is a template, so the reflection in it is compiled in
-# the CONSUMER's translation unit, not in this library's.  A consumer built
-# without the flag gets `'std::meta' has not been declared` from a header it
-# only meant to include.
+# PUBLIC, and that is not tidiness: chatwire.json is part of the public surface
+# and its writer is a template, so the reflection in it is instantiated in the
+# CONSUMER's translation unit, not in this library's.  A consumer built without
+# the flag gets `'std::meta' has not been declared` out of a module it only
+# meant to import.
 target_compile_options(chatwire_lib PUBLIC ${CHATWIRE_REFLECTION_OPTIONS})
 
 target_link_libraries(chatwire_lib PUBLIC ws2_32 bcrypt)
@@ -340,10 +428,10 @@ target_link_libraries(chatwire_lib PUBLIC ws2_32 bcrypt)
 # ---------------------------------------------------------------------------
 # Warnings.
 #
-# vmhook is a 24k-line third-party header; its diagnostics are not chatwire's to
-# fix, and -Werror on someone else's header only ever produces noise.  So the
-# warning set applies to chatwire's own targets, and vmhook is INTERFACE (never
-# compiled on its own).
+# vmhook is a 27k-line vendored module; its diagnostics are not chatwire's to
+# fix, and -Werror on somebody else's code only ever produces noise.  So the
+# warning set applies to chatwire's own targets, and neither vmhook nor the std
+# module -- which is libstdc++'s file, not ours either -- gets it.
 # ---------------------------------------------------------------------------
 function(chatwire_apply_warnings target)
     if(MSVC)
@@ -366,8 +454,21 @@ chatwire_apply_warnings(chatwire_lib)
 
 # ---------------------------------------------------------------------------
 # The injectable DLL.
+#
+# dllmain.ixx is a module interface unit like everything else, even though
+# nothing imports it: it exists to hold DllMain and the two exported functions.
+# It has to be in a CXX_MODULES file set all the same -- a source that says
+# `export module` and is not in one makes CMake stop with "provides the
+# `chatwire.dllmain` module but it is not found in a `FILE_SET`".
+#
+# What that unit does NOT get to do is let the module attach its entry points;
+# see the linkage note at the top of it.
 # ---------------------------------------------------------------------------
-add_library(chatwire SHARED chatwire/src/dllmain.cpp)
+add_library(chatwire SHARED)
+target_sources(chatwire PRIVATE
+    FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src"
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src/dllmain.ixx")
 target_link_libraries(chatwire PRIVATE chatwire::chatwire)
 set_target_properties(chatwire PROPERTIES
     PREFIX ""                       # chatwire.dll/.so/.dylib, never libchatwire
@@ -394,19 +495,23 @@ endif()
 # "anything that speaks WebSocket".
 # ---------------------------------------------------------------------------
 if(CHATWIRE_BUILD_TOOLS)
-    # The injector talks to the OS, not to chatwire -- but it does share the
-    # config format, so it needs the include path (header-only, no link).
     # The target is chatwire_exe and the FILE is chatwire.exe: two CMake
     # targets cannot share a name, but chatwire.dll and chatwire.exe are
     # different files and may.
-    add_executable(chatwire_exe chatwire/src/injector.cpp)
+    #
+    # injector.ixx is a module unit and needs a file set for the same reason
+    # dllmain.ixx does.  It is also where `main` lives, which is the one thing a
+    # module may not own -- see the note above main() in that file.
+    add_executable(chatwire_exe)
+    target_sources(chatwire_exe PRIVATE
+        FILE_SET CXX_MODULES
+        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src"
+        FILES "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src/injector.ixx")
     set_target_properties(chatwire_exe PROPERTIES OUTPUT_NAME "chatwire")
-    target_include_directories(chatwire_exe PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src")
-    # It does not LINK chatwire_lib, so it does not inherit the flag from it --
-    # but it includes chatwire/config.hpp, whose reader and writer are both
-    # generated from the settings struct.  Same flag, stated again because the
-    # usage requirement has nowhere else to travel from.
+    # It imports chatwire.config, whose reader and writer are both generated
+    # from the settings struct, so it instantiates reflection in its own TU.
+    # Stated here as well as on the library because a compile OPTION is what the
+    # instantiation needs and the link alone would not carry it.
     target_compile_options(chatwire_exe PRIVATE ${CHATWIRE_REFLECTION_OPTIONS})
     chatwire_apply_warnings(chatwire_exe)
 
@@ -450,13 +555,9 @@ if(CHATWIRE_BUILD_TOOLS)
             PROPERTIES OBJECT_DEPENDS "${CHATWIRE_DLL_OUTPUT_DIR}/chatwire.dll")
     endif()
 
-    # <print>, and whatever it turned out to need; see the top of this file.
-    if(CHATWIRE_PRINT_LIBRARY)
-        target_link_libraries(chatwire_exe PRIVATE ${CHATWIRE_PRINT_LIBRARY})
-    endif()
-
     # The injector imports chatwire.config to write the handover file, so it
-    # needs the target that OWNS that module rather than a copy of the header.
+    # needs the target that OWNS that module.  <print>'s library rides in on the
+    # same edge, from chatwire_std; see the top of this file.
     target_link_libraries(chatwire_exe PRIVATE chatwire::chatwire)
 
     # Self-contained for the same reason the library is: this is a single
@@ -477,5 +578,5 @@ if(CHATWIRE_REFLECTION_OPTIONS)
 else()
     set(CHATWIRE_REFLECTION_NOTE "reflection on by default")
 endif()
-message(STATUS "chatwire ${PROJECT_VERSION} - C++${CMAKE_CXX_STANDARD}, header-based, "
+message(STATUS "chatwire ${PROJECT_VERSION} - C++${CMAKE_CXX_STANDARD}, named modules + import std, "
                "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}, ${CHATWIRE_REFLECTION_NOTE}")

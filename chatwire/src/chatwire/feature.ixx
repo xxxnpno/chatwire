@@ -1,33 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 export module chatwire.feature;
+import std;
 import chatwire.log;
 
 // chatwire.core.feature — the extension point.
@@ -73,7 +45,7 @@ import chatwire.log;
 // handle() at once, and a feature holding state of its own has to say how that
 // is guarded.  It also does not make MINECRAFT thread-safe: the VM permits the
 // call, the game may still not, and which game state tolerates it is a
-// per-method question — see the notes on send_chat and add_chat in sdk.hpp for
+// per-method question — see the notes on send_chat and add_chat in chatwire.sdk for
 // the shape of that argument.
 
 export namespace chatwire
@@ -204,7 +176,24 @@ export namespace chatwire
             // initialisers in other TUs, and a namespace-scope container would
             // be a static-init-order race with them.  This is the standard
             // construct-on-first-use fix.
-            [[nodiscard]] auto storage() noexcept -> std::vector<feature*>&;
+            //
+            // NOT `inline`, and that word is the whole point.  GCC 16.2 emits an
+            // inline function's local static into the module's object AND into
+            // every consumer's, and `-Wl,--allow-multiple-definition` -- which
+            // the link needs anyway -- then hands each consumer its own copy.
+            // Duplicated CODE is harmless; duplicated STATE meant the registry
+            // was written by one copy and read from another, so every feature
+            // registered and none was found.  A non-inline function in a module
+            // interface unit is emitted exactly once, in this unit's object,
+            // which is what a separate implementation unit used to buy.
+            //
+            // Deliberately leaked: `new` with no `delete`, so a detour that
+            // outlives shutdown cannot walk freed memory.
+            [[nodiscard]] auto storage() noexcept -> std::vector<feature*>&
+            {
+                static auto* const v{ new std::vector<feature*>{} };
+                return *v;
+            }
         }
 
         /*
@@ -246,7 +235,11 @@ export namespace chatwire
                 without restarting the ones that did -- starting a feature twice
                 installs its hook twice.
             */
-            [[nodiscard]] auto started() noexcept -> std::vector<feature*>&;
+            [[nodiscard]] auto started() noexcept -> std::vector<feature*>&
+            {
+                static auto* const v{ new std::vector<feature*>{} };
+                return *v;
+            }
 
             [[nodiscard]] inline auto has_started(feature* const f) noexcept -> bool
             {

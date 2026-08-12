@@ -1,7 +1,9 @@
 build/
 
-# Module artefacts from the C++26 named-modules era.  chatwire is header-based
-# now (see the README), but a stale gcm.cache outlives the decision.
+# Compiled module interfaces.  CMake keeps the ones it builds under build/, but
+# a g++ invoked by hand drops a gcm.cache wherever it was run, and a stale one is
+# how you get "failed to read compiled module" from a tree that is perfectly
+# fine.
 *.gcm
 gcm.cache/
 

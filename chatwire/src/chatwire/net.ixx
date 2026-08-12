@@ -1,36 +1,27 @@
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
+// Win32 has no module, so the platform headers live here, in the global module
+// fragment.  That is the one place a #include belongs in this codebase, and
+// every other unit that needs Windows carries a pointer back to this note.
+//
+// <cstdlib> LEADS, and it is not decoration.  MinGW's <winnt.h> reaches
+// <x86intrin.h>, which reaches <cstdlib>, from inside an `extern "C"` block --
+// so those declarations are first seen with C language linkage.  The same
+// declarations then arrive from `import std;` with C++ linkage and GCC 16.2
+// stops on the first one it notices:
+//
+//     error: conflicting language linkage for imported declaration
+//            'constexpr bool std::__is_constant_evaluated()'
+//
+// Including <cstdlib> here first gives those declarations their real linkage,
+// and windows.h's re-include is a no-op against the header guard.  One line,
+// and it is the difference between `import std;` working in this file and not.
 #include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
 export module chatwire.net;
+import std;
 
 // chatwire.net — Winsock, behind a small vocabulary.
 //
@@ -52,9 +43,11 @@ export module chatwire.net;
 //   WAKING A BLOCKED ACCEPT.  Closing a listening socket from another thread
 //   does wake accept() on Windows -- but chatwire polls with wait_readable()
 //   instead, so the accept thread owns its own exit and nothing ever closes a
-//   descriptor another thread is blocked on.  See ws/server.hpp.
+//   descriptor another thread is blocked on.  See chatwire.ws.server.
 
-// Platform headers strictly after the standard ones -- see common.hpp.
+// The standard library arrives as a module, so the old rule -- every std header
+// strictly before any platform one -- has one survivor, and it is the <cstdlib>
+// line in the fragment above.
 
 
 export namespace chatwire::net

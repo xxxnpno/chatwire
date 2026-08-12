@@ -1,33 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 export module chatwire.sdk;
+import std;
 import chatwire.log;
 import chatwire.mapping;
 import vmhook;
@@ -45,25 +17,29 @@ import vmhook;
 // message", never in terms of klasses, oops and detours.  Adding a feature does
 // not require understanding vmhook.
 //
-// PRACTICAL: vmhook.hpp is 27,000 lines, and putting it in the global module
-// fragment of more than one module is more than today's compilers can take:
+// PRACTICAL, and this half of the argument has EXPIRED.  vmhook is 27,000
+// lines, and while it was a header the rule "exactly one translation unit
+// includes it" was not a preference, it was what kept the compiler alive:
 //
-//   * including it in several fragments makes GCC 15 report "mismatching abi
-//     tags" for its std::string-holding globals — each module gets its own view;
-//   * building it as its own module and importing that makes GCC 15 segfault
-//     when a TU instantiates both vmhook::register_class and vmhook::hook;
-//   * Clang 19 crashes outright compiling it as a module interface unit.
+//   * including it in several global module fragments made GCC 15 report
+//     "mismatching abi tags" for its std::string-holding globals — each module
+//     got its own view;
+//   * building it as its own module made GCC 15 segfault when a TU
+//     instantiated both vmhook::register_class and vmhook::hook;
+//   * Clang 19 crashed outright compiling it as a module interface unit.
 //
-// Every one of those is a compiler bug rather than a defect in vmhook or here,
-// and all three disappear when exactly ONE translation unit includes the
-// header.  That constraint pushes toward the design that was better anyway.
+// All three were compiler bugs rather than defects in vmhook or here, and GCC
+// 16.2 has none of them: vmhook is a module now, built once as `export module
+// vmhook;`, and importing it twice costs nothing because a BMI is read, not
+// re-parsed.  So the constraint is gone and the DESIGN it forced is kept on its
+// own merits, which is the better reason to have it.
 //
-// So: this file includes vmhook.hpp.  Nothing else does.  The facade below
-// exposes only plain types — std::string, bool, function pointers — so no
-// vmhook type ever crosses the boundary.
+// So: this file imports vmhook.  Nothing else does.  The facade below exposes
+// only plain types — std::string, bool, function pointers — so no vmhook type
+// ever crosses the boundary.
 
-// THE ONE PLACE vmhook IS INCLUDED.  See the header comment above for why
-// that boundary matters.
+// THE ONE PLACE vmhook IS IMPORTED.  See the note above for why that boundary
+// is still worth keeping now that nothing forces it.
 
 export namespace chatwire::sdk::detail
 {

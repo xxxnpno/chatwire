@@ -1,33 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 export module chatwire.mapping;
+import std;
 
 // chatwire.mapping — Minecraft 1.8.9 name resolution across all three mappings.
 //
@@ -162,7 +134,7 @@ export namespace chatwire::mapping
         check the whole table against the attached client and lets the
         `mapping.verify` command report the answer.  Adding a name below is
         therefore adding a name that gets verified -- there is no second list to
-        remember to update, which is the same property json.hpp gets from the
+        remember to update, which is the same property chatwire.json gets from the
         same mechanism.
 
         THE CONVENTION EVERY GROUP FOLLOWS, and which the walk relies on:

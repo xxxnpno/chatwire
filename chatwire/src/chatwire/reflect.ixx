@@ -1,35 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
-#include <meta>
-
 export module chatwire.reflect;
+import std;
 
 // chatwire.core.reflect — the one reflection primitive the project shares.
 //
@@ -55,17 +25,15 @@ export module chatwire.reflect;
 // ===========================================================================
 // WHAT INCLUDING THIS COSTS
 // ===========================================================================
-// <meta>, and therefore clangd.  clangd 22 does not ship the header, so every
-// file that reaches this one reports `'meta' file not found` and a few hundred
-// cascading errors that are all artefacts of that one miss.  See the note at
-// the bottom of common.hpp: the rule is that <meta> stays confined to the files
-// that actually reflect, and this file does not widen that set -- it is
-// included by exactly the files that were including <meta> already, plus the
-// one new feature that reflects.
-
-// Immediately after common.hpp, so the ordering rule that file exists for still
-// holds: the whole standard library is declared before any platform header can
-// wrap it in `extern "C"`.
+// clangd, and nothing else any more.  clangd 22 implements no part of P2996, so
+// every file that reflects reports parse errors on `^^`, on a splice and on
+// `template for` -- all of them artefacts of the tool rather than of the code,
+// and all of them checked by compiling instead.
+//
+// What it USED to cost was an <meta> include that had to be confined to the
+// files that actually reflect and placed before any platform header.  `import
+// std;` carries std::meta, so there is no header to confine and no order to get
+// right: a unit that reflects imports std like every other unit does.
 
 export namespace chatwire::reflect
 {

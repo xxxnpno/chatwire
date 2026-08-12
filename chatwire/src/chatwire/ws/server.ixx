@@ -1,40 +1,24 @@
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
+// Win32 has no module, so the platform headers live here, in the global module
+// fragment.  That is the one place a #include belongs in this codebase.
+//
+// <cstdlib> leads, and is not decoration -- see chatwire/net.ixx for the
+// language-linkage clash it defuses.
+//
+// <winsock2.h> then goes BEFORE <windows.h>, which is the one ordering Windows
+// itself insists on: the other way round, windows.h pulls in the 1.1 socket API
+// and winsock2.h greets you with `#warning Please include winsock2.h before
+// windows.h` -- a build failure under -Werror, and a pile of conflicting
+// redeclarations without it.  Winsock is here as well as in chatwire.net
+// because a module does not re-export what its own fragment included.
 #include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
-// Winsock, in THIS unit's fragment: chatwire.net has it too, and a module does
-// not re-export its fragment.  <winsock2.h> BEFORE <windows.h>, which is the
-// one ordering Windows itself insists on.
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 
 export module chatwire.ws.server;
+import std;
 import chatwire.crypto;
 import chatwire.json;
 import chatwire.log;
@@ -78,7 +62,7 @@ import chatwire.ws.websocket;
 //
 // WHAT THIS DOES NOT DO IS ENCRYPT.  Everything after the handshake is
 // plaintext, so across an untrusted network chatwire must be tunnelled --
-// WireGuard, Tailscale, an SSH forward.  See chatwire/crypto.hpp for why a
+// WireGuard, Tailscale, an SSH forward.  See chatwire.crypto for why a
 // hand-rolled TLS inside an injected DLL would be worse than saying so.
 //
 // ===========================================================================
@@ -102,10 +86,8 @@ import chatwire.ws.websocket;
 //   * a client that stops reading cannot stall the game: writes are best-effort
 //     and a failed write closes that client rather than blocking the broadcaster.
 //
-// Winsock itself stays behind chatwire/net.hpp; none of it leaks into this
+// Winsock itself stays behind chatwire.net; none of it leaks into this
 // file.
-
-
 
 
 export namespace chatwire::ws::detail

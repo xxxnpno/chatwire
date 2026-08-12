@@ -1,37 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> in THIS unit's fragment, even though chatwire.reflect also has it.
-// A module does not re-export what its global module fragment included, so
-// `import chatwire.reflect;` brings the wrapper and not std::meta itself.
-#include <meta>
-
 export module chatwire.features.mapping;
+import std;
 import chatwire.reflect;
 import chatwire.feature;
 import chatwire.json;
@@ -45,7 +13,7 @@ import chatwire.sdk;
 // ===========================================================================
 // THE FAILURE THIS EXISTS TO MAKE LOUD
 // ===========================================================================
-// mapping.hpp opens with the reason: a wrong OBF name fails SILENTLY.  The
+// chatwire.mapping opens with the reason: a wrong OBF name fails SILENTLY.  The
 // class resolves to something real, the member lookup finds nothing, and the
 // feature that needed it just never works.  That is not hypothetical -- `avq`
 // shipped here for a release as GuiNewChat, which is really MapItemRenderer, so
@@ -88,11 +56,9 @@ import chatwire.sdk;
 // ClassLoaderDataGraph on a miss, which on a heavily modded client is
 // measurable -- so it is a request a user makes, never something polled.
 
-// Brings <meta> with it: this feature GENERATES its work from the table's shape.
-// See the note at the bottom of common.hpp for why that include is confined.
-
-
-
+// This feature GENERATES its work from the mapping table's shape, so it
+// reflects.  That used to mean an <meta> include placed just so; `import std;`
+// carries std::meta and there is nothing left to place.
 
 
 export namespace chatwire::features
@@ -185,7 +151,7 @@ export namespace chatwire::features
             @details
             THE CONVENTION, and the only thing this walk assumes about the
             table: the member called `clazz` is the class, and every other
-            member is a field or a method on it.  mapping.hpp says the same
+            member is a field or a method on it.  chatwire.mapping says the same
             thing where the groups are declared, because a convention stated in
             one place is a convention nobody can see.
 

@@ -1,33 +1,6 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 export module chatwire.log;
+import std;
+import chatwire.stdio;
 
 // chatwire.core.log — diagnostics that cannot take the host process down.
 //
@@ -85,7 +58,16 @@ export namespace chatwire::log::detail
     // Deliberately leaked: `new` with no delete.  A destroyed mutex that a
     // detour still logs through is a use-after-free in a foreign process; a
     // leaked one at exit is nothing, because the process is going away.
-    [[nodiscard]] auto sink_mutex() noexcept -> std::mutex&;
+    //
+    // NOT `inline` -- see the note on chatwire::registry::detail::storage() in
+    // chatwire.feature.  An inline function's local static is emitted into every
+    // consumer's object as well as this one's, and one lock per consumer is not
+    // a lock.
+    [[nodiscard]] auto sink_mutex() noexcept -> std::mutex&
+    {
+        static std::mutex* const m{ new std::mutex{} };
+        return *m;
+    }
 
     inline auto enabled(const chatwire::log::level at) noexcept -> bool
     {
@@ -93,13 +75,22 @@ export namespace chatwire::log::detail
                >= static_cast<std::uint8_t>(g_threshold.load(std::memory_order_acquire));
     }
 
+    // std::print rather than std::fprintf with "%.*s", and the change is not
+    // cosmetic: a string_view has no terminator, so printf had to be handed a
+    // pointer and a length as two arguments that a format string promised to
+    // keep in step.  std::print takes the view itself.
+    //
+    // The stream comes from chatwire.stdio because `stdout` is a MACRO and no
+    // module can export one; see the top of chatwire/stdio.ixx.  The explicit
+    // flush stays -- an injected DLL's log line is worth nothing if it is still
+    // sitting in a buffer when the game dies.
     inline auto write_raw(const std::string_view line) noexcept -> void
     {
         try
         {
             const std::lock_guard<std::mutex> guard{ sink_mutex() };
-            std::fprintf(stdout, "%.*s\n", static_cast<int>(line.size()), line.data());
-            std::fflush(stdout);
+            std::println(chatwire::stdio::out(), "{}", line);
+            std::fflush(chatwire::stdio::out());
         }
         catch (...) { }
     }
@@ -109,10 +100,8 @@ export namespace chatwire::log::detail
         try
         {
             const std::lock_guard<std::mutex> guard{ sink_mutex() };
-            std::fprintf(stdout, "[chatwire] [%.*s] %.*s\n",
-                         static_cast<int>(level.size()), level.data(),
-                         static_cast<int>(text.size()), text.data());
-            std::fflush(stdout);
+            std::println(chatwire::stdio::out(), "[chatwire] [{}] {}", level, text);
+            std::fflush(chatwire::stdio::out());
         }
         catch (...)
         {

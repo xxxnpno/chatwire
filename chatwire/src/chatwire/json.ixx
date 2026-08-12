@@ -1,39 +1,5 @@
-module;
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <format>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-// <meta> HERE TOO.  A reflection template is instantiated in the unit that
-// CALLS it, not in the one that defines it, so every module that reaches
-// json::object or config's walkers needs the header in its own fragment --
-// importing chatwire.reflect is not enough, and GCC's error points into
-// libstdc++ rather than at the missing include.
-#include <meta>
-
 export module chatwire.json;
+import std;
 import chatwire.reflect;
 
 // chatwire.core.json — just enough JSON, with no dependency.
@@ -127,8 +93,9 @@ import chatwire.reflect;
 // old `field()` did on every field of every message -- a key is now a C++
 // identifier by construction, and there is no identifier escape() would alter.
 
-// Brings <meta> with it, deliberately here rather than in common.hpp: see the
-// note at the bottom of that file, and the one in reflect.hpp.
+// The reflection this file leans on arrives with `import std;` -- std::meta is
+// part of the std module, so there is no header to place and no unit that has to
+// remember to place it.  See chatwire.reflect.
 
 export namespace chatwire::json
 {
