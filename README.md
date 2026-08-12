@@ -139,6 +139,43 @@ asyncio.run(main())
 The event fires **before** the world is installed, so the players are not there yet — which is why
 the roster is asked for a moment later rather than in the same breath.
 
+### `thePlayer` — where you are and how you are doing
+
+One command, named after the field it reads, because the **instant** is the point: a position
+and a health read a tick apart describe a player who never existed.
+
+```python
+import asyncio, json, websockets
+
+async def main():
+    async with websockets.connect("ws://127.0.0.1:24455") as ws:
+        await ws.send(json.dumps({"cmd": "net.minecraft.client.Minecraft.thePlayer"}))
+        print(json.loads(await ws.recv())["result"])
+
+asyncio.run(main())
+```
+
+```python
+{'name': 'chatwire', 'x': 213.5, 'y': 4.0, 'z': -520.5, 'yaw': 0.0, 'pitch': 0.0,
+ 'on_ground': True, 'dimension': 0, 'health': 20.0, 'food': 20,
+ 'saturation': 5.0, 'experience_level': 0}
+```
+
+`dimension` is Minecraft's number — 0 overworld, −1 nether, 1 end. `health` and `food` are out
+of 20, as the HUD shows them. Fails with `not in a world` at the title screen.
+
+### `currentScreen` — is a menu open, and which
+
+```python
+{"cmd": "net.minecraft.client.Minecraft.currentScreen"}
+-> {"open": true, "screen": "net/minecraft/client/gui/GuiIngameMenu"}
+```
+
+`screen` is the class the screen **really** is, in the attached client's own spelling: that on a
+deobfuscated client, `axs` on a vanilla one. Both are the honest answer for that jar, and
+`mapping.resolve` relates them. `open` is false in the world, and then `screen` is `""` — which
+is the answer a client wants before pretending to type.
+
 ### `commands.register` — add a command to the game
 
 Claim a name and the player typing it never reaches the server: chatwire swallows the line and

@@ -213,6 +213,56 @@ def stop(proc: subprocess.Popen) -> None:
         pass
 
 
+async def _add_chat_echo(port: int, text: str) -> bool:
+    """addChatMessage, then wait for the chat observer to report it back.
+
+    This is the one round trip that stays entirely inside the client: the text
+    is turned into a ChatComponentText, handed to EntityPlayerSP.addChatMessage,
+    rendered into the chat box -- and on the way through GuiNewChat
+    .printChatMessage the hook sees it and pushes it back out of the socket it
+    arrived on.  Both halves of the chat feature in one exchange.
+    """
+    import websockets
+
+    async with websockets.connect(f"ws://127.0.0.1:{port}", open_timeout=20) as ws:
+        await ws.send(json.dumps({
+            "cmd": "net.minecraft.client.entity.EntityPlayerSP.addChatMessage",
+            "text": text}))
+        # The EVENT ARRIVES FIRST.  The detour on printChatMessage runs inside
+        # the addChatMessage call, on this very request's thread, so the line is
+        # broadcast before the reply to the command that caused it is written.
+        # An earlier version of this waited for the reply and only then looked
+        # for the echo, and therefore always missed it -- the harness reported a
+        # broken bridge for a bridge that was working.
+        deadline = time.time() + 25
+        seen = False
+        while time.time() < deadline:
+            try:
+                frame = json.loads(await asyncio.wait_for(
+                    ws.recv(), timeout=max(0.5, deadline - time.time())))
+            except asyncio.TimeoutError:
+                break
+            if "ok" in frame:
+                if not frame.get("ok"):
+                    return False
+                if seen:
+                    return True
+            elif text in json.dumps(frame):
+                seen = True
+    return seen
+
+
+def add_chat_echo(mapping: str, port: int) -> int:
+    text = f"chatwire {mapping} local echo"
+    try:
+        heard = asyncio.run(_add_chat_echo(port, text))
+    except Exception as e:                                     # noqa: BLE001
+        say(f"    {'addChatMessage':<18} FAILED: {e}")
+        return 1
+    say(f"    {'addChatMessage':<18} shown and observed back: {heard}")
+    return 0 if heard else 1
+
+
 def chat_round_trip(mapping: str, port: int, server: subprocess.Popen | None) -> int:
     """Say something as this client and confirm the SERVER heard it.
 
@@ -302,6 +352,7 @@ def run(which: tuple[str, ...], keep: bool = False, timeout: float = 180.0,
                     if wait_in_world(PORTS[mapping]):
                         _summarise(mapping, ask(PORTS[mapping], IN_WORLD_QUERIES))
                         failures += chat_round_trip(mapping, PORTS[mapping], server)
+                        failures += add_chat_echo(mapping, PORTS[mapping])
                     else:
                         say("    never joined the server; in-world checks skipped")
                         failures += 1

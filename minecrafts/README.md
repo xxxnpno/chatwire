@@ -77,7 +77,8 @@ Vineflower writes `<mapping>/src`. The vanilla tree is the interesting one: `a.c
 | `decompile [mapping...]` | Vineflower each jar into `<mapping>/src` |
 | `launch <mapping>` | start one; `--all`, `--detach`, `--timeout N`, `--username`, `--memory` |
 | `check` | check chatwire's name table against the jar, offline |
-| `chatwire` | launch all three, inject a chatwire into each, ask them all |
+| `chatwire` | server + all three clients + a chatwire in each, then ask them all |
+| `server` | run the local 1.8.9 server on its own |
 | `status` | what exists on disk right now |
 | `all` | setup + build + status |
 
@@ -94,23 +95,43 @@ python minecrafts/mc.py chatwire    # live: all three clients, three chatwires a
 up in `1.8.9-mappings.json`, resolving inherited members through the class hierarchy read
 straight out of the jar's class files. It is the check that would have caught `avq`.
 
-`chatwire` is the live one. It brings up all three clients, injects a separate chatwire into
-each **at the same time** on ports 24455-24457, and asks every one of them `mapping.verify`.
-Three bridges into three JVMs is what a user driving several accounts has, and running them one
-at a time would never exercise it:
+`chatwire` is the live one, and it is a whole world rather than three title screens. It starts
+Mojang's own 1.8.9 server — offline, flat, creative, with the three test accounts opped — brings
+up all three clients with `--server 127.0.0.1` so they join on launch, injects a separate
+chatwire into each **at the same time** on ports 24455-24457, and then asks every one of them
+everything. Three bridges into three JVMs is what a user driving several accounts has, and
+running them one at a time would never exercise it.
+
+Almost nothing chatwire reads exists at the main menu, which is why the server is not optional
+for a real check: `thePlayer` is null, there is no world, and a third of the name table is not
+even loaded. `--no-server` skips it and the in-world half.
+
+The strongest check in there is the chat round trip. `sendChatMessage` starts as JSON on a
+socket, becomes a Java call inside the game, becomes a packet, and comes back out in another
+process's log — and `addChatMessage` never leaves the client but comes back through chatwire's
+own hook on `printChatMessage`. Neither can pass by accident.
 
 ```
 * vanilla on port 24455
     mapping.detected   'OBF (vanilla obfuscated)' (minecraft_class=False ... obf_class=True)
-    mapping.verify     checked=24 missing=0
+    mapping.verify     checked=42 missing=0 unchecked=0
     mapping.resolve    'printChatMessage' -> 'a' (field and method, on gui_new_chat)
+    thePlayer          'chatwire_van' at (213.50, 4.00, -520.50) hp=20 food=20 dim=0
+    currentScreen      open=False ''
+    playerEntities     3 loaded: chatwire_mcp, chatwire_srg, chatwire_van
+    sendChatMessage    sent=True
+    server heard it    yes
+    addChatMessage     shown and observed back: True
 * srg on port 24456
-    mapping.verify     checked=24 missing=0
     mapping.resolve    'printChatMessage' -> 'func_146227_a' (method, on gui_new_chat)
+    currentScreen      open=True 'net/minecraft/client/gui/GuiIngameMenu'
 * mcp on port 24457
-    mapping.verify     checked=24 missing=0
     mapping.resolve    'printChatMessage' -> 'printChatMessage' (method, on gui_new_chat)
 ```
+
+`missing` is a name chatwire has wrong. `unchecked` is a class Minecraft has not loaded yet —
+`FoodStats` does not exist until a player does — and the two are reported separately because
+only the first is a bug.
 
 `--keep` leaves the clients up so you can drive them yourself.
 
