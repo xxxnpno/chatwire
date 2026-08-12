@@ -116,9 +116,11 @@ anything.
 
 ## Quick start
 
-Needs a compiler with **C++26 static reflection** (P2996): GCC 16 or newer. Every JSON object
-chatwire puts on the wire is generated from the struct that describes it, and a compiler without
-reflection is refused at configure time. MSYS2 does not ship GCC 16; the
+Needs **GCC 16.2 or newer** and **CMake 3.28+**. chatwire is written as C++26 **modules** —
+26 `.ixx` interface units, no headers, and no preprocessor outside each unit's global module
+fragment, where `<windows.h>` has nowhere else to live. It also needs **static reflection**
+(P2996): every JSON object on the wire is generated from the struct that describes it, and a
+compiler without it is refused at configure time. MSYS2 does not ship GCC 16; the
 [winlibs](https://winlibs.com) builds do.
 
 ```bash
@@ -126,6 +128,12 @@ cmake -S . -B build/etc -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CXX_COMPILER=C:/tools/mingw64/bin/g++.exe
 cmake --build build/etc
 ```
+
+The build links with `-Wl,--allow-multiple-definition`, which is working around a GCC 16.2 bug
+rather than a design choice: a function-local `static` in an inline function in a module's
+purview is emitted into the module's object *and* every consumer's. Anything that holds **state**
+that way is declared in its interface and defined in an implementation unit, because letting the
+linker pick one of two copies is fine for code and silently splits state.
 
 `build/chatwire.exe` is the only file you need — the library is carried inside it as a resource,
 so there is nothing to keep together and no way to run a new injector against an old library.
