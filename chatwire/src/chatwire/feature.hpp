@@ -212,30 +212,91 @@ namespace chatwire
             return nullptr;
         }
 
+        namespace detail
+        {
+            /*
+                @brief Which features have started.  Same construct-on-first-use
+                       reasoning as `storage()` above.
+                @details
+                Kept so that a feature which could not start can be RETRIED
+                without restarting the ones that did -- starting a feature twice
+                installs its hook twice.
+            */
+            inline auto started() noexcept -> std::vector<feature*>&
+            {
+                static auto* const v{ new std::vector<feature*>{} };
+                return *v;
+            }
+
+            [[nodiscard]] inline auto has_started(feature* const f) noexcept -> bool
+            {
+                const auto& s{ started() };
+                return std::ranges::find(s, f) != s.end();
+            }
+        }
+
         /*
-            @brief Starts every registered feature.
+            @brief Tries to start every feature that is not running yet.
             @details
             One feature failing does not stop the others: a build where the
-            inventory mappings went stale should still bridge chat.  Returns how
-            many started.
+            inventory mappings went stale should still bridge chat.
+
+            RETRYABLE, and that is the point rather than a nicety.  A feature
+            fails to start when a class it hooks is not loaded, and at inject
+            time most of Minecraft is not: a user injects at the main menu, where
+            `GuiNewChat` does not exist because no chat box has ever been drawn.
+            The chat observer therefore could not install, `chat` and `commands`
+            never started, and chatwire ran as a bridge that could send a message
+            and never report one -- indistinguishable, from outside, from the
+            `avq` mapping bug.
+
+            @return how many features started on THIS call.
         */
-        inline auto start_all() noexcept -> std::size_t
+        inline auto start_pending() noexcept -> std::size_t
         {
-            std::size_t started{ 0 };
+            std::size_t started_now{ 0 };
             for (feature* const f : detail::storage())
             {
-                if (!f) { continue; }
+                if (!f || detail::has_started(f)) { continue; }
                 bool ok{ false };
                 try { ok = f->start(); } catch (...) { ok = false; }
                 if (ok)
                 {
-                    ++started;
+                    ++started_now;
+                    try { detail::started().push_back(f); } catch (...) { }
                     chatwire::log::info("feature '{}' started", f->name());
                 }
-                else
+            }
+            return started_now;
+        }
+
+        /* @brief How many features are still waiting for their classes. */
+        [[nodiscard]] inline auto pending() noexcept -> std::size_t
+        {
+            std::size_t waiting{ 0 };
+            for (feature* const f : detail::storage())
+            {
+                if (f && !detail::has_started(f)) { ++waiting; }
+            }
+            return waiting;
+        }
+
+        /*
+            @brief The first start attempt.  Reports what did not come up.
+            @details
+            Only this one warns.  A retry that fails is the normal state of a
+            client sitting on the title screen, and a warning every few seconds
+            saying so would be noise rather than news.
+        */
+        inline auto start_all() noexcept -> std::size_t
+        {
+            const std::size_t started{ start_pending() };
+            for (feature* const f : detail::storage())
+            {
+                if (f && !detail::has_started(f))
                 {
-                    chatwire::log::warn("feature '{}' did NOT start; continuing without it",
-                                        f->name());
+                    chatwire::log::warn("feature '{}' did NOT start yet; retrying as the "
+                                        "game loads more of itself", f->name());
                 }
             }
             return started;

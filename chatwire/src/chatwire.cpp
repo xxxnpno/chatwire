@@ -308,6 +308,84 @@ namespace chatwire::detail
     }
 }
 
+namespace chatwire::detail
+{
+    /*
+        @brief Keeps trying to start the features that could not start yet.
+        @details
+        WHY THIS EXISTS.  A feature fails to start when a class it hooks is not
+        loaded, and at inject time most of Minecraft is not loaded.  The moment a
+        user actually injects is the main menu, and on the main menu there is no
+        `GuiNewChat`, because no chat box has ever been drawn -- so the chat
+        observer could not install, `chat` and `commands` did not start, and
+        chatwire ran as a bridge that could send a message and never report one.
+        From outside that is indistinguishable from a wrong mapping name, which
+        is the failure this project has already been bitten by once.
+
+        Waiting at start-up was not an option: the classes appear when the player
+        joins a world, which may be minutes away or never.  So chatwire comes up
+        with what it has and finishes the job later.
+
+        POLLED, not driven by the world-load hook, and deliberately.  The world
+        observer runs INSIDE the loadWorld detour, where the frame above is
+        Minecraft's interpreter and the rule is "be quick and do not throw" --
+        installing a hook there is neither.  A thread of its own costs a class
+        lookup every few seconds and owes nothing to anybody.
+
+        It stops as soon as nothing is pending, so on a client that was already
+        in a world when chatwire arrived this thread does one check and exits.
+    */
+    inline std::atomic<bool> g_retry_stop{ false };
+    inline std::thread       g_retry_thread{};
+
+    inline auto start_feature_retry() -> void
+    {
+        if (chatwire::registry::pending() == 0u) { return; }
+
+        g_retry_stop.store(false, std::memory_order_release);
+        try
+        {
+            g_retry_thread = std::thread{ []() noexcept
+            {
+                // Metaspace work only -- register_class and hook installation
+                // read HotSpot's structures and patch entry points.  Neither is
+                // a Java CALL, so this thread never needs to join the VM, and
+                // never has to be detached before the DLL unloads.
+                for (int attempt{ 0 }; attempt < 400; ++attempt)
+                {
+                    for (int tick{ 0 }; tick < 30; ++tick)
+                    {
+                        if (g_retry_stop.load(std::memory_order_acquire)) { return; }
+                        std::this_thread::sleep_for(std::chrono::milliseconds{ 100 });
+                    }
+                    if (chatwire::registry::pending() == 0u) { return; }
+
+                    // Re-registering is what makes the retry work: a wrapper
+                    // whose class was missing has no class name bound to it, and
+                    // a hook cannot be installed on a class vmhook cannot find.
+                    (void)chatwire::sdk::register_all();
+                    if (const std::size_t now{ chatwire::registry::start_pending() }; now != 0u)
+                    {
+                        chatwire::log::info(
+                            "{} feature(s) started once their classes were loaded", now);
+                    }
+                }
+            } };
+        }
+        catch (...) { }
+    }
+
+    inline auto stop_feature_retry() noexcept -> void
+    {
+        g_retry_stop.store(true, std::memory_order_release);
+        try
+        {
+            if (g_retry_thread.joinable()) { g_retry_thread.join(); }
+        }
+        catch (...) { }
+    }
+}
+
 namespace chatwire
 {
     /*
@@ -421,6 +499,7 @@ namespace chatwire
         {
             const std::size_t started{ registry::start_all() };
             log::info("{} feature(s) started", started);
+            detail::start_feature_retry();
         }
 
         // 5. The server, last, so an instant client finds a working API.
@@ -429,6 +508,7 @@ namespace chatwire
         if (!detail::server_instance().start(bind_port, &detail::dispatch, &detail::on_presence))
         {
             log::error("websocket server failed to start; shutting down");
+            detail::stop_feature_retry();
             features::commands::set_sink(nullptr);
             registry::stop_all();
             sdk::remove_hooks();
@@ -523,6 +603,11 @@ namespace chatwire
             farewell.join();
         }
         catch (...) { }
+
+        // The retry worker first: it installs hooks, and everything below is
+        // taking hooks down.  Joined rather than signalled and forgotten -- it
+        // runs code in this DLL, and the DLL is about to be unloaded.
+        detail::stop_feature_retry();
 
         detail::server_instance().stop();
         features::chat::set_sink(nullptr);
