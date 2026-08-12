@@ -129,19 +129,63 @@ namespace chatwire::sdk::detail
     };
 
     /*
-        net.minecraft.client.multiplayer.WorldClient — the argument of
-        loadWorld, and the ONE wrapper here that is never register_class'd.
-        It does not need to be: a detour argument declared as
-        std::unique_ptr<W> is wrapped directly around the incoming oop, because
-        W is known statically at the hook site.  Registration only buys field
-        and method lookups, and nothing here does either -- the world is read
-        for one thing, whether it is null.
+        net.minecraft.client.multiplayer.WorldClient — the argument of loadWorld,
+        and the world `playerEntities` is read off.
+
+        It used to be the one wrapper here that was never register_class'd,
+        because a detour argument declared as std::unique_ptr<W> is wrapped
+        directly around the incoming oop and the world was read for one thing:
+        whether it was null.  It is registered now, because registration is what
+        buys FIELD lookups and `players()` reads `playerEntities` through this
+        wrapper rather than through a raw reference.  The field is declared on
+        World and inherited, which the lookup walks to find.
     */
     class world_client : public vmhook::object<world_client>
     {
     public:
         explicit world_client(const vmhook::oop_t oop = nullptr) noexcept
             : vmhook::object<world_client>{ oop }
+        {
+        }
+    };
+
+    /*
+        net.minecraft.entity.player.EntityPlayer — an entry of `playerEntities`.
+        Separate from local_player, which is EntityPlayerSP: the list holds every
+        player the client has loaded, and only one of them is this one.
+    */
+    class player_entity : public vmhook::object<player_entity>
+    {
+    public:
+        explicit player_entity(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<player_entity>{ oop }
+        {
+        }
+    };
+
+    /*
+        java.util.List — `playerEntities` itself.  Wrapped only so the field can
+        be read as an object; the reading is done by vmhook::list, which knows
+        how to walk a java.util.Collection.
+    */
+    class player_list : public vmhook::object<player_list>
+    {
+    public:
+        explicit player_list(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<player_list>{ oop }
+        {
+        }
+    };
+
+    /*
+        java.util.UUID — what getUniqueID() hands back, and the only thing done
+        with it is toString().
+    */
+    class java_uuid : public vmhook::object<java_uuid>
+    {
+    public:
+        explicit java_uuid(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<java_uuid>{ oop }
         {
         }
     };
@@ -335,44 +379,6 @@ namespace chatwire::sdk::detail
         // mappings, for the case where the field lookup itself failed.
         const auto fallback{ map::resolve(map::world_client.clazz) };
         return fallback.empty() ? std::string{} : std::format("L{};", fallback);
-    }
-
-    /*
-        @brief The local player as a JNI reference, or nullptr.
-        @details
-        The same walk as player() below -- Minecraft.theMinecraft, then
-        .thePlayer -- but done entirely through JNI, so no raw oop is ever held.
-        That is what makes it safe from a thread that is not inside a hook: every
-        intermediate is a reference the collector tracks and updates.
-
-        The caller releases the result with vmhook::jni_release.
-    */
-    [[nodiscard]] inline auto jni_player() noexcept -> void*
-    {
-        try
-        {
-            const auto mc_class{ map::resolve(map::minecraft.clazz) };
-            const auto mc_field{ map::resolve(map::minecraft.the_minecraft) };
-            const auto player_field{ map::resolve(map::entity_player_sp.clazz) };
-            const auto the_player{ map::resolve(map::minecraft.the_player) };
-            if (mc_class.empty() || mc_field.empty() || the_player.empty()) { return nullptr; }
-
-            vmhook::hotspot::klass* const k{ vmhook::find_class(mc_class) };
-            if (!k) { return nullptr; }
-
-            // Descriptors are built from the mapping, so this works under MCP,
-            // SRG and OBF without three code paths.
-            const std::string mc_descriptor{ std::format("L{};", mc_class) };
-            void* const mc{ vmhook::jni_static_object(k, mc_field.c_str(), mc_descriptor.c_str()) };
-            if (!mc) { return nullptr; }
-
-            const std::string player_descriptor{ std::format("L{};", player_field) };
-            void* const player{ vmhook::jni_object_field(mc, the_player.c_str(),
-                                                         player_descriptor.c_str()) };
-            vmhook::jni_release(mc);
-            return player;
-        }
-        catch (...) { return nullptr; }
     }
 
     /*
@@ -659,6 +665,10 @@ namespace chatwire::sdk
                                  static_cast<d::gui_new_chat*>(nullptr)) };
         const bool text{ reg("ChatComponentText", map::chat_component_text.clazz,
                              static_cast<d::chat_component_text*>(nullptr)) };
+        const bool world_class{ reg("WorldClient", map::world_client.clazz,
+                                    static_cast<d::world_client*>(nullptr)) };
+        const bool other{ reg("EntityPlayer", map::entity_player.clazz,
+                              static_cast<d::player_entity*>(nullptr)) };
         const bool food{ reg("FoodStats", map::food_stats.clazz,
                              static_cast<d::food_stats*>(nullptr)) };
 
@@ -671,6 +681,8 @@ namespace chatwire::sdk
         if (!chat_gui)  { chatwire::log::warn("GuiNewChat missing; incoming chat not observed"); }
         if (!text)      { chatwire::log::warn("ChatComponentText missing; client-side chat unavailable"); }
         if (!food)      { chatwire::log::warn("FoodStats missing; hunger will read as zero"); }
+        if (!world_class) { chatwire::log::warn("WorldClient missing; playerEntities unavailable"); }
+        if (!other)     { chatwire::log::warn("EntityPlayer missing; playerEntities unavailable"); }
         return true;
     }
 
@@ -892,37 +904,36 @@ namespace chatwire::sdk
             const auto method{ map::resolve(map::entity_player_sp.send_chat_message) };
             if (method.empty()) { return false; }
 
-            // OFF A HOOK -> JNI.  This is the whole reason the bridge exists:
-            // on a JVM that publishes no safepoint signal the transition cannot
-            // be reproduced from outside, and JNI's own entry does it correctly.
-            // No raw oop is held anywhere below -- every reference is one the
-            // collector tracks -- so nothing can move out from under the call.
-            if (!chatwire::sdk::attach_thread()) { return false; }
-            if (vmhook::jni_available())
-            {
-                void* const player{ chatwire::sdk::detail::jni_player() };
-                if (!player) { return false; }
-
-                void* const message{ vmhook::jni_string(text) };
-                if (!message) { return false; }
-
-                const bool sent{ vmhook::jni_call_void(
-                    player, method.c_str(), "(Ljava/lang/String;)V", { message }) };
-                vmhook::jni_release(message);
-                vmhook::jni_release(player);
-                return sent;
-            }
-
-            // INSIDE A HOOK (or a JVM old enough to gate soundly): the pure
-            // VMStructs path, unchanged.  One scope around resolve AND call, so
-            // no collection can start between finding the player and invoking on
-            // it -- the property a detour has for free.
+            // ONE PATH, and it is the one vmhook documents.  This used to
+            // branch: a JNI bridge off a hook, the scope below inside one.  The
+            // bridge existed because `method_proxy::call()` was broken on every
+            // JDK before vmhook 6.0.0 -- it resolved the call stub through a
+            // VMStructs entry no JVM publishes, so every Java call was a silent
+            // no-op and the JNI fallback was the only thing that worked.  6.0.0
+            // fixed the stub, and the branch became two ways to do one thing,
+            // one of them undocumented and slated for deletion upstream.
+            //
+            // The scope is not the lesser half.  It ATTACHES this thread if it
+            // is not already a JavaThread and then enters `_thread_in_Java`,
+            // which it will not do while a stop-the-world collection is running
+            // -- so no collection can begin inside it.  That is the property a
+            // detour has for free, and it is why the old advice was "call from
+            // inside a hook".  There is no separate attach_thread() call here
+            // any more: the scope is the attach.
+            //
+            // RESOLVE AND CALL IN ONE SCOPE.  Split into two, a collection
+            // between them could move the player found by the first.
             const vmhook::java_thread_scope java{};
             if (!java) { return false; }
 
             const auto p{ chatwire::sdk::detail::player() };
             if (!p->get_instance()) { return false; }
-            const auto proxy{ p->get_method(method) };
+
+            // NAME AND DESCRIPTOR.  Under OBF this method is called `e`, and so
+            // are a dozen unrelated methods on EntityPlayerSP -- a name-only
+            // lookup takes whichever comes first in the class's method array.
+            // The descriptor is not optional on the one mapping most users run.
+            const auto proxy{ p->get_method(method, "(Ljava/lang/String;)V") };
             if (!proxy) { return false; }
             return !proxy->call(text).threw();
         }
@@ -991,40 +1002,16 @@ namespace chatwire::sdk
             vmhook::hotspot::klass* const k{ vmhook::find_class(class_name) };
             if (!k) { return false; }
 
-            // OFF A HOOK -> JNI, for the reason given in send_chat.  It also
-            // disposes of two hazards the pure path had here: the component is
-            // allocated BY THE VM rather than by bumping someone else's TLAB,
-            // and it is held in a tracked reference across <init>, so a
-            // collection triggered by the constructor cannot move it out from
-            // under the call that follows.
-            if (!chatwire::sdk::attach_thread()) { return false; }
-            if (vmhook::jni_available())
-            {
-                void* const message{ vmhook::jni_string(text) };
-                if (!message) { return false; }
-
-                void* const component{ vmhook::jni_new_object(
-                    k, "(Ljava/lang/String;)V", { message }) };
-                vmhook::jni_release(message);
-                if (!component) { return false; }
-
-                void* const player{ chatwire::sdk::detail::jni_player() };
-                if (!player) { vmhook::jni_release(component); return false; }
-
-                const std::string descriptor{
-                    std::format("(L{};)V", map::resolve(map::i_chat_component.clazz)) };
-                const bool added{ vmhook::jni_call_void(
-                    player, method.c_str(), descriptor.c_str(), { component }) };
-                vmhook::jni_release(component);
-                vmhook::jni_release(player);
-                return added;
-            }
-
-            // INSIDE A HOOK: the pure VMStructs path.  make_unique allocates the
-            // object AND runs its real <init> -- which is what `new` compiles to
-            // in Java, and which used to be twenty lines of scanning the class's
-            // methods for the right constructor here.  Both steps happen with the
-            // gate held, because the object is UNROOTED between them.
+            // ONE PATH, vmhook's documented one -- see the note in send_chat
+            // for why the JNI branch that used to be here is gone.
+            //
+            // ALLOCATE AND CONSTRUCT AND CALL, ALL INSIDE THE SCOPE, and that is
+            // the correctness property rather than tidiness.  A TLAB is a
+            // lockless bump pointer, and between the allocation and <init> the
+            // object is UNROOTED: a collection landing anywhere in allocate ->
+            // construct -> call would move it out from under the next step.
+            // make_unique does the first two as one -- it is what `new` compiles
+            // to in Java -- and the scope holds all three together.
             const vmhook::java_thread_scope java{};
             if (!java) { return false; }
 
@@ -1033,7 +1020,17 @@ namespace chatwire::sdk
 
             const auto p{ d::player() };
             if (!p->get_instance()) { return false; }
-            const auto proxy{ p->get_method(method) };
+
+            // NAME AND DESCRIPTOR, and here it is not a precaution but the
+            // difference between working and not.  Under OBF this is
+            // EntityPlayerSP.a, which is also sendChatMessage's neighbour and
+            // several other things; resolving by name alone found one of the
+            // others and addChatMessage silently did nothing on every vanilla
+            // client.  The descriptor names IChatComponent in whichever spelling
+            // this jar uses, so it is built rather than written.
+            const std::string descriptor{
+                std::format("(L{};)V", map::resolve(map::i_chat_component.clazz)) };
+            const auto proxy{ p->get_method(method, descriptor) };
             if (!proxy) { return false; }
             return !proxy->call(component).threw();
         }
@@ -1072,84 +1069,80 @@ namespace chatwire::sdk
     [[nodiscard]] inline auto players() noexcept -> std::vector<player_identity>
     {
         namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
         std::vector<player_identity> out;
         try
         {
-            if (!chatwire::sdk::attach_thread() || !vmhook::jni_available()) { return out; }
-
-            const auto mc_class{ map::resolve(map::minecraft.clazz) };
+            // Table lookups first, outside the scope: they touch no Java, and
+            // every microsecond inside a scope is a microsecond the whole VM
+            // spends waiting for this thread.
             const auto mc_field{ map::resolve(map::minecraft.the_minecraft) };
             const auto world_field{ map::resolve(map::minecraft.the_world) };
             const auto list_field{ map::resolve(map::world.player_entities) };
             const auto name_method{ map::resolve(map::entity.get_name) };
             const auto uuid_method{ map::resolve(map::entity.get_unique_id) };
-            // theWorld's declared type, ASKED FOR rather than spelled out, so a
-            // repackaged client answers for itself.  This used to build the
-            // descriptor from a table entry that had no OBF name, which on a
-            // vanilla client produced "Lnet/minecraft/client/multiplayer/
-            // WorldClient;" -- a field lookup that matches nothing, and a player
-            // list that came back empty every time.
-            const auto world_type{ chatwire::sdk::detail::world_client_descriptor() };
-            if (mc_class.empty() || mc_field.empty() || world_field.empty()
-                || list_field.empty() || name_method.empty() || uuid_method.empty()
-                || world_type.empty())
+            if (mc_field.empty() || world_field.empty() || list_field.empty()
+                || name_method.empty() || uuid_method.empty())
             {
                 return out;
             }
 
-            vmhook::hotspot::klass* const k{ vmhook::find_class(mc_class) };
-            if (!k) { return out; }
+            // ONE SCOPE for the whole walk, which matters more here than
+            // anywhere else in this file: it is the longest sequence of Java
+            // work chatwire does, so it is where a collection would be likeliest
+            // to land between resolving something and using it.  Inside the
+            // scope none can begin.
+            //
+            // It is also the reason this is bounded below.  A scope is a
+            // safepoint the VM waits on, and a thousand players would hold it
+            // for long enough to stutter the game.
+            const vmhook::java_thread_scope java{};
+            if (!java) { return out; }
 
-            void* const mc{ vmhook::jni_static_object(k, mc_field.c_str(),
-                                                      std::format("L{};", mc_class).c_str()) };
-            if (!mc) { return out; }
+            const auto mc_proxy{ d::minecraft{}.get_field(mc_field) };
+            if (!mc_proxy) { return out; }
+            const std::unique_ptr<d::minecraft> mc{ mc_proxy->get() };
+            if (!mc->get_instance()) { return out; }
 
-            void* const world{ vmhook::jni_object_field(mc, world_field.c_str(),
-                                                        world_type.c_str()) };
-            vmhook::jni_release(mc);
-            if (!world) { return out; }          // title screen: no world, no players
+            const auto world_proxy{ mc->get_field(world_field) };
+            if (!world_proxy) { return out; }
+            const std::unique_ptr<d::world_client> world{ world_proxy->get() };
+            if (!world->get_instance()) { return out; }        // title screen
 
-            void* const list{ vmhook::jni_object_field(world, list_field.c_str(),
-                                                       "Ljava/util/List;") };
-            vmhook::jni_release(world);
-            if (!list) { return out; }
+            const auto list_proxy{ world->get_field(list_field) };
+            if (!list_proxy) { return out; }
+            const std::unique_ptr<d::player_list> held{ list_proxy->get() };
+            if (!held->get_instance()) { return out; }
 
-            const std::int32_t count{ vmhook::jni_call_int(list, "size", "()I") };
-            for (std::int32_t i{ 0 }; i < count && i < 1024; ++i)
+            // vmhook::list knows how to walk a java.util.Collection, so the
+            // size()/get(i) loop this used to run by hand is one call.  What it
+            // returns is wrappers, not addresses.
+            const vmhook::list entities{ held->get_instance() };
+            auto found{ entities.to_vector<d::player_entity>() };
+
+            out.reserve(found.size());
+            for (const auto& entity : found)
             {
-                // jvalue is a union whose first member is the 32-bit int, so an
-                // index rides in the low half of one 8-byte slot.
-                void* const index{ reinterpret_cast<void*>(static_cast<std::intptr_t>(i)) };
-                void* const entry{ vmhook::jni_call_object(
-                    list, "get", "(I)Ljava/lang/Object;", { index }) };
-                if (!entry) { continue; }
+                if (!entity || !entity->get_instance()) { continue; }
 
                 player_identity who{};
-
-                if (void* const name{ vmhook::jni_call_object(
-                        entry, name_method.c_str(), "()Ljava/lang/String;") })
+                if (const auto named{ entity->get_method(name_method) })
                 {
-                    who.name = vmhook::jni_to_string(name);
-                    vmhook::jni_release(name);
+                    who.name = named->call();
                 }
-
-                if (void* const uuid{ vmhook::jni_call_object(
-                        entry, uuid_method.c_str(), "()Ljava/util/UUID;") })
+                if (const auto unique_id{ entity->get_method(uuid_method) })
                 {
-                    if (void* const text{ vmhook::jni_call_object(
-                            uuid, "toString", "()Ljava/lang/String;") })
+                    const std::unique_ptr<d::java_uuid> id{ unique_id->call() };
+                    if (id->get_instance())
                     {
-                        who.uuid = vmhook::jni_to_string(text);
-                        vmhook::jni_release(text);
+                        if (const auto as_text{ id->get_method("toString") })
+                        {
+                            who.uuid = as_text->call();
+                        }
                     }
-                    vmhook::jni_release(uuid);
                 }
-
-                vmhook::jni_release(entry);
                 if (!who.name.empty() || !who.uuid.empty()) { out.push_back(std::move(who)); }
             }
-
-            vmhook::jni_release(list);
         }
         catch (...) { }
         return out;
