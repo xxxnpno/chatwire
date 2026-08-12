@@ -1,4 +1,35 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <windows.h>
+
+export module chatwire.module;
 
 // chatwire.module — where am I on disk?
 //
@@ -13,11 +44,8 @@
 // address is the question.  A string literal would not do: literals can be
 // merged, folded into another section, or shared with a different module
 // entirely, and the answer would be that module's path.
-#include "chatwire/common.hpp"
 
-#include <windows.h>
-
-namespace chatwire::module
+export namespace chatwire::module
 {
     namespace detail
     {

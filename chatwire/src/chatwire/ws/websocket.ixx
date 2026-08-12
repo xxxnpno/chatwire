@@ -1,4 +1,33 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+export module chatwire.ws.websocket;
 
 // chatwire.ws.websocket — RFC 6455 handshake and framing, by hand.
 //
@@ -26,8 +55,8 @@
 // NOT implemented: extensions (the handshake never negotiates one, so a
 // compliant client will not send one), binary frames beyond passing the opcode
 // through, and continuation of control frames (which RFC 6455 forbids anyway).
-#include "chatwire/common.hpp"
-namespace chatwire::ws::detail
+
+export namespace chatwire::ws::detail
 {
     // ── SHA-1 ───────────────────────────────────────────────────────────────
     // Required by the handshake and by nothing else.  RFC 3174, ~40 lines, and
@@ -151,7 +180,7 @@ namespace chatwire::ws::detail
     }
 }
 
-namespace chatwire::ws
+export namespace chatwire::ws
 {
     /* @brief RFC 6455 opcodes.  Only the ones a text protocol needs. */
     enum class opcode : std::uint8_t

@@ -1,4 +1,43 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+// <meta> in THIS unit's fragment, even though chatwire.reflect also has it.
+// A module does not re-export what its global module fragment included, so
+// `import chatwire.reflect;` brings the wrapper and not std::meta itself.
+#include <meta>
+
+export module chatwire.features.mapping;
+import chatwire.reflect;
+import chatwire.feature;
+import chatwire.json;
+import chatwire.log;
+import chatwire.mapping;
+import chatwire.sdk;
 
 // chatwire.features.mapping — chatwire checking its own name table against the
 // client it actually landed in.
@@ -48,18 +87,15 @@
 // disturb the game.  It is still not free -- find_class walks the
 // ClassLoaderDataGraph on a miss, which on a heavily modded client is
 // measurable -- so it is a request a user makes, never something polled.
-#include "chatwire/common.hpp"
 
 // Brings <meta> with it: this feature GENERATES its work from the table's shape.
 // See the note at the bottom of common.hpp for why that include is confined.
-#include "chatwire/reflect.hpp"
 
-#include "chatwire/feature.hpp"
-#include "chatwire/json.hpp"
-#include "chatwire/log.hpp"
-#include "chatwire/mapping.hpp"
-#include "chatwire/sdk.hpp"
-namespace chatwire::features
+
+
+
+
+export namespace chatwire::features
 {
     namespace map = chatwire::mapping;
 
@@ -397,7 +433,7 @@ namespace chatwire::features
     };
 }
 
-namespace chatwire::features::mapping
+export namespace chatwire::features::mapping
 {
     /* @brief This feature's singleton, for the root module to register. */
     [[nodiscard]] inline auto instance() noexcept -> chatwire::feature*

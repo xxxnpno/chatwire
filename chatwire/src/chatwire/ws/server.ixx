@@ -1,4 +1,45 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+// Winsock, in THIS unit's fragment: chatwire.net has it too, and a module does
+// not re-export its fragment.  <winsock2.h> BEFORE <windows.h>, which is the
+// one ordering Windows itself insists on.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+export module chatwire.ws.server;
+import chatwire.crypto;
+import chatwire.json;
+import chatwire.log;
+import chatwire.net;
+import chatwire.ws.websocket;
 
 // chatwire.ws.server — the local WebSocket server.
 //
@@ -63,15 +104,11 @@
 //
 // Winsock itself stays behind chatwire/net.hpp; none of it leaks into this
 // file.
-#include "chatwire/common.hpp"
 
-#include "chatwire/crypto.hpp"
-#include "chatwire/json.hpp"
 
-#include "chatwire/log.hpp"
-#include "chatwire/net.hpp"
-#include "chatwire/ws/websocket.hpp"
-namespace chatwire::ws::detail
+
+
+export namespace chatwire::ws::detail
 {
     /*
         @brief One connected client, owning its socket.
@@ -163,7 +200,7 @@ namespace chatwire::ws::detail
     using client_ptr = std::shared_ptr<client>;
 }
 
-namespace chatwire::ws
+export namespace chatwire::ws
 {
     /*
         @brief What the server does with a decoded client message.

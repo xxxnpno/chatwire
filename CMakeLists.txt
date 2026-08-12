@@ -1,4 +1,7 @@
-cmake_minimum_required(VERSION 3.20)
+# 3.28 is the floor for C++20 MODULES: below it CMake does not scan sources for
+# imports, so nothing is ordered, no module mapper is passed, and every consumer
+# fails with "failed to read compiled module".
+cmake_minimum_required(VERSION 3.28)
 
 project(chatwire
     VERSION      0.3.0
@@ -32,6 +35,7 @@ project(chatwire
 # ---------------------------------------------------------------------------
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -248,16 +252,65 @@ endif()
 # floating dependency on a library this project is injected alongside is how a
 # game crashes after an unrelated upgrade.
 # ---------------------------------------------------------------------------
-add_library(vmhook INTERFACE)
+# vmhook is a C++26 MODULE now, not a header: it is compiled here as an interface
+# unit and consumers `import vmhook;`.  A STATIC library rather than INTERFACE,
+# because there is an object to produce.
+add_library(vmhook STATIC)
 add_library(vmhook::vmhook ALIAS vmhook)
-target_include_directories(vmhook INTERFACE
-    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/chatwire/ext>")
+target_sources(vmhook PUBLIC
+    FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/ext/vmhook"
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/ext/vmhook/vmhook.ixx")
+target_compile_features(vmhook PUBLIC cxx_std_26)
+# GCC needs the flag on EVERY translation unit that imports, not only on the
+# interface units.  PUBLIC so consumers inherit it.
+target_compile_options(vmhook PUBLIC -fmodules)
 
 # ---------------------------------------------------------------------------
 # The library.  Header-based, with one .cpp for the bodies that should not be
 # duplicated into every consumer (start/stop and the wiring they use).
 # ---------------------------------------------------------------------------
 add_library(chatwire_lib STATIC chatwire/src/chatwire.cpp)
+
+# EVERY header is a module interface unit now.  CMake scans them, works out the
+# order and builds them before whatever imports them; there is no list to keep
+# in dependency order by hand.
+target_sources(chatwire_lib PUBLIC
+    FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/chatwire/src"
+    FILES
+        chatwire/src/chatwire/reflect.ixx
+        chatwire/src/chatwire/crypto.ixx
+        chatwire/src/chatwire/json.ixx
+        chatwire/src/chatwire/log.ixx
+        chatwire/src/chatwire/ansi.ixx
+        chatwire/src/chatwire/terminal.ixx
+        chatwire/src/chatwire/module.ixx
+        chatwire/src/chatwire/net.ixx
+        chatwire/src/chatwire/config.ixx
+        chatwire/src/chatwire/command_line.ixx
+        chatwire/src/chatwire/console.ixx
+        chatwire/src/chatwire/mapping.ixx
+        chatwire/src/chatwire/feature.ixx
+        chatwire/src/chatwire/chatwire.ixx
+        chatwire/src/chatwire/sdk.ixx
+        chatwire/src/chatwire/ws/websocket.ixx
+        chatwire/src/chatwire/ws/server.ixx
+        chatwire/src/chatwire/features/chat.ixx
+        chatwire/src/chatwire/features/commands.ixx
+        chatwire/src/chatwire/features/mapping.ixx
+        chatwire/src/chatwire/features/rewrite.ixx
+        chatwire/src/chatwire/features/scoreboard.ixx
+        chatwire/src/chatwire/features/system.ixx
+        chatwire/src/chatwire/features/world.ixx
+        chatwire/src/entry.ixx)
+
+# GCC 16.2 emits a function-local `static` from an inline function into the
+# module's object AND into every consumer's, so the linker sees each one twice.
+# It happens inside libstdc++'s own std::format as well, so no source change
+# avoids it; the definitions are identical, which is what makes letting the
+# linker pick one safe.  Remove this when GCC stops doing it.
+target_link_options(chatwire_lib PUBLIC "-Wl,--allow-multiple-definition")
 add_library(chatwire::chatwire ALIAS chatwire_lib)
 
 target_include_directories(chatwire_lib PUBLIC
@@ -391,6 +444,10 @@ if(CHATWIRE_BUILD_TOOLS)
     if(CHATWIRE_PRINT_LIBRARY)
         target_link_libraries(chatwire_exe PRIVATE ${CHATWIRE_PRINT_LIBRARY})
     endif()
+
+    # The injector imports chatwire.config to write the handover file, so it
+    # needs the target that OWNS that module rather than a copy of the header.
+    target_link_libraries(chatwire_exe PRIVATE chatwire::chatwire)
 
     # Self-contained for the same reason the library is: this is a single
     # file somebody is handed, and a missing libstdc++ DLL is an error

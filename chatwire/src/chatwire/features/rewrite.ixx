@@ -1,4 +1,43 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+// <meta> HERE TOO.  A reflection template is instantiated in the unit that
+// CALLS it, not in the one that defines it, so every module that reaches
+// json::object or config's walkers needs the header in its own fragment --
+// importing chatwire.reflect is not enough, and GCC's error points into
+// libstdc++ rather than at the missing include.
+#include <meta>
+
+export module chatwire.features.rewrite;
+import chatwire.feature;
+import chatwire.json;
+import chatwire.log;
+import chatwire.sdk;
 
 // chatwire.features.rewrite — changing what the player is shown.
 //
@@ -58,14 +97,11 @@
 // command.  That is deliberate rather than convenient: a rule nobody owns is a
 // game quietly lying to its player with no way left to ask why.  A tool that
 // wants a rewrite to outlive it should stay connected.
-#include "chatwire/common.hpp"
 
-#include "chatwire/feature.hpp"
-#include "chatwire/json.hpp"
-#include "chatwire/log.hpp"
-#include "chatwire/sdk.hpp"
 
-namespace chatwire::features
+
+
+export namespace chatwire::features
 {
     /* @brief One registered substitution. */
     struct rewrite_rule
@@ -334,7 +370,7 @@ namespace chatwire::features
     };
 }
 
-namespace chatwire::features::rewrite
+export namespace chatwire::features::rewrite
 {
     /*
         @brief Drops every rule a departing connection registered.

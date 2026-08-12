@@ -1,4 +1,33 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+export module chatwire.crypto;
 
 // chatwire.crypto — SHA-256, HMAC, and the two comparisons that must not leak.
 //
@@ -39,7 +68,6 @@
 // A hash that is subtly wrong still produces stable, plausible-looking output
 // and would authenticate nobody while appearing to work; a test that runs when
 // somebody remembers to run it is not the guarantee this needs.
-#include "chatwire/common.hpp"
 
 // NO PLATFORM HEADER, and that is worth the six lines below.  Everything in
 // this file except random_hex() is pure arithmetic that runs at compile time,
@@ -53,7 +81,7 @@
 extern "C" __declspec(dllimport) long __stdcall BCryptGenRandom(
     void* algorithm, unsigned char* buffer, unsigned long bytes, unsigned long flags);
 
-namespace chatwire::crypto
+export namespace chatwire::crypto
 {
     inline constexpr std::size_t sha256_size{ 32 };
 

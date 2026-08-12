@@ -1,4 +1,36 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+export module chatwire.sdk;
+import chatwire.log;
+import chatwire.mapping;
+import vmhook;
 
 // chatwire.sdk — the ONLY module that knows vmhook exists.
 //
@@ -29,15 +61,11 @@
 // So: this file includes vmhook.hpp.  Nothing else does.  The facade below
 // exposes only plain types — std::string, bool, function pointers — so no
 // vmhook type ever crosses the boundary.
-#include "chatwire/common.hpp"
 
 // THE ONE PLACE vmhook IS INCLUDED.  See the header comment above for why
 // that boundary matters.
-#include <vmhook/vmhook.hpp>
 
-#include "chatwire/log.hpp"
-#include "chatwire/mapping.hpp"
-namespace chatwire::sdk::detail
+export namespace chatwire::sdk::detail
 {
     namespace map = chatwire::mapping;
 
@@ -827,7 +855,7 @@ namespace chatwire::sdk::detail
     }
 }
 
-namespace chatwire::sdk
+export namespace chatwire::sdk
 {
     /*
         @brief Called for each chat line: (formatted, plain), both UTF-8.

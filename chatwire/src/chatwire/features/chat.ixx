@@ -1,4 +1,44 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+// <meta> HERE TOO.  A reflection template is instantiated in the unit that
+// CALLS it, not in the one that defines it, so every module that reaches
+// json::object or config's walkers needs the header in its own fragment --
+// importing chatwire.reflect is not enough, and GCC's error points into
+// libstdc++ rather than at the missing include.
+#include <meta>
+
+export module chatwire.features.chat;
+import chatwire.feature;
+import chatwire.json;
+import chatwire.log;
+import chatwire.mapping;
+import chatwire.sdk;
 
 // chatwire.features.chat — the chat bridge.
 //
@@ -42,14 +82,12 @@
 // attaches the calling thread to the VM first, which is what makes that legal —
 // see chatwire::sdk::attach_thread.  There is no queue and no tick to wait for,
 // so a verb answers with what actually happened rather than with "accepted".
-#include "chatwire/common.hpp"
 
-#include "chatwire/feature.hpp"
-#include "chatwire/json.hpp"
-#include "chatwire/log.hpp"
-#include "chatwire/mapping.hpp"
-#include "chatwire/sdk.hpp"
-namespace chatwire::features
+
+
+
+
+export namespace chatwire::features
 {
     namespace map = chatwire::mapping;
 
@@ -300,7 +338,7 @@ namespace chatwire::features
     };
 }
 
-namespace chatwire::features::chat
+export namespace chatwire::features::chat
 {
     /* @brief Installs the sink every observed chat line is handed to. */
     inline auto set_sink(const chatwire::features::chat_sink sink) noexcept -> void

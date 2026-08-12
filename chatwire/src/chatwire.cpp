@@ -1,3 +1,67 @@
+module;
+
+// The standard library FIRST -- before <windows.h> and before any import.
+// This is the rule chatwire/common.hpp existed to enforce: <windows.h>
+// declares its world inside extern "C", and a std declaration first seen
+// from in there picks up C language linkage, which then conflicts with the
+// same declaration arriving through an import.  A module does not re-export
+// what its own fragment included, so each of these units needs its own list.
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+// <meta> here too: a reflection template instantiates in the unit that CALLS
+// it, and json::object is called from this one.
+#include <meta>
+
+// An IMPLEMENTATION UNIT of chatwire.api: this file DEFINES chatwire::start and
+// chatwire::stop, which that module declares.  A plain translation unit may not
+// define a function another module owns.
+//
+// The includes above are its GLOBAL MODULE FRAGMENT and must come before the
+// module declaration, which in turn must come before every import.
+module chatwire.api;
+
+import vmhook;   // for vmhook::version_* in the start-up line
+import chatwire.ws.server;
+import chatwire.ansi;
+import chatwire.console;
+import chatwire.features.chat;
+import chatwire.features.commands;
+import chatwire.features.mapping;
+import chatwire.features.rewrite;
+import chatwire.features.scoreboard;
+import chatwire.features.system;
+import chatwire.features.world;
+import chatwire.sdk;
+import chatwire.json;
+import chatwire.log;
+import chatwire.feature;
+import chatwire.mapping;
+import chatwire.config;
+import chatwire.terminal;
 // chatwire.cpp — the bodies of start() / stop() and the wiring they use.
 //
 // Separate from the header because start() is large, runs exactly once, and has
@@ -13,20 +77,15 @@
 // before windows.h` and then defines a conflicting, older socket API.  sdk.hpp
 // pulls in vmhook, which includes windows.h, so any order that puts sdk first
 // loses the race -- and under -Werror that #warning is a build failure.
-#include "chatwire/ws/server.hpp"
 
-#include "chatwire/chatwire.hpp"
 
-#include "chatwire/ansi.hpp"
-#include "chatwire/console.hpp"
-#include "chatwire/features/chat.hpp"
-#include "chatwire/features/commands.hpp"
-#include "chatwire/features/mapping.hpp"
-#include "chatwire/features/rewrite.hpp"
-#include "chatwire/features/scoreboard.hpp"
-#include "chatwire/features/system.hpp"
-#include "chatwire/features/world.hpp"
-#include "chatwire/sdk.hpp"
+
+
+
+
+
+
+
 
 namespace chatwire::detail
 {
@@ -442,7 +501,7 @@ namespace chatwire
         const std::uint16_t bind_port{ port == 0u ? default_port : port };
 
         log::info("chatwire {} starting (vmhook {}.{}.{})", chatwire::version,
-                  VMHOOK_VERSION_MAJOR, VMHOOK_VERSION_MINOR, VMHOOK_VERSION_PATCH);
+                  vmhook::version_major, vmhook::version_minor, vmhook::version_patch);
 
         // 1. Wait for Minecraft, and work out which mapping this build uses.
         const auto deadline{ std::chrono::steady_clock::now() + timeout };

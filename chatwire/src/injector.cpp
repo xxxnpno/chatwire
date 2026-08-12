@@ -36,7 +36,42 @@
 // from — and LoadLibraryW is the one technique the loader itself performs, which
 // means the DLL gets a real module handle, real TLS, and a real DllMain.  Every
 // stealthier method gives up one of those and buys nothing here.
-#include "chatwire/config.hpp"
+// The standard library FIRST -- before <windows.h> and before any import.
+// This is the rule chatwire/common.hpp existed to enforce: <windows.h>
+// declares its world inside extern "C", and a std declaration first seen
+// from in there picks up C language linkage, which then conflicts with the
+// same declaration arriving through an import.  A module does not re-export
+// what its own fragment included, so each of these units needs its own list.
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+// <meta> here too: a reflection template instantiates in the unit that CALLS
+// it, and json::object is called from this one.
+#include <meta>
+
 
 #include <print>
 #include <cstdint>
@@ -47,6 +82,9 @@
 
 #include <windows.h>
 #include <tlhelp32.h>
+
+
+import chatwire.config;
 
 namespace
 {

@@ -1,4 +1,33 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+export module chatwire.mapping;
 
 // chatwire.mapping — Minecraft 1.8.9 name resolution across all three mappings.
 //
@@ -58,8 +87,8 @@
 // A name is only entered here once the bytecode identifies it: a field by its
 // declared type, a method by the call chain it sits in.  Both are quoted at the
 // entry that needed them, so the next reader can re-derive rather than trust.
-#include "chatwire/common.hpp"
-namespace chatwire::mapping
+
+export namespace chatwire::mapping
 {
     /*
         @brief Which name set the attached Minecraft build uses.

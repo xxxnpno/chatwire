@@ -1,4 +1,44 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+// <meta> HERE TOO.  A reflection template is instantiated in the unit that
+// CALLS it, not in the one that defines it, so every module that reaches
+// json::object or config's walkers needs the header in its own fragment --
+// importing chatwire.reflect is not enough, and GCC's error points into
+// libstdc++ rather than at the missing include.
+#include <meta>
+
+export module chatwire.features.commands;
+import chatwire.command_line;
+import chatwire.feature;
+import chatwire.json;
+import chatwire.log;
+import chatwire.sdk;
 
 // chatwire.features.commands — commands added to Minecraft at RUNTIME.
 //
@@ -77,15 +117,12 @@
 // could be stopped at a safepoint the game thread is waiting to reach, with the
 // game thread blocked on the lock behind it -- which is a deadlock made of two
 // things that are each individually correct.
-#include "chatwire/common.hpp"
 
-#include "chatwire/command_line.hpp"
-#include "chatwire/feature.hpp"
-#include "chatwire/json.hpp"
-#include "chatwire/log.hpp"
-#include "chatwire/sdk.hpp"
 
-namespace chatwire::features
+
+
+
+export namespace chatwire::features
 {
     /*
         @brief Where a command event goes: to ONE client, by id.
@@ -454,7 +491,7 @@ namespace chatwire::features
     };
 }
 
-namespace chatwire::features::commands
+export namespace chatwire::features::commands
 {
     /* @brief Installs where a command event is delivered.  See command_sink. */
     inline auto set_sink(const chatwire::features::command_sink sink) noexcept -> void

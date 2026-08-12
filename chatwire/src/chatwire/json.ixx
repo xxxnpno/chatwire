@@ -1,4 +1,40 @@
-#pragma once
+module;
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+// <meta> HERE TOO.  A reflection template is instantiated in the unit that
+// CALLS it, not in the one that defines it, so every module that reaches
+// json::object or config's walkers needs the header in its own fragment --
+// importing chatwire.reflect is not enough, and GCC's error points into
+// libstdc++ rather than at the missing include.
+#include <meta>
+
+export module chatwire.json;
+import chatwire.reflect;
 
 // chatwire.core.json — just enough JSON, with no dependency.
 //
@@ -90,12 +126,11 @@
 // through escape().  What reflection removed is the escaping of KEYS, which the
 // old `field()` did on every field of every message -- a key is now a C++
 // identifier by construction, and there is no identifier escape() would alter.
-#include "chatwire/common.hpp"
 
 // Brings <meta> with it, deliberately here rather than in common.hpp: see the
 // note at the bottom of that file, and the one in reflect.hpp.
-#include "chatwire/reflect.hpp"
-namespace chatwire::json
+
+export namespace chatwire::json
 {
     /*
         @brief Escapes `text` into a JSON string body (without the quotes).
@@ -195,7 +230,7 @@ namespace chatwire::json
                 // field() ran escape() over every key of every message to
                 // establish something the language had already guaranteed.
                 constexpr std::string_view key{
-                    std::define_static_string(std::meta::identifier_of(member)) };
+                    chatwire::reflect::identifier<member>() };
 
                 out += '"';
                 out += key;
