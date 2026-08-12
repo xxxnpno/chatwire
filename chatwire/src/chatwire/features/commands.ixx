@@ -168,17 +168,9 @@ export namespace chatwire::features
             registration order makes `commands.list` read the way a plugin
             author registered them.
         */
-        [[nodiscard]] inline auto table() noexcept -> std::vector<registration>&
-        {
-            static auto* const t{ new std::vector<registration>{} };
-            return *t;
-        }
+        [[nodiscard]] auto table() noexcept -> std::vector<registration>&;
 
-        [[nodiscard]] inline auto table_mutex() noexcept -> std::mutex&
-        {
-            static auto* const m{ new std::mutex{} };
-            return *m;
-        }
+        [[nodiscard]] auto table_mutex() noexcept -> std::mutex&;
 
         /*
             A ceiling, so one confused client cannot make every line the player

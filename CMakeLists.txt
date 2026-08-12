@@ -270,7 +270,14 @@ target_compile_options(vmhook PUBLIC -fmodules)
 # The library.  Header-based, with one .cpp for the bodies that should not be
 # duplicated into every consumer (start/stop and the wiring they use).
 # ---------------------------------------------------------------------------
-add_library(chatwire_lib STATIC chatwire/src/chatwire.cpp)
+# The implementation units carry the state their interfaces only declare -- see
+# the note at the top of each.  They are ordinary sources, not module interfaces.
+add_library(chatwire_lib STATIC
+    chatwire/src/chatwire.cpp
+    chatwire/src/chatwire/feature_impl.cpp
+    chatwire/src/chatwire/log_impl.cpp
+    chatwire/src/chatwire/features/commands_impl.cpp
+    chatwire/src/chatwire/features/rewrite_impl.cpp)
 
 # EVERY header is a module interface unit now.  CMake scans them, works out the
 # order and builds them before whatever imports them; there is no list to keep

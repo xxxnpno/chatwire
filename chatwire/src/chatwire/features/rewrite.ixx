@@ -152,13 +152,7 @@ export namespace chatwire::features
             can run before or after any other translation unit's static
             initialisation.
         */
-        inline auto rules() noexcept -> std::atomic<std::shared_ptr<const rule_set>>&
-        {
-            static auto* const live{
-                new std::atomic<std::shared_ptr<const rule_set>>{
-                    std::make_shared<const rule_set>() } };
-            return *live;
-        }
+        [[nodiscard]] auto rules() noexcept -> std::atomic<std::shared_ptr<const rule_set>>&;
 
         inline std::atomic<std::uint64_t> g_next_id{ 1 };
         inline std::atomic<std::uint64_t> g_applied{ 0 };

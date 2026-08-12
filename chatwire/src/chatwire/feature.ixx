@@ -204,11 +204,7 @@ export namespace chatwire
             // initialisers in other TUs, and a namespace-scope container would
             // be a static-init-order race with them.  This is the standard
             // construct-on-first-use fix.
-            inline auto storage() noexcept -> std::vector<feature*>&
-            {
-                static auto* const v{ new std::vector<feature*>{} };
-                return *v;
-            }
+            [[nodiscard]] auto storage() noexcept -> std::vector<feature*>&;
         }
 
         /*
@@ -250,11 +246,7 @@ export namespace chatwire
                 without restarting the ones that did -- starting a feature twice
                 installs its hook twice.
             */
-            inline auto started() noexcept -> std::vector<feature*>&
-            {
-                static auto* const v{ new std::vector<feature*>{} };
-                return *v;
-            }
+            [[nodiscard]] auto started() noexcept -> std::vector<feature*>&;
 
             [[nodiscard]] inline auto has_started(feature* const f) noexcept -> bool
             {

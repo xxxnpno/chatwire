@@ -85,11 +85,7 @@ export namespace chatwire::log::detail
     // Deliberately leaked: `new` with no delete.  A destroyed mutex that a
     // detour still logs through is a use-after-free in a foreign process; a
     // leaked one at exit is nothing, because the process is going away.
-    inline auto sink_mutex() noexcept -> std::mutex&
-    {
-        static std::mutex* const m{ new std::mutex{} };
-        return *m;
-    }
+    [[nodiscard]] auto sink_mutex() noexcept -> std::mutex&;
 
     inline auto enabled(const chatwire::log::level at) noexcept -> bool
     {
