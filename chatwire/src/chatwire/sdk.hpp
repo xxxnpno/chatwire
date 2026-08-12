@@ -190,9 +190,9 @@ namespace chatwire::sdk::detail
             const auto cb{ g_chat_callback.load(std::memory_order_acquire) };
             if (!cb || !line->get_instance()) { return; }
             const std::string formatted{
-                text_of(line, map::resolve(map::i_chat_component::get_formatted_text)) };
+                text_of(line, map::resolve(map::i_chat_component.get_formatted_text)) };
             const std::string plain{
-                text_of(line, map::resolve(map::i_chat_component::get_unformatted_text)) };
+                text_of(line, map::resolve(map::i_chat_component.get_unformatted_text)) };
             if (formatted.empty() && plain.empty()) { return; }
             cb(formatted.c_str(), plain.c_str());
         }
@@ -283,8 +283,8 @@ namespace chatwire::sdk::detail
     {
         try
         {
-            const auto mc_class{ map::resolve(map::minecraft::clazz) };
-            const auto world_field{ map::resolve(map::minecraft::the_world) };
+            const auto mc_class{ map::resolve(map::minecraft.clazz) };
+            const auto world_field{ map::resolve(map::minecraft.the_world) };
             if (!mc_class.empty() && !world_field.empty())
             {
                 if (vmhook::hotspot::klass* const k{ vmhook::find_class(mc_class) })
@@ -304,7 +304,7 @@ namespace chatwire::sdk::detail
 
         // The table's answer, verified against the shipped jar for all three
         // mappings, for the case where the field lookup itself failed.
-        const auto fallback{ map::resolve(map::world_client::clazz) };
+        const auto fallback{ map::resolve(map::world_client.clazz) };
         return fallback.empty() ? std::string{} : std::format("L{};", fallback);
     }
 
@@ -322,10 +322,10 @@ namespace chatwire::sdk::detail
     {
         try
         {
-            const auto mc_class{ map::resolve(map::minecraft::clazz) };
-            const auto mc_field{ map::resolve(map::minecraft::the_minecraft) };
-            const auto player_field{ map::resolve(map::entity_player_sp::clazz) };
-            const auto the_player{ map::resolve(map::minecraft::the_player) };
+            const auto mc_class{ map::resolve(map::minecraft.clazz) };
+            const auto mc_field{ map::resolve(map::minecraft.the_minecraft) };
+            const auto player_field{ map::resolve(map::entity_player_sp.clazz) };
+            const auto the_player{ map::resolve(map::minecraft.the_player) };
             if (mc_class.empty() || mc_field.empty() || the_player.empty()) { return nullptr; }
 
             vmhook::hotspot::klass* const k{ vmhook::find_class(mc_class) };
@@ -361,8 +361,8 @@ namespace chatwire::sdk::detail
     {
         try
         {
-            const auto mc_field{ map::resolve(map::minecraft::the_minecraft) };
-            const auto player_field{ map::resolve(map::minecraft::the_player) };
+            const auto mc_field{ map::resolve(map::minecraft.the_minecraft) };
+            const auto player_field{ map::resolve(map::minecraft.the_player) };
             if (mc_field.empty() || player_field.empty()) { return std::make_unique<local_player>(); }
 
             const auto mc_proxy{ minecraft{}.get_field(mc_field) };
@@ -452,32 +452,144 @@ namespace chatwire::sdk
 
 
     /*
+        @brief Asks the JVM the three questions mapping::decide needs answered.
+        @details
+        Separate from detect_mapping because the ANSWERS are worth reporting on
+        their own: `mapping.detected` puts them on the wire, so a user whose
+        client came back `unknown` can see which probe failed rather than being
+        told only that it did.  Detection would otherwise be the one decision in
+        chatwire with no evidence attached to it.
+    */
+    [[nodiscard]] inline auto probe_mapping() noexcept -> chatwire::mapping::probe_result
+    {
+        namespace map = chatwire::mapping;
+        map::probe_result probe{};
+        try
+        {
+            vmhook::hotspot::klass* const mcp{ vmhook::find_class(map::minecraft.clazz.mcp) };
+            probe.mcp_class_present = mcp != nullptr;
+            if (mcp)
+            {
+                probe.mcp_field_present =
+                    vmhook::find_field(mcp, map::minecraft.the_minecraft.mcp).has_value();
+                probe.srg_field_present =
+                    vmhook::find_field(mcp, map::minecraft.the_minecraft.srg).has_value();
+            }
+            else
+            {
+                probe.obf_class_present = vmhook::find_class(map::minecraft.clazz.obf) != nullptr;
+            }
+        }
+        catch (...) { return map::probe_result{}; }
+        return probe;
+    }
+
+    /*
         @brief Probes the JVM and decides the mapping mode.
         @return the detected mode; mapping::mode::unknown means "not a supported
                 Minecraft 1.8.9", which the caller must treat as do-not-inject.
     */
     [[nodiscard]] inline auto detect_mapping() noexcept -> chatwire::mapping::mode
     {
-        namespace map = chatwire::mapping;
-        map::probe_result probe{};
+        return chatwire::mapping::decide(chatwire::sdk::probe_mapping());
+    }
+
+    /*
+        @brief What a name in the table turned out to be in the attached JVM.
+        @details
+        `both` is not a curiosity, it is the common case on a vanilla client:
+        obfuscation reuses one letter across kinds, so GuiNewChat has a field
+        called `a` AND a method called `a`, and `printChatMessage` resolves to
+        that letter.  Reporting whichever was checked first would have said
+        "field" for a method, on the one mapping where a reader is least able to
+        check for themselves.
+    */
+    enum class member_kind : std::uint8_t
+    {
+        /* The JVM has nothing of that name here.  A wrong table entry. */
+        absent,
+        field,
+        method,
+        both,
+    };
+
+    [[nodiscard]] constexpr auto member_kind_name(const member_kind k) noexcept
+        -> std::string_view
+    {
+        switch (k)
+        {
+        case member_kind::field:  return "field";
+        case member_kind::method: return "method";
+        case member_kind::both:   return "field and method";
+        case member_kind::absent: break;
+        }
+        return "absent";
+    }
+
+    /* @brief Whether the attached JVM has loaded a class of this name. */
+    [[nodiscard]] inline auto class_exists(const std::string& class_name) noexcept -> bool
+    {
         try
         {
-            vmhook::hotspot::klass* const mcp{ vmhook::find_class(map::minecraft::clazz.mcp) };
-            probe.mcp_class_present = mcp != nullptr;
-            if (mcp)
-            {
-                probe.mcp_field_present =
-                    vmhook::find_field(mcp, map::minecraft::the_minecraft.mcp).has_value();
-                probe.srg_field_present =
-                    vmhook::find_field(mcp, map::minecraft::the_minecraft.srg).has_value();
-            }
-            else
-            {
-                probe.obf_class_present = vmhook::find_class(map::minecraft::clazz.obf) != nullptr;
-            }
+            return !class_name.empty() && vmhook::find_class(class_name) != nullptr;
         }
-        catch (...) { return map::mode::unknown; }
-        return map::decide(probe);
+        catch (...) { return false; }
+    }
+
+    /*
+        @brief Whether `class_name` has a member spelled `member`, and which kind.
+        @details
+        BOTH lookups always run, never one and then the other conditionally: a
+        name can be a field and a method at the same time -- under OBF it usually
+        is -- and stopping at the first hit would report a method as a field.
+        The field side is find_field, which walks the superclass chain and
+        caches; the method side walks the same chain over each class's method
+        array, which the field cache does not cover.
+
+        NAME ONLY, no descriptor.  The question this answers is "is this table
+        entry a real name in this build" -- the one the `avq` mistake got wrong,
+        where a plausible name resolved to nothing at all.  Whether the right
+        OVERLOAD exists is a different question, and the one place it matters
+        (loadWorld) already pairs its name with a descriptor at the hook site.
+
+        Metaspace reads only: nothing is called and no oop is touched, so this
+        needs no thread state and no gate.  It is still not free -- find_class
+        walks the ClassLoaderDataGraph on a miss -- so it belongs on a request,
+        not in a loop.
+    */
+    [[nodiscard]] inline auto find_member(const std::string& class_name,
+                                          const std::string& member) noexcept -> member_kind
+    {
+        try
+        {
+            if (class_name.empty() || member.empty()) { return member_kind::absent; }
+            vmhook::hotspot::klass* const start{ vmhook::find_class(class_name) };
+            if (!start) { return member_kind::absent; }
+
+            const bool as_field{ vmhook::find_field(start, member).has_value() };
+
+            bool as_method{ false };
+            for (vmhook::hotspot::klass* k{ start }; k != nullptr && !as_method; k = k->get_super())
+            {
+                const std::int32_t count{ k->get_methods_count() };
+                vmhook::hotspot::method** const methods{ k->get_methods_ptr() };
+                if (!methods) { continue; }
+                for (std::int32_t i{ 0 }; i < count; ++i)
+                {
+                    if (methods[i] && methods[i]->get_name() == member)
+                    {
+                        as_method = true;
+                        break;
+                    }
+                }
+            }
+
+            if (as_field && as_method) { return member_kind::both; }
+            if (as_field)              { return member_kind::field; }
+            if (as_method)             { return member_kind::method; }
+            return member_kind::absent;
+        }
+        catch (...) { return member_kind::absent; }
     }
 
     /*
@@ -508,15 +620,15 @@ namespace chatwire::sdk
             return true;
         } };
 
-        const bool mc{ reg("Minecraft", map::minecraft::clazz,
+        const bool mc{ reg("Minecraft", map::minecraft.clazz,
                            static_cast<d::minecraft*>(nullptr)) };
-        const bool player{ reg("EntityPlayerSP", map::entity_player_sp::clazz,
+        const bool player{ reg("EntityPlayerSP", map::entity_player_sp.clazz,
                                static_cast<d::local_player*>(nullptr)) };
-        const bool component{ reg("IChatComponent", map::i_chat_component::clazz,
+        const bool component{ reg("IChatComponent", map::i_chat_component.clazz,
                                   static_cast<d::chat_component*>(nullptr)) };
-        const bool chat_gui{ reg("GuiNewChat", map::gui_new_chat::clazz,
+        const bool chat_gui{ reg("GuiNewChat", map::gui_new_chat.clazz,
                                  static_cast<d::gui_new_chat*>(nullptr)) };
-        const bool text{ reg("ChatComponentText", map::chat_component_text::clazz,
+        const bool text{ reg("ChatComponentText", map::chat_component_text.clazz,
                              static_cast<d::chat_component_text*>(nullptr)) };
 
         if (!mc || !player)
@@ -543,9 +655,9 @@ namespace chatwire::sdk
         namespace d   = chatwire::sdk::detail;
         try
         {
-            const auto class_name{ map::resolve(map::gui_new_chat::clazz) };
-            const auto method{ map::resolve(map::gui_new_chat::print_chat_message) };
-            const auto component{ map::resolve(map::i_chat_component::clazz) };
+            const auto class_name{ map::resolve(map::gui_new_chat.clazz) };
+            const auto method{ map::resolve(map::gui_new_chat.print_chat_message) };
+            const auto component{ map::resolve(map::i_chat_component.clazz) };
             if (class_name.empty() || method.empty() || component.empty()) { return false; }
 
             d::g_chat_callback.store(on_chat, std::memory_order_release);
@@ -590,7 +702,7 @@ namespace chatwire::sdk
         The fallback carries its own NAME as well as its own descriptor: SRG
         calls the two overloads func_71353_a and func_71403_a, so reusing the
         first name with the second descriptor would be a lookup that cannot
-        succeed.  See mapping::minecraft::load_world_short.
+        succeed.  See mapping::minecraft.load_world_short.
 
         Under OBF both overloads are called `a`, along with a great many
         unrelated methods on Minecraft, so the descriptor is not optional there:
@@ -608,7 +720,7 @@ namespace chatwire::sdk
         namespace d   = chatwire::sdk::detail;
         try
         {
-            const auto class_name{ map::resolve(map::minecraft::clazz) };
+            const auto class_name{ map::resolve(map::minecraft.clazz) };
             const auto world{ d::world_client_descriptor() };
             if (class_name.empty() || world.empty()) { return false; }
 
@@ -618,9 +730,9 @@ namespace chatwire::sdk
             // from being a lookup that cannot succeed on two mappings out of
             // three.  The long form is first: the short one delegates to it.
             const std::pair<std::string, std::string> candidates[]{
-                { map::resolve(map::minecraft::load_world),
+                { map::resolve(map::minecraft.load_world),
                   std::format("({}Ljava/lang/String;)V", world) },
-                { map::resolve(map::minecraft::load_world_short),
+                { map::resolve(map::minecraft.load_world_short),
                   std::format("({})V", world) },
             };
             if (candidates[0].first.empty()) { return false; }
@@ -697,8 +809,8 @@ namespace chatwire::sdk
         namespace d   = chatwire::sdk::detail;
         try
         {
-            const auto class_name{ map::resolve(map::entity_player_sp::clazz) };
-            const auto method{ map::resolve(map::entity_player_sp::send_chat_message) };
+            const auto class_name{ map::resolve(map::entity_player_sp.clazz) };
+            const auto method{ map::resolve(map::entity_player_sp.send_chat_message) };
             if (class_name.empty() || method.empty()) { return false; }
 
             d::g_command_callback.store(on_typed, std::memory_order_release);
@@ -745,7 +857,7 @@ namespace chatwire::sdk
             // Outside the scope: string work and table lookups, which touch no
             // Java at all.  Everything done out here is time the VM does not
             // spend waiting for this thread.
-            const auto method{ map::resolve(map::entity_player_sp::send_chat_message) };
+            const auto method{ map::resolve(map::entity_player_sp.send_chat_message) };
             if (method.empty()) { return false; }
 
             // OFF A HOOK -> JNI.  This is the whole reason the bridge exists:
@@ -841,8 +953,8 @@ namespace chatwire::sdk
             // ClassLoaderDataGraph on a miss, which on a modded client is
             // seconds.  Doing that with the gate held would stop the game dead.
             // warm_up() pays the first one at start-up, where nothing waits.
-            const auto class_name{ map::resolve(map::chat_component_text::clazz) };
-            const auto method{ map::resolve(map::entity_player_sp::add_chat_message) };
+            const auto class_name{ map::resolve(map::chat_component_text.clazz) };
+            const auto method{ map::resolve(map::entity_player_sp.add_chat_message) };
             if (class_name.empty() || method.empty()) { return false; }
             vmhook::hotspot::klass* const k{ vmhook::find_class(class_name) };
             if (!k) { return false; }
@@ -868,7 +980,7 @@ namespace chatwire::sdk
                 if (!player) { vmhook::jni_release(component); return false; }
 
                 const std::string descriptor{
-                    std::format("(L{};)V", map::resolve(map::i_chat_component::clazz)) };
+                    std::format("(L{};)V", map::resolve(map::i_chat_component.clazz)) };
                 const bool added{ vmhook::jni_call_void(
                     player, method.c_str(), descriptor.c_str(), { component }) };
                 vmhook::jni_release(component);
@@ -933,12 +1045,12 @@ namespace chatwire::sdk
         {
             if (!chatwire::sdk::attach_thread() || !vmhook::jni_available()) { return out; }
 
-            const auto mc_class{ map::resolve(map::minecraft::clazz) };
-            const auto mc_field{ map::resolve(map::minecraft::the_minecraft) };
-            const auto world_field{ map::resolve(map::minecraft::the_world) };
-            const auto list_field{ map::resolve(map::world::player_entities) };
-            const auto name_method{ map::resolve(map::entity::get_name) };
-            const auto uuid_method{ map::resolve(map::entity::get_unique_id) };
+            const auto mc_class{ map::resolve(map::minecraft.clazz) };
+            const auto mc_field{ map::resolve(map::minecraft.the_minecraft) };
+            const auto world_field{ map::resolve(map::minecraft.the_world) };
+            const auto list_field{ map::resolve(map::world.player_entities) };
+            const auto name_method{ map::resolve(map::entity.get_name) };
+            const auto uuid_method{ map::resolve(map::entity.get_unique_id) };
             // theWorld's declared type, ASKED FOR rather than spelled out, so a
             // repackaged client answers for itself.  This used to build the
             // descriptor from a table entry that had no OBF name, which on a
@@ -1058,7 +1170,7 @@ namespace chatwire::sdk
             // The static + instance field chain behind player(), and the klass
             // and <init> behind add_chat.
             (void)chatwire::sdk::in_world();
-            const auto component{ map::resolve(map::chat_component_text::clazz) };
+            const auto component{ map::resolve(map::chat_component_text.clazz) };
             if (!component.empty()) { (void)vmhook::find_class(component); }
         }
         catch (...) { }

@@ -119,17 +119,47 @@ namespace chatwire::mapping
         Minecraft SDK: every entry here is one this project actually calls, so
         an entry going stale is caught by a feature failing rather than by
         silent bit-rot in a table nobody reads.
+
+        ===================================================================
+        WHY EACH GROUP IS A STRUCT AND NOT A NAMESPACE
+        ===================================================================
+        A namespace's members cannot be ENUMERATED.  These were namespaces, and
+        that is precisely why the `avq` mistake could sit here for a release:
+        nothing could walk the table and ask the JVM whether each entry was
+        real, because nothing could ask what the entries were.
+
+        A struct can be walked.  `std::meta::nonstatic_data_members_of` gives
+        every entry with its identifier, which is what lets sdk::verify_mapping
+        check the whole table against the attached client and lets the
+        `mapping.verify` command report the answer.  Adding a name below is
+        therefore adding a name that gets verified -- there is no second list to
+        remember to update, which is the same property json.hpp gets from the
+        same mechanism.
+
+        THE CONVENTION EVERY GROUP FOLLOWS, and which the walk relies on:
+
+            the member called `clazz` is the CLASS;
+            every other member is a field or a method ON that class.
+
+        So a group with members needs a `clazz`, even when chatwire never names
+        that class anywhere else -- see `entity_names`, whose two accessors are
+        declared on Entity and reached through a player.
+
+        The short names below (`mapping::minecraft`, `mapping::world`) are
+        references INTO the single `table` instance rather than objects of their
+        own, so there is exactly one list and a group cannot be added to the
+        table and forgotten at its call site, or the reverse.
     */
 
     // net.minecraft.client.Minecraft — the client singleton.
-    namespace minecraft
+    struct minecraft_names
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/client/Minecraft", .obf = "ave" };
-        inline constexpr name the_minecraft{ .mcp = "theMinecraft", .obf = "S", .srg = "field_71432_P" };
-        inline constexpr name the_player{ .mcp = "thePlayer", .obf = "h", .srg = "field_71439_g" };
-        inline constexpr name ingame_gui{ .mcp = "ingameGUI", .obf = "q", .srg = "field_71456_v" };
+        name clazz{ .mcp = "net/minecraft/client/Minecraft", .obf = "ave" };
+        name the_minecraft{ .mcp = "theMinecraft", .obf = "S", .srg = "field_71432_P" };
+        name the_player{ .mcp = "thePlayer", .obf = "h", .srg = "field_71439_g" };
+        name ingame_gui{ .mcp = "ingameGUI", .obf = "q", .srg = "field_71456_v" };
         /* The world the player is in, or null on the title screen. */
-        inline constexpr name the_world{ .mcp = "theWorld", .obf = "f", .srg = "field_71441_e" };
+        name the_world{ .mcp = "theWorld", .obf = "f", .srg = "field_71441_e" };
         /*
             loadWorld(WorldClient[, String]) — the client changing world.  Every
             join, respawn, server switch and disconnect goes through it, and a
@@ -146,7 +176,7 @@ namespace chatwire::mapping
             sdk::install_world_observer -- because it contains WorldClient's
             class name, and the honest source for that is the attached jar.
         */
-        inline constexpr name load_world{ .mcp = "loadWorld", .obf = "a", .srg = "func_71353_a" };
+        name load_world{ .mcp = "loadWorld", .obf = "a", .srg = "func_71353_a" };
         /*
             The ONE-argument overload, and it needs an entry of its own for one
             reason: SRG gives the two overloads DIFFERENT names.
@@ -163,34 +193,33 @@ namespace chatwire::mapping
             Only a fallback.  The short form delegates to the long one, so a
             client where both exist is caught entirely by load_world above.
         */
-        inline constexpr name load_world_short{ .mcp = "loadWorld", .obf = "a", .srg = "func_71403_a" };
+        name load_world_short{ .mcp = "loadWorld", .obf = "a", .srg = "func_71403_a" };
         // runTick is deliberately absent.  It was the pump's hook target, and
         // there is no pump: vmhook can enter Java on any thread now, so nothing
         // has to be marshalled onto the client's main loop.  This table is only
         // what chatwire touches, so an entry nothing calls does not sit here
         // going stale.
-    }
+    };
 
     // net.minecraft.client.entity.EntityPlayerSP — the local player.
-    namespace entity_player_sp
+    struct entity_player_sp_names
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/client/entity/EntityPlayerSP", .obf = "bew" };
+        name clazz{ .mcp = "net/minecraft/client/entity/EntityPlayerSP", .obf = "bew" };
         /* sendChatMessage(String) — goes to the SERVER, as if typed. */
-        inline constexpr name send_chat_message{ .mcp = "sendChatMessage", .obf = "e", .srg = "func_71165_d" };
+        name send_chat_message{ .mcp = "sendChatMessage", .obf = "e", .srg = "func_71165_d" };
         /* addChatMessage(IChatComponent) — CLIENT-side only, never transmitted. */
-        inline constexpr name add_chat_message{ .mcp = "addChatMessage", .obf = "a", .srg = "func_145747_a" };
-    }
+        name add_chat_message{ .mcp = "addChatMessage", .obf = "a", .srg = "func_145747_a" };
+    };
 
     // net.minecraft.client.multiplayer.WorldClient — the client's world.  Only
     // the DECLARED type of Minecraft.theWorld matters here: a JNI field lookup
     // is by declared type, not by what the object turns out to be.
     //
     //     ave.f is bdb, and bdb extends adm (World).
-    namespace world_client
+    struct world_client_names
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/client/multiplayer/WorldClient",
-                                     .obf = "bdb" };
-    }
+        name clazz{ .mcp = "net/minecraft/client/multiplayer/WorldClient", .obf = "bdb" };
+    };
 
     // net.minecraft.world.World — where the player list lives.  `playerEntities`
     // is declared on World and inherited by WorldClient, which is why a lookup
@@ -198,13 +227,12 @@ namespace chatwire::mapping
     //
     //     adm holds seven List fields; j is the only List<wn>, and wn is
     //     EntityPlayer (bew -> bet -> wn).  That is what identifies it.
-    namespace world
+    struct world_names
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/world/World", .obf = "adm" };
+        name clazz{ .mcp = "net/minecraft/world/World", .obf = "adm" };
         /* List<EntityPlayer> — everyone the client currently knows about. */
-        inline constexpr name player_entities{ .mcp = "playerEntities", .obf = "j",
-                                               .srg = "field_73010_i" };
-    }
+        name player_entities{ .mcp = "playerEntities", .obf = "j", .srg = "field_73010_i" };
+    };
 
     // net.minecraft.entity.Entity — the two identity accessors every player has.
     // Declared on Entity and overridden on EntityPlayer, so a virtual call
@@ -212,21 +240,26 @@ namespace chatwire::mapping
     //
     //     pk (Entity) declares exactly one no-argument UUID getter, aK, and
     //     e_ is the String getter EntityPlayer overrides.
-    namespace entity
+    //
+    // The class itself is named here even though chatwire never registers it or
+    // looks anything up on it directly -- the calls go through a player.  It is
+    // here because the verification walk needs a class to check these two
+    // against, and "the class that declares them" is the only honest answer.
+    struct entity_names
     {
+        name clazz{ .mcp = "net/minecraft/entity/Entity", .obf = "pk" };
         /* getName() — the display name, which is the nickname on most servers. */
-        inline constexpr name get_name{ .mcp = "getName", .obf = "e_", .srg = "func_70005_c_" };
+        name get_name{ .mcp = "getName", .obf = "e_", .srg = "func_70005_c_" };
         /* getUniqueID() — the account UUID, stable across name changes. */
-        inline constexpr name get_unique_id{ .mcp = "getUniqueID", .obf = "aK",
-                                             .srg = "func_110124_au" };
-    }
+        name get_unique_id{ .mcp = "getUniqueID", .obf = "aK", .srg = "func_110124_au" };
+    };
 
     // net.minecraft.client.gui.GuiIngame — holds the chat GUI.
-    namespace gui_ingame
+    struct gui_ingame_names
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/client/gui/GuiIngame", .obf = "avo" };
-        inline constexpr name persistant_chat_gui{ .mcp = "persistantChatGUI", .obf = "l", .srg = "field_73840_e" };
-    }
+        name clazz{ .mcp = "net/minecraft/client/gui/GuiIngame", .obf = "avo" };
+        name persistant_chat_gui{ .mcp = "persistantChatGUI", .obf = "l", .srg = "field_73840_e" };
+    };
 
     // net.minecraft.client.gui.GuiNewChat — every line that reaches the chat box
     // passes through printChatMessage, which is why hooking it once catches
@@ -247,29 +280,70 @@ namespace chatwire::mapping
     // List<String> of sent messages and two List<ava> of chat lines, and carries
     // a(Leu;), a(Leu;I) and a private a(Leu;III) -- printChatMessage,
     // printChatMessageWithOptionalDeletion and setChatLine.
-    namespace gui_new_chat
+    struct gui_new_chat_names
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/client/gui/GuiNewChat", .obf = "avt" };
-        inline constexpr name print_chat_message{ .mcp = "printChatMessage", .obf = "a", .srg = "func_146227_a" };
-    }
+        name clazz{ .mcp = "net/minecraft/client/gui/GuiNewChat", .obf = "avt" };
+        name print_chat_message{ .mcp = "printChatMessage", .obf = "a", .srg = "func_146227_a" };
+    };
 
     // net.minecraft.util.IChatComponent — the rich-text interface every chat
     // line is built from.
-    namespace i_chat_component
+    struct i_chat_component_names
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/util/IChatComponent", .obf = "eu" };
+        name clazz{ .mcp = "net/minecraft/util/IChatComponent", .obf = "eu" };
         /* With the section-sign colour codes still in. */
-        inline constexpr name get_formatted_text{ .mcp = "getFormattedText", .obf = "d", .srg = "func_150254_d" };
+        name get_formatted_text{ .mcp = "getFormattedText", .obf = "d", .srg = "func_150254_d" };
         /* Plain text, colour codes stripped. */
-        inline constexpr name get_unformatted_text{ .mcp = "getUnformattedText", .obf = "c", .srg = "func_150260_c" };
-    }
+        name get_unformatted_text{ .mcp = "getUnformattedText", .obf = "c", .srg = "func_150260_c" };
+    };
 
     // net.minecraft.util.ChatComponentText — the simplest IChatComponent, built
     // from a plain String.  What add_chat_message wraps its text in.
-    namespace chat_component_text
+    struct chat_component_text_names
     {
-        inline constexpr name clazz{ .mcp = "net/minecraft/util/ChatComponentText", .obf = "fa" };
-    }
+        name clazz{ .mcp = "net/minecraft/util/ChatComponentText", .obf = "fa" };
+    };
+
+    /*
+        @brief Every group, in one walkable object.
+        @details
+        THE list.  Adding a class chatwire touches means adding a member here
+        and nowhere else: the reference below makes it reachable by its short
+        name, and the reflective walk in sdk::verify_mapping picks it up without
+        being told.
+
+        Order is the order a reader meets them -- the client, the player, the
+        world, then the chat GUI -- because it is also the order `mapping.verify`
+        reports in.
+    */
+    struct table
+    {
+        minecraft_names           minecraft{};
+        entity_player_sp_names    entity_player_sp{};
+        world_client_names        world_client{};
+        world_names               world{};
+        entity_names              entity{};
+        gui_ingame_names          gui_ingame{};
+        gui_new_chat_names        gui_new_chat{};
+        i_chat_component_names    i_chat_component{};
+        chat_component_text_names chat_component_text{};
+    };
+
+    /* @brief The one instance.  Every name in the project resolves through it. */
+    inline constexpr table all{};
+
+    // The short spellings, as REFERENCES into `all` rather than objects of their
+    // own.  Two copies of the same table would be two things to keep in step,
+    // and the one that call sites used would be the one that never got verified.
+    inline constexpr const minecraft_names&           minecraft{ all.minecraft };
+    inline constexpr const entity_player_sp_names&    entity_player_sp{ all.entity_player_sp };
+    inline constexpr const world_client_names&        world_client{ all.world_client };
+    inline constexpr const world_names&               world{ all.world };
+    inline constexpr const entity_names&              entity{ all.entity };
+    inline constexpr const gui_ingame_names&          gui_ingame{ all.gui_ingame };
+    inline constexpr const gui_new_chat_names&        gui_new_chat{ all.gui_new_chat };
+    inline constexpr const i_chat_component_names&    i_chat_component{ all.i_chat_component };
+    inline constexpr const chat_component_text_names& chat_component_text{ all.chat_component_text };
 
     /* @brief The detected mode.  mode::unknown until detect() succeeds. */
     inline mode current{ mode::unknown };

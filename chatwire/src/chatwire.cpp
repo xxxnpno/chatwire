@@ -21,6 +21,7 @@
 #include "chatwire/console.hpp"
 #include "chatwire/features/chat.hpp"
 #include "chatwire/features/commands.hpp"
+#include "chatwire/features/mapping.hpp"
 #include "chatwire/features/system.hpp"
 #include "chatwire/features/world.hpp"
 #include "chatwire/sdk.hpp"
@@ -361,6 +362,7 @@ namespace chatwire
         //     rather than self-registering — see features/chat.hpp for why.
         registry::add(features::chat::instance());
         registry::add(features::commands::instance());
+        registry::add(features::mapping::instance());
         registry::add(features::system::instance());
         registry::add(features::world::instance());
 

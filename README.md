@@ -183,6 +183,59 @@ asyncio.run(main())
 
 `system.detach` stops chatwire; the connection then closes.
 
+### `mapping.*` — is chatwire's name table right for *this* client?
+
+The same field in 1.8.9 has three names depending on how your client was built, and chatwire
+carries all three for every name it uses. A wrong one fails **silently** — the lookup finds
+nothing and the feature that needed it simply never works. `mapping.verify` asks the JVM about
+every entry in one request, so that failure is one command away instead of invisible.
+
+```python
+import asyncio, json, websockets
+
+async def main():
+    async with websockets.connect("ws://127.0.0.1:24455") as ws:
+        await ws.send(json.dumps({"cmd": "mapping.verify"}))
+        r = json.loads(await ws.recv())["result"]
+        print(r["mapping"], r["checked"], "names,", r["missing"], "missing")
+        for e in r["entries"]:
+            if not e["found"]:
+                print("  ABSENT", e["group"], e["member"], e["spelling"])
+
+asyncio.run(main())
+```
+
+```
+OBF (vanilla obfuscated) 24 names, 0 missing
+```
+
+`mapping.detected` returns the decision **and the four probes it was made from**, which is the
+whole diagnosis when a client comes back `unknown`:
+
+```json
+{"mapping":"OBF (vanilla obfuscated)","minecraft_class":false,
+ "mcp_field":false,"srg_field":false,"obf_class":true}
+```
+
+`mapping.resolve` translates one name into this client's spelling. It takes any of the four
+things you might have — `thePlayer`, `field_71439_g`, `h`, or chatwire's own `the_player` —
+and `minecraft.the_player` when the short form is ambiguous:
+
+```json
+{"cmd": "mapping.resolve", "name": "printChatMessage"}
+-> {"group":"gui_new_chat","member":"print_chat_message",
+    "mcp":"printChatMessage","srg":"func_146227_a","obf":"a",
+    "spelling":"a","kind":"field and method","found":true}
+```
+
+`kind` is what the JVM turned out to have. "field and method" is normal on a vanilla client:
+obfuscation reuses one letter across kinds, so `a` is both.
+
+The table walks itself — `mapping::table` is a struct and the verifier reflects over it — so a
+name added to chatwire is a name that gets verified, with no second list to keep in step.
+[minecrafts/](minecrafts/) builds all three clients so this can be checked against every one of
+them at once.
+
 ## An AI in the game
 
 See [mcp/README.md](mcp/README.md).

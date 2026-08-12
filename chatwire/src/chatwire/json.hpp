@@ -92,10 +92,9 @@
 // identifier by construction, and there is no identifier escape() would alter.
 #include "chatwire/common.hpp"
 
-// Deliberately here rather than in common.hpp: see the note at the bottom of
-// that file.  Immediately after it, so the ordering rule it exists for still
-// holds.
-#include <meta>
+// Brings <meta> with it, deliberately here rather than in common.hpp: see the
+// note at the bottom of that file, and the one in reflect.hpp.
+#include "chatwire/reflect.hpp"
 namespace chatwire::json
 {
     /*
@@ -162,23 +161,7 @@ namespace chatwire::json
 
     namespace detail
     {
-        /*
-            @brief The non-static data members of `object_type`, at compile time.
-            @details
-            Wrapped in a consteval function rather than held in a constexpr
-            variable because nonstatic_data_members_of returns a vector ALLOCATED
-            DURING CONSTANT EVALUATION.  Such an allocation may not survive to
-            run time, so naming the vector in a constexpr variable is an error
-            ("non-transient allocation").  std::define_static_array copies it
-            into static storage and hands back a span, which may.
-        */
-        template<typename object_type>
-        consteval auto members_of()
-        {
-            return std::define_static_array(
-                std::meta::nonstatic_data_members_of(^^object_type,
-                                                     std::meta::access_context::current()));
-        }
+        using chatwire::reflect::members_of;
 
         // Declared before write_object because the two are mutually recursive:
         // an object holds values, and a value may be an object (or an array of
