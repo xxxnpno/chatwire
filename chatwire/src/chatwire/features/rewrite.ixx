@@ -150,6 +150,20 @@ export namespace chatwire::features
         std::string   pattern{};
         std::string   find{};
         std::string   replace{};
+        /*
+            DO NOT DRAW IT AT ALL.  A drop rule carries a `match` and nothing
+            else: there is no replacement to build, because the thing it matched
+            never reaches the screen.  It is the same rule set and the same
+            substring test as every other rule, which is what makes "hide every
+            line from this bot" the same shape of request as "call this player
+            something else" rather than a second feature with its own vocabulary.
+
+            What each surface can actually do about it differs, and sdk.ixx says
+            so at each detour: a chat line and a floating nametag are simply not
+            drawn, while a tab or sidebar row -- drawn from a method's RETURN
+            value -- collapses to its team's prefix and suffix instead.
+        */
+        bool          drop{ false };
         /* Which connection registered it.  See the note at the top. */
         std::uint64_t owner{ 0 };
     };
@@ -166,11 +180,17 @@ export namespace chatwire::features
         started, which is the number that says whether a rule is doing anything.
         A rule that matches nothing looks identical to a rule that was never
         registered, and this is the difference.
+
+        `dropped` is the same number for the rules that hide rather than change,
+        and it is reported separately because a drop leaves NOTHING behind to
+        look at.  A rewritten name can be checked by reading it; a hidden line
+        can only be counted, so if this does not move, the rule is not matching.
     */
     struct rewrite_list_result
     {
         std::size_t               count{ 0 };
         std::uint64_t             applied{ 0 };
+        std::uint64_t             dropped{ 0 };
         std::vector<rewrite_rule> rules{};
     };
 
@@ -178,6 +198,7 @@ export namespace chatwire::features
     struct rewrite_stats
     {
         std::uint64_t rewrites_applied{ 0 };
+        std::uint64_t rewrites_dropped{ 0 };
         std::uint64_t rewrite_rules{ 0 };
     };
 
@@ -197,6 +218,7 @@ export namespace chatwire::features
 
         inline std::atomic<std::uint64_t> g_next_id{ 1 };
         inline std::atomic<std::uint64_t> g_applied{ 0 };
+        inline std::atomic<std::uint64_t> g_dropped{ 0 };
 
         /*
             @brief The player snapshot the detour reads.  Swapped whole.
@@ -306,13 +328,15 @@ export namespace chatwire::features
             Allocates NOTHING when no rule matches, which is the overwhelmingly
             common case: the first match is what creates the string.
         */
-        inline auto rewrite_name(const char* const original, std::string& replacement) -> bool
+        inline auto rewrite_name(const char* const original, std::string& replacement)
+            -> chatwire::sdk::rewrite_outcome
         {
+            using outcome = chatwire::sdk::rewrite_outcome;
             try
             {
                 const std::shared_ptr<const rule_set> live{
                     rules().load(std::memory_order_acquire) };
-                if (!live || live->empty() || !original) { return false; }
+                if (!live || live->empty() || !original) { return outcome::unchanged; }
 
                 const std::string_view source{ original };
                 bool changed{ false };
@@ -325,6 +349,19 @@ export namespace chatwire::features
                         && source.find(rule.match) == std::string_view::npos)
                     {
                         continue;
+                    }
+
+                    if (rule.drop)
+                    {
+                        // A DROP ENDS THE LOOP.  Nothing a later rule could do
+                        // to text that is not going to be drawn is worth the
+                        // work, and answering "dropped" while also handing back
+                        // a replacement would leave two callers to decide which
+                        // of the two they believed.  First drop wins, and it
+                        // wins over any rewrite -- registered before it or
+                        // after.
+                        g_dropped.fetch_add(1, std::memory_order_relaxed);
+                        return outcome::dropped;
                     }
 
                     if (!rule.pattern.empty())
@@ -340,9 +377,9 @@ export namespace chatwire::features
                     changed = substitute(replacement, rule.find, rule.replace) || changed;
                 }
                 if (changed) { g_applied.fetch_add(1, std::memory_order_relaxed); }
-                return changed;
+                return changed ? outcome::replaced : outcome::unchanged;
             }
-            catch (...) { return false; }
+            catch (...) { return outcome::unchanged; }
         }
 
         /* @brief Swaps in a rule set built by `edit` from the current one. */
@@ -470,18 +507,47 @@ export namespace chatwire::features
             const auto pattern{ chatwire::json::get_string(cmd.body, "template") };
             const auto find{ chatwire::json::get_string(cmd.body, "find") };
             const auto replace{ chatwire::json::get_string(cmd.body, "replace") };
+            const bool drop{ chatwire::json::get_bool(cmd.body, "drop").value_or(false) };
 
-            // Two shapes, and the reply says which one it took.  `template` is
-            // the one that can build a name out of live values; `find`/`replace`
-            // is a plain substitution and stays because it is the shortest way
-            // to say "call them something else".
-            if (!pattern && !find)
+            // Three shapes now.  `drop` is checked FIRST and refuses to share a
+            // rule with the other two: a rule that hides something has no use
+            // for what to draw instead, and accepting both would mean silently
+            // ignoring one of them at the moment somebody most wants to know
+            // which of the two they got.
+            if (drop)
+            {
+                if (pattern || find || replace)
+                {
+                    return chatwire::response::failure(
+                        "'drop' takes a 'match' and nothing else -- a rule that hides "
+                        "something has nothing to draw instead");
+                }
+                // A DROP WITHOUT A MATCH IS REFUSED, and this is the one place
+                // this feature refuses an empty match.  Everywhere else it means
+                // "every name", which is a loud and reversible mistake -- you
+                // can see what it did.  A drop with no match hides every chat
+                // line and every nametag in the game AT ONCE, and what it looks
+                // like from inside is a client that has silently stopped
+                // working.  Nobody means that, so it cannot be typed by
+                // accident.
+                if (!match || match->empty())
+                {
+                    return chatwire::response::failure(
+                        "'drop' needs a non-empty 'match' -- a rule that hides "
+                        "everything is never what anyone means");
+                }
+            }
+            // Two shapes for the rest, and the reply says which one it took.
+            // `template` is the one that can build a name out of live values;
+            // `find`/`replace` is a plain substitution and stays because it is
+            // the shortest way to say "call them something else".
+            else if (!pattern && !find)
             {
                 return chatwire::response::failure(
                     "give either 'template' (with {name}, {health}, {food}, {ping}, "
-                    "{x}, {y}, {z}) or 'find' and 'replace'");
+                    "{x}, {y}, {z}), or 'find' and 'replace', or 'drop' with a 'match'");
             }
-            if (!pattern && (find->empty() || !replace))
+            else if (!pattern && (find->empty() || !replace))
             {
                 return chatwire::response::failure("'find' needs a matching 'replace'");
             }
@@ -501,6 +567,7 @@ export namespace chatwire::features
                                             .pattern = pattern ? *pattern : std::string{},
                                             .find = find ? *find : std::string{},
                                             .replace = replace ? *replace : std::string{},
+                                            .drop = drop,
                                             .owner = cmd.client });
                 return 1u;
             });
@@ -519,9 +586,15 @@ export namespace chatwire::features
                 }
                 detail::g_needs_live.store(needed, std::memory_order_release);
             }
+            // `*find` is only safe to read once `drop` and `template` have both
+            // been ruled out -- a drop rule carries neither, and reaching into
+            // an empty optional to log it would be a crash in the one line
+            // whose job is to say what just happened.
             chatwire::log::info("rewrite rule {}: match '{}' -> '{}'", id,
                                 match ? *match : "(everyone)",
-                                pattern ? *pattern : std::format("{} -> {}", *find, *replace));
+                                drop      ? std::string{ "(not drawn)" }
+                                : pattern ? *pattern
+                                          : std::format("{} -> {}", *find, *replace));
             return chatwire::response::success(
                 chatwire::json::object(rewrite_added{ .id = id }));
         }
@@ -573,6 +646,7 @@ export namespace chatwire::features
             return chatwire::response::success(chatwire::json::object(rewrite_list_result{
                 .count   = count,
                 .applied = detail::g_applied.load(std::memory_order_relaxed),
+                .dropped = detail::g_dropped.load(std::memory_order_relaxed),
                 .rules   = std::move(copy) }));
         }
     };
@@ -614,6 +688,8 @@ export namespace chatwire::features::rewrite
         return chatwire::features::rewrite_stats{
             .rewrites_applied =
                 chatwire::features::detail::g_applied.load(std::memory_order_relaxed),
+            .rewrites_dropped =
+                chatwire::features::detail::g_dropped.load(std::memory_order_relaxed),
             .rewrite_rules = live ? live->size() : 0u };
     }
 

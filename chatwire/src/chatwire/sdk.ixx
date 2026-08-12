@@ -506,14 +506,41 @@ export namespace chatwire::sdk::detail
 
     /* The callback the facade installs.  A plain function pointer: no captures
        to dangle, nothing to destroy at exit, and atomic so the detour thread
-       and the installer never race. */
-    inline std::atomic<void (*)(const char*, const char*)> g_chat_callback{ nullptr };
+       and the installer never race.
+
+       `dropped` is whether a rule hid this line from the chat box.  It is
+       reported rather than swallowed: hiding is about the player's SCREEN, and
+       a tool that hid a line still has every reason to see it -- to count it,
+       to log it, to bridge it somewhere else.  A client that does not care
+       ignores one boolean; one that does could not recover it any other way. */
+    inline std::atomic<void (*)(const char*, const char*, bool)> g_chat_callback{ nullptr };
+
+    /*
+        @brief What a rewrite rule decided about one string.
+        @details
+        A tri-state rather than a bool, because there are three answers and the
+        third one is not a kind of the other two: leave it alone, draw this
+        instead, or do not draw it at all.  The bool this replaced could say the
+        first two, so hiding a line had nowhere to go.
+
+        `dropped` is only honourable where the game can be told not to draw --
+        see the three detours below, which is where the difference between a
+        void method and one that returns the text it was going to draw stops
+        being a detail.
+    */
+    enum class rewrite_outcome
+    {
+        unchanged,
+        replaced,
+        dropped,
+    };
 
     /*
         The name rewriter.  Same shape as the other callbacks and for the same
         reasons: a plain function pointer, atomic, nothing to dangle.
     */
-    inline std::atomic<bool (*)(const char*, std::string&)> g_rewrite_callback{ nullptr };
+    inline std::atomic<rewrite_outcome (*)(const char*, std::string&)>
+        g_rewrite_callback{ nullptr };
 
     /*
         The interceptor for chat the PLAYER sends, installed the same way and for
@@ -574,14 +601,28 @@ export namespace chatwire::sdk::detail
             // printed from the client thread and from a netty thread, and one
             // flag shared between them would let a line on one thread suppress
             // a rewrite on the other.
+            //
+            // A DROPPED line needs none of that, and that is the whole reason
+            // hiding one is possible at all: printChatMessage returns void, so
+            // cancelling it is a complete answer -- the body never runs, no
+            // ChatLine is built, nothing is stored, and there is no replacement
+            // to allocate on a render-adjacent thread.  Hiding is the cheapest
+            // thing this detour does, not the most expensive.
             static thread_local bool reissuing{ false };
+            bool dropped{ false };
             if (!reissuing)
             {
                 if (const auto rewrite{ g_rewrite_callback.load(std::memory_order_acquire) };
                     rewrite && !formatted.empty())
                 {
                     std::string replacement;
-                    if (rewrite(formatted.c_str(), replacement) && replacement != formatted)
+                    const rewrite_outcome outcome{ rewrite(formatted.c_str(), replacement) };
+                    if (outcome == rewrite_outcome::dropped)
+                    {
+                        ret.cancel();
+                        dropped = true;
+                    }
+                    else if (outcome == rewrite_outcome::replaced && replacement != formatted)
                     {
                         const auto method{ chat_gui->get_method(
                             map::resolve(map::gui_new_chat.print_chat_message),
@@ -609,7 +650,10 @@ export namespace chatwire::sdk::detail
             const std::string plain{
                 text_of(line, map::resolve(map::i_chat_component.get_unformatted_text)) };
             if (formatted.empty() && plain.empty()) { return; }
-            cb(formatted.c_str(), plain.c_str());
+            // Reported even when it was dropped, and reported as the game
+            // produced it: a hidden line is hidden from the PLAYER, and the
+            // client that hid it is the one most likely to want to count it.
+            cb(formatted.c_str(), plain.c_str(), dropped);
         }
         catch (...) { }
     }
@@ -672,12 +716,30 @@ export namespace chatwire::sdk::detail
             if (!cb || player_name.empty()) { return; }
 
             std::string replacement;
-            if (cb(player_name.c_str(), replacement))
+            switch (cb(player_name.c_str(), replacement))
             {
+            case rewrite_outcome::replaced:
                 // Index 1: this method is static, so 0 is the Team and 1 is the
                 // name.  On an instance method 0 would be the first argument
                 // rather than the receiver -- see vmhook's own note on set_arg.
                 ret.set_arg(1, replacement);
+                break;
+
+            case rewrite_outcome::dropped:
+                // THE ONE SURFACE A DROP CANNOT FULLY REACH, and it is worth
+                // saying why rather than quietly doing half of it.  A tab row
+                // and a sidebar row are drawn from what this method RETURNS, so
+                // there is no not-drawing them from in here: cancelling would
+                // hand the caller a null String, and Minecraft would draw an
+                // NPE instead of a row.  The name is emptied instead, which
+                // leaves the row as its team's prefix and suffix -- the closest
+                // this hook gets to gone.  The floating nametag above the same
+                // player IS fully hidden, by the label detour below.
+                ret.set_arg(1, std::string{});
+                break;
+
+            case rewrite_outcome::unchanged:
+                break;
             }
         }
         catch (...) { }
@@ -709,10 +771,23 @@ export namespace chatwire::sdk::detail
             const auto cb{ g_rewrite_callback.load(std::memory_order_acquire) };
             if (!cb || label.empty()) { return; }
             std::string replacement;
-            if (cb(label.c_str(), replacement))
+            switch (cb(label.c_str(), replacement))
             {
+            case rewrite_outcome::replaced:
                 // Index 1: instance method, so 0 is the Entity and 1 is the label.
                 ret.set_arg(1, replacement);
+                break;
+
+            case rewrite_outcome::dropped:
+                // renderLivingLabel RETURNS VOID and its whole body is the
+                // drawing, so cancelling it is the complete answer: no depth
+                // test, no background quad, no text.  The name over that head is
+                // gone rather than blank.
+                ret.cancel();
+                break;
+
+            case rewrite_outcome::unchanged:
+                break;
             }
         }
         catch (...) { }
@@ -962,7 +1037,7 @@ export namespace chatwire::sdk
         normally prints chat, but on whichever thread called printChatMessage
         when that is somebody else.
     */
-    using chat_callback = void (*)(const char* formatted, const char* plain);
+    using chat_callback = void (*)(const char* formatted, const char* plain, bool dropped);
 
     /*
         @brief Makes the calling thread able to CALL Java.  Any thread, anywhere.
@@ -1431,14 +1506,28 @@ export namespace chatwire::sdk
     }
 
     /*
-        @brief Offered every name the game is about to decorate; true rewrites it.
+        @brief What a rule decided: leave it, redraw it, or do not draw it.
         @details
-        Runs INSIDE the formatPlayerName detour, on the render thread, several
-        times a frame.  It must be quick, must not throw, must not allocate
-        unless it is actually changing something, and must not take a lock any
-        other thread holds for long.
+        The same three answers wherever a rewriter is asked, so the enum is the
+        sdk's and not one feature's -- see detail::rewrite_outcome for why there
+        are three and not two.
     */
-    using name_rewriter = bool (*)(const char* original, std::string& replacement);
+    using chatwire::sdk::detail::rewrite_outcome;
+
+    /*
+        @brief Offered everything the game is about to draw; decides its fate.
+        @details
+        Runs INSIDE the formatPlayerName, renderLivingLabel and printChatMessage
+        detours -- the first two on the render thread, several times a frame.  It
+        must be quick, must not throw, must not allocate unless it is actually
+        changing something, and must not take a lock any other thread holds for
+        long.
+
+        `replacement` is read only when the answer is `replaced`, so a rewriter
+        that drops a line owes nobody a string.
+    */
+    using name_rewriter = rewrite_outcome (*)(const char* original,
+                                              std::string& replacement);
 
     /*
         @brief Hooks ScorePlayerTeam.formatPlayerName so `on_name` can rewrite it.
