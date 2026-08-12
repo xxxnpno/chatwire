@@ -544,8 +544,8 @@ export namespace chatwire::sdk::detail
         Hence the blanket catch: every failure here is a chat line not reported,
         not a dead game.
     */
-    inline auto on_print_chat_message(vmhook::return_value&,
-                                      const std::unique_ptr<gui_new_chat>&,
+    inline auto on_print_chat_message(vmhook::return_value& ret,
+                                      const std::unique_ptr<gui_new_chat>& chat_gui,
                                       const std::unique_ptr<chat_component>& line) noexcept
         -> void
     {
@@ -556,18 +556,55 @@ export namespace chatwire::sdk::detail
             std::string formatted{
                 text_of(line, map::resolve(map::i_chat_component.get_formatted_text)) };
 
-            // CHAT IS NOT REWRITTEN HERE, and the attempt is worth recording.
-            // Replacing the IChatComponent argument means building a new
-            // ChatComponentText inside the detour and handing it to set_arg --
-            // and that CRASHED the JVM outright (hs_err, SIGSEGV) on the first
-            // line it touched.  vmhook documents set_arg with a string; an
-            // allocated object argument is a different thing, and printChatMessage
-            // hands its component on to setChatLine which stores it.
+            // CHAT IS REWRITTEN BY RE-ISSUING THE LINE, NOT BY SWAPPING THE
+            // ARGUMENT.  Handing set_arg a freshly allocated ChatComponentText
+            // crashed the JVM outright -- hs_err, first line touched.  vmhook
+            // documents set_arg with a STRING, and printChatMessage passes its
+            // component straight to setChatLine, which STORES it: replacing a
+            // live object under the method that is about to keep it is the part
+            // that does not work.
             //
-            // A line can still be rewritten before it is ever drawn -- the
-            // commands feature already cancels chat the player sends -- but
-            // editing one the server sent needs a route that does not swap a
-            // live object out from under the method that is about to keep it.
+            // So the original call is CANCELLED and the same method is called
+            // again with our own component.  Nothing is swapped: the component
+            // we build is the one the game receives, from a normal call, on a
+            // thread already in Java -- which is the safe place to allocate.
+            //
+            // The thread_local guard is what stops that second call recursing
+            // into this detour forever.  It is per-thread because chat can be
+            // printed from the client thread and from a netty thread, and one
+            // flag shared between them would let a line on one thread suppress
+            // a rewrite on the other.
+            static thread_local bool reissuing{ false };
+            if (!reissuing)
+            {
+                if (const auto rewrite{ g_rewrite_callback.load(std::memory_order_acquire) };
+                    rewrite && !formatted.empty())
+                {
+                    std::string replacement;
+                    if (rewrite(formatted.c_str(), replacement) && replacement != formatted)
+                    {
+                        const auto method{ chat_gui->get_method(
+                            map::resolve(map::gui_new_chat.print_chat_message),
+                            std::format("(L{};)V",
+                                        map::resolve(map::i_chat_component.clazz))) };
+                        const auto fresh{
+                            vmhook::make_unique<chat_component_text>(replacement) };
+                        if (method && fresh->get_instance())
+                        {
+                            reissuing = true;
+                            const bool threw{ method->call(fresh).threw() };
+                            reissuing = false;
+                            if (!threw)
+                            {
+                                // The original must not also be drawn, or the
+                                // player sees both.
+                                ret.cancel();
+                                formatted = replacement;
+                            }
+                        }
+                    }
+                }
+            }
             if (!cb) { return; }
             const std::string plain{
                 text_of(line, map::resolve(map::i_chat_component.get_unformatted_text)) };
