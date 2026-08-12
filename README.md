@@ -176,6 +176,68 @@ deobfuscated client, `axs` on a vanilla one. Both are the honest answer for that
 `mapping.resolve` relates them. `open` is false in the world, and then `screen` is `""` — which
 is the answer a client wants before pretending to type.
 
+### The three lists a name appears in
+
+A server shows a player's name in at least three places. They are not the same list, they do
+not update together, and they can disagree — so each command is the member it reads, and which
+one you asked for is written into the question.
+
+| | |
+|---|---|
+| `net.minecraft.world.World.playerEntities` | who the **client** has loaded as entities — the players near enough to exist |
+| `net.minecraft.client.network.NetHandlerPlayClient.getPlayerInfoMap` | who the **server** says is connected. The tab list, with ping |
+| `net.minecraft.scoreboard.Scoreboard.getTeams` | how names are **decorated** — the prefix and suffix that make a nametag red |
+
+```python
+{"cmd": "net.minecraft.client.network.NetHandlerPlayClient.getPlayerInfoMap"}
+-> {"count": 3, "players": [
+     {"name": "alpha", "uuid": "…", "ping": 42, "display_name": "§7[VIP] alpha"}, …]}
+
+{"cmd": "net.minecraft.scoreboard.Scoreboard.getTeams"}
+-> {"count": 1, "teams": [
+     {"name": "red", "display_name": "red", "prefix": "§c", "suffix": "",
+      "members": ["alpha", "beta"]}]}
+
+{"cmd": "net.minecraft.scoreboard.Scoreboard.getPlayersTeam", "name": "alpha"}
+-> {"name": "red", "prefix": "§c", …}
+```
+
+`prefix` and `suffix` are the **coloured** forms — what the game puts either side of a member's
+name — so the nametag a player is drawn with is `prefix + name + suffix`, with nothing else to
+ask for.
+
+### `getObjectiveInDisplaySlot` — the sidebar
+
+```python
+{"cmd": "net.minecraft.scoreboard.Scoreboard.getObjectiveInDisplaySlot", "slot": "sidebar"}
+-> {"slot": "sidebar", "name": "board", "display_name": "Test Board",
+    "scores": [{"name": "beta", "points": 7}, {"name": "alpha", "points": 42}]}
+```
+
+`slot` is `list` (the tab column), `sidebar` or `belowName`; the numbers 0-2 work too. Scores
+come back in the order the sidebar draws them.
+
+Most sidebar rows are **not players**: servers build them out of fake entries whose names are
+the text you see. They are reported as the game holds them, because deciding which are real is
+your business rather than chatwire's.
+
+### `loadedEntityList` — everything, not just players
+
+```python
+{"cmd": "net.minecraft.world.World.loadedEntityList"}
+-> {"count": 3, "entities": [
+     {"id": 42, "type": "net/minecraft/entity/monster/EntityZombie",
+      "name": "Zombie", "custom_name": "", "display_name": "Zombie",
+      "x": 213.5, "y": 4.0, "z": -520.5}, …]}
+```
+
+`type` is the class the entity **really** is, read from its own header — so it is honest on
+every client. The same three players come back as `EntityOtherPlayerMP` on a deobfuscated
+client and `bex` on a vanilla one, and `mapping.resolve` relates the two.
+
+This is the most expensive command chatwire has: on a busy world it is thousands of objects and
+a call or two each. Ask when something happened; do not poll it.
+
 ### `commands.register` — add a command to the game
 
 Claim a name and the player typing it never reaches the server: chatwire swallows the line and
@@ -324,6 +386,78 @@ the player is.
 
 `system` and `commands` are the only short prefixes. They reach nothing in the game, so there is no
 Java member to name them after and nothing for a reader to check.
+
+## Two machines, two networks
+
+chatwire binds `127.0.0.1` and needs no authentication, which is safe for exactly one reason:
+only software already running on that machine can reach it. Leaving loopback changes the
+question from "is the port open" to "who may send `sendChatMessage`", so the two move together.
+
+```bash
+chatwire --bind 0.0.0.0 --token "correct horse battery staple"
+```
+
+`--bind` on anything but loopback **requires** `--token`, and is refused without one — by the
+injector before it injects, and by chatwire before a socket exists.
+
+**The secret is never sent.** On connect the server issues a fresh 32-byte nonce; the client
+answers with `HMAC-SHA256(token, nonce)`:
+
+```python
+import hashlib, hmac, json, websockets
+
+async with websockets.connect("ws://10.6.0.3:24455") as ws:
+    challenge = json.loads(await ws.recv())      # {"type":"chatwire.auth.challenge","nonce":…}
+    proof = hmac.new(SECRET.encode(), challenge["nonce"].encode(), hashlib.sha256).hexdigest()
+    await ws.send(json.dumps({"cmd": "system.auth", "proof": proof}))
+    print(json.loads(await ws.recv()))           # {"ok": true, "result": {"authenticated": true}}
+```
+
+Until that succeeds the connection can send nothing else and receives no events — not chat, not
+world changes. A wrong proof, a missing proof and a command sent too early all get the same
+reply and then the connection closes, so guessing costs a TCP handshake per attempt.
+
+### It is authenticated, not encrypted
+
+Everything after the handshake is plaintext. The token stops someone from **driving** your game;
+it does nothing about someone **reading** every word you type. Across a network you do not
+control, tunnel it:
+
+```bash
+# WireGuard or Tailscale: bind to the tunnel's address, not to 0.0.0.0
+chatwire --bind 10.6.0.2 --token "…"
+
+# or SSH, and chatwire stays on loopback entirely
+ssh -L 24455:127.0.0.1:24455 you@the-other-machine
+```
+
+chatwire does not implement TLS, and that is a refusal rather than a gap. A hand-rolled TLS
+inside a DLL injected into a game — with no vetted stack and no way to keep up with the next
+protocol flaw — produces something that *looks* encrypted and is not, which is worse than an
+honest plaintext socket behind a real tunnel, because only one of the two is understood by the
+person deciding whether to expose it.
+
+The SHA-256 and HMAC are in `chatwire/crypto.hpp`, `constexpr`, and checked at **compile time**
+against the FIPS 180-4 and RFC 4231 vectors — including the 56-byte case whose padding spills
+into a second block, which is what a hand-written SHA-256 gets wrong.
+
+## A Discord bridge
+
+[`examples/discord_bridge.py`](examples/discord_bridge.py) relays chat both ways between a
+Discord channel and one *or several* chatwires, so two players on two networks see each other's
+chat. `!who` in the channel answers with each game's tab list.
+
+```bash
+pip install discord.py websockets
+set CHATWIRE_NODES=alice=ws://127.0.0.1:24455,bob=ws://10.6.0.3:24455
+set CHATWIRE_SECRET=correct horse battery staple
+python examples/discord_bridge.py
+```
+
+Two things in it matter more than its length, and both are commented where they happen: a line
+that came *from* Discord must not go back to Discord (chatwire reports every line the player
+sees, including the ones the bridge just said, so without a guard two nodes echo each other
+forever), and a `§` on its way *into* the game gets the player kicked.
 
 ## chatwire is not a proxy
 
