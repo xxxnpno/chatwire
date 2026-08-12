@@ -22,6 +22,7 @@
 #include "chatwire/features/chat.hpp"
 #include "chatwire/features/commands.hpp"
 #include "chatwire/features/mapping.hpp"
+#include "chatwire/features/scoreboard.hpp"
 #include "chatwire/features/system.hpp"
 #include "chatwire/features/world.hpp"
 #include "chatwire/sdk.hpp"
@@ -114,7 +115,8 @@ namespace chatwire::detail
     {
         return json::object(features::chat::stats(),
                             features::commands::stats(),
-                            features::world::stats());
+                            features::world::stats(),
+                            features::scoreboard::stats());
     }
 
     /*
@@ -366,8 +368,14 @@ namespace chatwire::detail
                     (void)chatwire::sdk::register_all();
                     if (const std::size_t now{ chatwire::registry::start_pending() }; now != 0u)
                     {
-                        chatwire::log::info(
-                            "{} feature(s) started once their classes were loaded", now);
+                        // WARN, to match the warning it resolves.  start_all()
+                        // said "did NOT start yet" at warn level, and a log that
+                        // reports the problem loudly and the fix quietly reads,
+                        // to anyone who does not run with --verbose, as a
+                        // failure that was never fixed.
+                        chatwire::log::warn(
+                            "{} feature(s) started now that their classes are loaded; "
+                            "the earlier warning is resolved", now);
                     }
                 }
             } };
@@ -441,6 +449,7 @@ namespace chatwire
         registry::add(features::chat::instance());
         registry::add(features::commands::instance());
         registry::add(features::mapping::instance());
+        registry::add(features::scoreboard::instance());
         registry::add(features::system::instance());
         registry::add(features::world::instance());
 

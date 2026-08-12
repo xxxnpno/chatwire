@@ -164,18 +164,243 @@ namespace chatwire::sdk::detail
     };
 
     /*
-        java.util.List — `playerEntities` itself.  Wrapped only so the field can
-        be read as an object; the reading is done by vmhook::list, which knows
-        how to walk a java.util.Collection.
+        java.util.Collection — every list and set chatwire reads: playerEntities,
+        loadedEntityList, the tab list, the teams, a team's members, an
+        objective's scores.  Wrapped only so a field or a return value can be
+        held as an object; the WALKING is done by vmhook::collection, which knows
+        how to iterate a java.util.Collection whatever its implementation.
+
+        Deliberately one wrapper for all of them.  A wrapper buys field and
+        method lookups BY NAME, and nothing here looks anything up on a
+        collection -- it hands the object straight to vmhook.
     */
-    class player_list : public vmhook::object<player_list>
+    class java_collection : public vmhook::object<java_collection>
     {
     public:
-        explicit player_list(const vmhook::oop_t oop = nullptr) noexcept
-            : vmhook::object<player_list>{ oop }
+        explicit java_collection(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<java_collection>{ oop }
         {
         }
     };
+
+    /*
+        java.lang.String — needed only so `collection::to_vector` has an element
+        type for a Collection<String>; a team's members are one.  Nothing is
+        looked up on it: the text comes from vmhook::read_java_string, which
+        decodes the object directly.
+    */
+    class java_string : public vmhook::object<java_string>
+    {
+    public:
+        explicit java_string(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<java_string>{ oop } { }
+    };
+
+    /* net.minecraft.scoreboard.Scoreboard — objectives, scores and teams. */
+    class scoreboard : public vmhook::object<scoreboard>
+    {
+    public:
+        explicit scoreboard(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<scoreboard>{ oop } { }
+    };
+
+    /* net.minecraft.scoreboard.ScoreObjective — one scoreboard column. */
+    class score_objective : public vmhook::object<score_objective>
+    {
+    public:
+        explicit score_objective(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<score_objective>{ oop } { }
+    };
+
+    /* net.minecraft.scoreboard.Score — one row of one objective. */
+    class score : public vmhook::object<score>
+    {
+    public:
+        explicit score(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<score>{ oop } { }
+    };
+
+    /* net.minecraft.scoreboard.ScorePlayerTeam — a team and its nametag parts. */
+    class score_player_team : public vmhook::object<score_player_team>
+    {
+    public:
+        explicit score_player_team(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<score_player_team>{ oop } { }
+    };
+
+    /* net.minecraft.client.network.NetHandlerPlayClient — the connection. */
+    class net_handler : public vmhook::object<net_handler>
+    {
+    public:
+        explicit net_handler(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<net_handler>{ oop } { }
+    };
+
+    /* net.minecraft.client.network.NetworkPlayerInfo — one tab-list row. */
+    class player_info : public vmhook::object<player_info>
+    {
+    public:
+        explicit player_info(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<player_info>{ oop } { }
+    };
+
+    /* com.mojang.authlib.GameProfile — the name and uuid behind a tab row. */
+    class game_profile : public vmhook::object<game_profile>
+    {
+    public:
+        explicit game_profile(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<game_profile>{ oop } { }
+    };
+
+    /* net.minecraft.entity.Entity — anything in loadedEntityList. */
+    class any_entity : public vmhook::object<any_entity>
+    {
+    public:
+        explicit any_entity(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<any_entity>{ oop } { }
+    };
+
+    /*
+        @brief Every element of ANY java.util.Collection, as wrappers.
+        @details
+        `vmhook::collection::to_vector` has fast paths for ArrayList,
+        LinkedList, HashSet, LinkedHashSet and TreeSet, plus a `get(int)`
+        fallback -- which between them cover every collection chatwire reads
+        except the two it needs most.  `Scoreboard.getTeams()` and
+        `NetHandlerPlayClient.getPlayerInfoMap()` both return a HashMap VALUES
+        VIEW: it is a Collection, `size()` answers correctly, and it is none of
+        those classes and has no `get(int)`.  Both came back empty while
+        reporting a size of one.
+
+        So: the fast path first, and when it produces nothing for a collection
+        that says it is not empty, walk the Iterator instead.  That is the one
+        way to read a Collection that is true for all of them, it is plain
+        `get_method` and `call` like everything else here, and the fallback
+        condition is exactly "the fast path did not apply" rather than a guess
+        about the class.
+
+        Must be called inside a java_thread_scope: it is two calls per element.
+    */
+    template<typename element_type>
+    [[nodiscard]] inline auto elements_of(const std::unique_ptr<java_collection>& held,
+                                          const std::size_t limit) noexcept
+        -> std::vector<std::unique_ptr<element_type>>
+    {
+        std::vector<std::unique_ptr<element_type>> out;
+        try
+        {
+            if (!held->get_instance()) { return out; }
+
+            const vmhook::collection view{ held->get_instance() };
+            out = view.to_vector<element_type>();
+            if (!out.empty() || view.size() <= 0) { return out; }
+
+            const auto iterator_of{ held->get_method("iterator", "()Ljava/util/Iterator;") };
+            if (!iterator_of) { return out; }
+            const std::unique_ptr<java_collection> it{ iterator_of->call() };
+            if (!it->get_instance()) { return out; }
+
+            const auto has_next{ it->get_method("hasNext", "()Z") };
+            const auto next{ it->get_method("next", "()Ljava/lang/Object;") };
+            if (!has_next || !next) { return out; }
+
+            while (out.size() < limit)
+            {
+                bool more{ false };
+                more = has_next->call();
+                if (!more) { break; }
+                std::unique_ptr<element_type> element{ next->call() };
+                if (!element || !element->get_instance()) { continue; }
+                out.push_back(std::move(element));
+            }
+        }
+        catch (...) { }
+        return out;
+    }
+
+    /*
+        @brief The class an object REALLY is, in this jar's spelling.
+        @details
+        `net/minecraft/entity/monster/EntityZombie` on a deobfuscated client,
+        `zj` on a vanilla one.  Both are what that jar calls it, which is the
+        only answer either client can give -- and `mapping.resolve` is there to
+        relate the two.
+
+        Reads the klass out of the object's header, so it needs no call and no
+        gate; a collection moving the object changes where it is, never what it
+        is.
+    */
+    [[nodiscard]] inline auto class_name_of(void* const instance) noexcept -> std::string
+    {
+        try
+        {
+            if (!instance) { return {}; }
+            vmhook::hotspot::klass* const k{ vmhook::klass_from_oop(instance) };
+            if (!k) { return {}; }
+            const vmhook::hotspot::symbol* const named{ k->get_name() };
+            return named ? named->to_string() : std::string{};
+        }
+        catch (...) { return {}; }
+    }
+
+    /*
+        @brief `()Lsomething;` — a descriptor for a no-argument object getter.
+        @details
+        BUILT, never written.  The class in it is whatever this jar calls it, so
+        a literal would be right on one mapping out of three.  Empty when the
+        class has no name under the detected mapping, which callers treat as
+        "cannot ask".
+    */
+    [[nodiscard]] inline auto returns(const map::name& n) -> std::string
+    {
+        const auto resolved{ map::resolve(n) };
+        return resolved.empty() ? std::string{} : std::format("()L{};", resolved);
+    }
+
+    /* @brief The text of a no-argument String getter, or "". */
+    template<typename wrapper_type>
+    [[nodiscard]] inline auto string_call(const std::unique_ptr<wrapper_type>& on,
+                                          const map::name& method) noexcept -> std::string
+    {
+        try
+        {
+            const auto spelling{ map::resolve(method) };
+            if (spelling.empty() || !on->get_instance()) { return {}; }
+            const auto proxy{ on->get_method(spelling, "()Ljava/lang/String;") };
+            if (!proxy) { return {}; }
+
+            // ASSIGNED, not brace-initialised.  `call()` returns a variant-backed
+            // value with a TEMPLATED conversion operator, so `std::string{ v }`
+            // is direct-initialisation and picks whichever instantiation the
+            // constructor set accepts -- which was `char`, yielding a
+            // one-character string holding NUL.  Every name read through here
+            // came back as one NUL character and the scoreboard looked empty.  Assignment
+            // asks for std::string specifically and cannot pick anything else.
+            std::string out{};
+            out = proxy->call();
+            return out;
+        }
+        catch (...) { return {}; }
+    }
+
+    /* @brief An IChatComponent getter, flattened to its formatted text. */
+    template<typename wrapper_type>
+    [[nodiscard]] inline auto component_call(const std::unique_ptr<wrapper_type>& on,
+                                             const map::name& method) noexcept -> std::string
+    {
+        try
+        {
+            const auto spelling{ map::resolve(method) };
+            const auto descriptor{ returns(map::i_chat_component.clazz) };
+            if (spelling.empty() || descriptor.empty() || !on->get_instance()) { return {}; }
+            const auto proxy{ on->get_method(spelling, descriptor) };
+            if (!proxy) { return {}; }
+            const std::unique_ptr<chat_component> line{ proxy->call() };
+            if (!line->get_instance()) { return {}; }
+            return text_of(line, map::resolve(map::i_chat_component.get_formatted_text));
+        }
+        catch (...) { return {}; }
+    }
 
     /*
         java.util.UUID — what getUniqueID() hands back, and the only thing done
@@ -379,6 +604,76 @@ namespace chatwire::sdk::detail
         // mappings, for the case where the field lookup itself failed.
         const auto fallback{ map::resolve(map::world_client.clazz) };
         return fallback.empty() ? std::string{} : std::format("L{};", fallback);
+    }
+
+    /*
+        @brief The Minecraft singleton, or a wrapper whose instance is null.
+        @details
+        `Minecraft.theMinecraft` is a STATIC field, read through an
+        instance-less wrapper exactly as an instance field would be.  Every root
+        below starts here, which is why it is one function rather than four
+        copies of the same two lines.
+    */
+    [[nodiscard]] inline auto client() noexcept -> std::unique_ptr<minecraft>
+    {
+        try
+        {
+            const auto field{ map::resolve(map::minecraft.the_minecraft) };
+            if (field.empty()) { return std::make_unique<minecraft>(); }
+            const auto proxy{ minecraft{}.get_field(field) };
+            if (!proxy) { return std::make_unique<minecraft>(); }
+            return proxy->get();
+        }
+        catch (...) { return std::make_unique<minecraft>(); }
+    }
+
+    /*
+        @brief `Minecraft.theWorld`, or a null wrapper on the title screen.
+        @details
+        Not-in-a-world is the normal case rather than a failure, and every caller
+        treats it as "nothing to report" -- so this returns a wrapper whose
+        instance is null instead of an optional nobody would branch on
+        differently.
+    */
+    [[nodiscard]] inline auto client_world() noexcept -> std::unique_ptr<world_client>
+    {
+        try
+        {
+            const auto field{ map::resolve(map::minecraft.the_world) };
+            const auto mc{ client() };
+            if (field.empty() || !mc->get_instance()) { return std::make_unique<world_client>(); }
+            const auto proxy{ mc->get_field(field) };
+            if (!proxy) { return std::make_unique<world_client>(); }
+            return proxy->get();
+        }
+        catch (...) { return std::make_unique<world_client>(); }
+    }
+
+    /*
+        @brief `World.getScoreboard()` — the CLIENT's copy.
+        @details
+        There is no other one here.  It holds exactly what the server has told
+        this player, so an objective the server hides from you is hidden from
+        this too, and a team it has not sent does not exist as far as chatwire
+        is concerned.  That is a property of the game rather than a limitation of
+        the bridge, and it is why the command is named after the getter.
+    */
+    [[nodiscard]] inline auto client_scoreboard() noexcept -> std::unique_ptr<scoreboard>
+    {
+        try
+        {
+            const auto world{ client_world() };
+            const auto method{ map::resolve(map::world.get_scoreboard) };
+            const auto descriptor{ returns(map::scoreboard.clazz) };
+            if (!world->get_instance() || method.empty() || descriptor.empty())
+            {
+                return std::make_unique<scoreboard>();
+            }
+            const auto proxy{ world->get_method(method, descriptor) };
+            if (!proxy) { return std::make_unique<scoreboard>(); }
+            return proxy->call();
+        }
+        catch (...) { return std::make_unique<scoreboard>(); }
     }
 
     /*
@@ -669,6 +964,13 @@ namespace chatwire::sdk
                                     static_cast<d::world_client*>(nullptr)) };
         const bool other{ reg("EntityPlayer", map::entity_player.clazz,
                               static_cast<d::player_entity*>(nullptr)) };
+        // Entity, for `loadedEntityList`.  Registration is what buys FIELD
+        // lookups, and this is the wrapper posX/posY/posZ are read through.
+        // Everything else added with it -- Scoreboard, teams, the tab list --
+        // is reached by METHOD, which vmhook resolves from the object's own
+        // class, so those wrappers need no name bound to them.
+        const bool entities{ reg("Entity", map::entity.clazz,
+                                 static_cast<d::any_entity*>(nullptr)) };
         const bool food{ reg("FoodStats", map::food_stats.clazz,
                              static_cast<d::food_stats*>(nullptr)) };
 
@@ -683,6 +985,7 @@ namespace chatwire::sdk
         if (!food)      { chatwire::log::warn("FoodStats missing; hunger will read as zero"); }
         if (!world_class) { chatwire::log::warn("WorldClient missing; playerEntities unavailable"); }
         if (!other)     { chatwire::log::warn("EntityPlayer missing; playerEntities unavailable"); }
+        if (!entities)  { chatwire::log::warn("Entity missing; loadedEntityList unavailable"); }
         return true;
     }
 
@@ -1111,7 +1414,7 @@ namespace chatwire::sdk
 
             const auto list_proxy{ world->get_field(list_field) };
             if (!list_proxy) { return out; }
-            const std::unique_ptr<d::player_list> held{ list_proxy->get() };
+            const std::unique_ptr<d::java_collection> held{ list_proxy->get() };
             if (!held->get_instance()) { return out; }
 
             // vmhook::list knows how to walk a java.util.Collection, so the
@@ -1142,6 +1445,421 @@ namespace chatwire::sdk
                     }
                 }
                 if (!who.name.empty() || !who.uuid.empty()) { out.push_back(std::move(who)); }
+            }
+        }
+        catch (...) { }
+        return out;
+    }
+
+    /* @brief One row of a scoreboard objective. */
+    struct score_entry
+    {
+        /*
+            The "player" this score belongs to, which on most servers is not a
+            player: a sidebar is built out of fake entries whose NAMES are the
+            text you see.  Reported as the game holds it rather than filtered,
+            because deciding which entries are real is the caller's business.
+        */
+        std::string  name{};
+        std::int32_t points{ 0 };
+    };
+
+    /* @brief An objective in one display slot, and what it currently shows. */
+    struct objective_view
+    {
+        /* "list" (tab), "sidebar" or "belowName" — the slot that was asked for. */
+        std::string             slot{};
+        /* Empty when the server has put no objective in this slot. */
+        std::string             name{};
+        std::string             display_name{};
+        std::vector<score_entry> scores{};
+    };
+
+    /*
+        @brief One team, with the two strings that decorate its members' names.
+        @details
+        `prefix` and `suffix` are the COLOURED forms — what the game actually
+        puts either side of a member's name, which is what makes one nametag red
+        and another blue.  A client that wants the nametag a player is drawn with
+        can build it as prefix + name + suffix without asking anything else.
+    */
+    struct team_view
+    {
+        std::string              name{};
+        std::string              display_name{};
+        std::string              prefix{};
+        std::string              suffix{};
+        std::vector<std::string> members{};
+    };
+
+    /*
+        @brief One row of the TAB LIST, which is not the same as playerEntities.
+        @details
+        playerEntities is who the client has loaded as entities — the players
+        near enough to exist.  This is everyone the SERVER says is connected,
+        which on a large server is a different and much longer list.  Both are
+        offered because both are real questions, and confusing them is the
+        commonest mistake in this area.
+    */
+    struct tab_entry
+    {
+        std::string  name{};
+        std::string  uuid{};
+        /* Milliseconds, as the tab list's signal bars are drawn from. */
+        std::int32_t ping{ 0 };
+        /*
+            The name the tab list DRAWS, which the server may have coloured or
+            replaced.  Falls back to the profile name when the server set none,
+            exactly as the game does.
+        */
+        std::string  display_name{};
+    };
+
+    /* @brief One entity the client has loaded — a player, a mob, an item. */
+    struct entity_view
+    {
+        /* The network id, which is how packets name an entity. */
+        std::int32_t id{ 0 };
+        /* The class it really is, in this jar's spelling.  See class_name_of. */
+        std::string  type{};
+        std::string  name{};
+        /* An anvil or /summon name; "" for almost everything. */
+        std::string  custom_name{};
+        /* What the game DRAWS above it: team colours, custom name and all. */
+        std::string  display_name{};
+        double       x{ 0.0 };
+        double       y{ 0.0 };
+        double       z{ 0.0 };
+    };
+
+    /*
+        @brief The client's scoreboard for one display slot.
+        @details
+        Slot 0 is the tab list's column, 1 is the sidebar, 2 is the number under
+        a player's nametag.  A slot with no objective is not an error: it is the
+        normal state of most of them, and comes back with an empty `name`.
+
+        THE CLIENT'S COPY, which is the only one that exists here.  It is fed by
+        the server's scoreboard packets, so it holds exactly what this player has
+        been told — a server that hides an objective from you has hidden it from
+        this too.
+
+        One scope for the whole read, and it is a long one: an objective, its
+        scores, and a string call per row.  Bounded at 256 rows for that reason.
+    */
+    [[nodiscard]] inline auto scoreboard_slot(const std::int32_t slot) noexcept
+        -> std::optional<objective_view>
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        try
+        {
+            const auto slot_name{ slot == 0 ? "list" : slot == 1 ? "sidebar"
+                                : slot == 2 ? "belowName" : "" };
+            if (slot_name[0] == '\0') { return std::nullopt; }
+
+            const vmhook::java_thread_scope java{};
+            if (!java) { return std::nullopt; }
+
+            const auto board{ d::client_scoreboard() };
+            if (!board || !board->get_instance()) { return std::nullopt; }
+
+            objective_view out{ .slot = slot_name };
+
+            const auto in_slot{ board->get_method(
+                map::resolve(map::scoreboard.get_objective_in_display_slot),
+                std::format("(I)L{};", map::resolve(map::score_objective.clazz))) };
+            if (!in_slot) { return out; }
+
+            const std::unique_ptr<d::score_objective> objective{ in_slot->call(slot) };
+            if (!objective->get_instance()) { return out; }   // nothing in this slot
+
+            out.name = d::string_call(objective, map::score_objective.get_name);
+            out.display_name = d::string_call(objective, map::score_objective.get_display_name);
+
+            const auto sorted{ board->get_method(
+                map::resolve(map::scoreboard.get_sorted_scores),
+                std::format("(L{};)Ljava/util/Collection;",
+                            map::resolve(map::score_objective.clazz))) };
+            if (!sorted) { return out; }
+
+            const std::unique_ptr<d::java_collection> held{ sorted->call(objective) };
+            if (!held->get_instance()) { return out; }
+
+            auto rows{ d::elements_of<d::score>(held, 256u) };
+            out.scores.reserve(rows.size());
+            for (const auto& row : rows)
+            {
+                if (!row || !row->get_instance() || out.scores.size() >= 256u) { continue; }
+                score_entry entry{ .name = d::string_call(row, map::score.get_player_name) };
+                if (const auto points{ row->get_method(
+                        map::resolve(map::score.get_score_points), "()I") })
+                {
+                    entry.points = points->call();
+                }
+                out.scores.push_back(std::move(entry));
+            }
+            return out;
+        }
+        catch (...) { return std::nullopt; }
+    }
+
+    namespace detail
+    {
+        /*
+            @brief One ScorePlayerTeam, read into a plain struct.
+            @details
+            Shared by `teams()` and `team_of()` rather than written twice: the
+            two commands differ in how they FIND a team, not in what a team is,
+            and a second copy would be the place one of them quietly stopped
+            reporting the suffix.
+
+            Must be called inside a java_thread_scope -- it makes six calls and
+            walks a collection, all against `team`'s address.
+        */
+        [[nodiscard]] inline auto read_team(
+            const std::unique_ptr<score_player_team>& team) -> chatwire::sdk::team_view
+        {
+            namespace map = chatwire::mapping;
+            chatwire::sdk::team_view view{
+                .name = string_call(team, map::score_player_team.get_registered_name),
+                .display_name = string_call(team, map::score_player_team.get_team_name),
+                .prefix = string_call(team, map::score_player_team.get_color_prefix),
+                .suffix = string_call(team, map::score_player_team.get_color_suffix) };
+
+            if (const auto members{ team->get_method(
+                    map::resolve(map::score_player_team.get_membership_collection),
+                    "()Ljava/util/Collection;") })
+            {
+                const std::unique_ptr<java_collection> names{ members->call() };
+                if (names->get_instance())
+                {
+                    // Members are java.lang.String, which vmhook decodes
+                    // directly -- there is no wrapper to write for a String.
+                    for (auto& who : elements_of<java_string>(names, 256u))
+                    {
+                        if (who && who->get_instance() && view.members.size() < 256u)
+                        {
+                            view.members.push_back(vmhook::read_java_string(who->get_instance()));
+                        }
+                    }
+                }
+            }
+            return view;
+        }
+    }
+
+    /* @brief Every team the client knows about, with its nametag decoration. */
+    [[nodiscard]] inline auto teams() noexcept -> std::vector<team_view>
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        std::vector<team_view> out;
+        try
+        {
+            const vmhook::java_thread_scope java{};
+            if (!java) { return out; }
+
+            const auto board{ d::client_scoreboard() };
+            if (!board || !board->get_instance()) { return out; }
+
+            const auto all{ board->get_method(map::resolve(map::scoreboard.get_teams),
+                                              "()Ljava/util/Collection;") };
+            if (!all) { return out; }
+            const std::unique_ptr<d::java_collection> held{ all->call() };
+            if (!held->get_instance()) { return out; }
+
+            auto found{ d::elements_of<d::score_player_team>(held, 128u) };
+            out.reserve(found.size());
+            for (const auto& team : found)
+            {
+                if (!team || !team->get_instance() || out.size() >= 128u) { continue; }
+                out.push_back(detail::read_team(team));
+            }
+        }
+        catch (...) { }
+        return out;
+    }
+
+    /*
+        @brief The team one player is on, or nullopt when they are on none.
+        @details
+        BY NAME, because that is what Minecraft keys teams on -- a scoreboard
+        team holds strings, not players, which is why a team can list somebody
+        who is not online and why this works for them too.
+
+        The descriptor is not optional: under OBF this method is `h`, and so is
+        `getDisplaySlotStrings`, which returns a String[].  A name-only lookup
+        would call that one and report nothing.
+    */
+    [[nodiscard]] inline auto team_of(const std::string& player) noexcept
+        -> std::optional<team_view>
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        try
+        {
+            if (player.empty()) { return std::nullopt; }
+
+            const vmhook::java_thread_scope java{};
+            if (!java) { return std::nullopt; }
+
+            const auto board{ d::client_scoreboard() };
+            if (!board->get_instance()) { return std::nullopt; }
+
+            const auto lookup{ board->get_method(
+                map::resolve(map::scoreboard.get_players_team),
+                std::format("(Ljava/lang/String;)L{};",
+                            map::resolve(map::score_player_team.clazz))) };
+            if (!lookup) { return std::nullopt; }
+
+            const std::unique_ptr<d::score_player_team> team{ lookup->call(player) };
+            if (!team->get_instance()) { return std::nullopt; }   // on no team
+            return d::read_team(team);
+        }
+        catch (...) { return std::nullopt; }
+    }
+
+    /*
+        @brief The tab list: everyone the server says is connected.
+        @details
+        Reached through `Minecraft.getNetHandler()`, which is null before a world
+        is joined -- so this is empty on the title screen rather than failing.
+    */
+    [[nodiscard]] inline auto tab_list() noexcept -> std::vector<tab_entry>
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        std::vector<tab_entry> out;
+        try
+        {
+            const vmhook::java_thread_scope java{};
+            if (!java) { return out; }
+
+            const auto mc{ d::client() };
+            if (!mc || !mc->get_instance()) { return out; }
+
+            const auto handler_of{ mc->get_method(
+                map::resolve(map::minecraft.get_net_handler),
+                d::returns(map::net_handler_play_client.clazz)) };
+            if (!handler_of) { return out; }
+            const std::unique_ptr<d::net_handler> handler{ handler_of->call() };
+            if (!handler->get_instance()) { return out; }     // not connected
+
+            const auto info_map{ handler->get_method(
+                map::resolve(map::net_handler_play_client.get_player_info_map),
+                "()Ljava/util/Collection;") };
+            if (!info_map) { return out; }
+            const std::unique_ptr<d::java_collection> held{ info_map->call() };
+            if (!held->get_instance()) { return out; }
+
+            auto rows{ d::elements_of<d::player_info>(held, 512u) };
+            out.reserve(rows.size());
+            for (const auto& row : rows)
+            {
+                if (!row || !row->get_instance() || out.size() >= 512u) { continue; }
+                tab_entry entry{};
+
+                if (const auto ping{ row->get_method(
+                        map::resolve(map::network_player_info.get_response_time), "()I") })
+                {
+                    entry.ping = ping->call();
+                }
+
+                if (const auto profile_of{ row->get_method(
+                        map::resolve(map::network_player_info.get_game_profile),
+                        d::returns(map::game_profile.clazz)) })
+                {
+                    const std::unique_ptr<d::game_profile> profile{ profile_of->call() };
+                    if (profile->get_instance())
+                    {
+                        entry.name = d::string_call(profile, map::game_profile.get_name);
+                        if (const auto id{ profile->get_method(
+                                map::resolve(map::game_profile.get_id), "()Ljava/util/UUID;") })
+                        {
+                            const std::unique_ptr<d::java_uuid> uuid{ id->call() };
+                            if (uuid->get_instance())
+                            {
+                                if (const auto as_text{ uuid->get_method("toString") })
+                                {
+                                    entry.uuid = as_text->call();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                entry.display_name =
+                    d::component_call(row, map::network_player_info.get_display_name);
+                // The game falls back to the profile name when the server set no
+                // display name, and so does this: a caller that has to know the
+                // difference can compare the two fields, and one that does not
+                // gets the name the tab list draws either way.
+                if (entry.display_name.empty()) { entry.display_name = entry.name; }
+
+                if (!entry.name.empty() || !entry.uuid.empty()) { out.push_back(std::move(entry)); }
+            }
+        }
+        catch (...) { }
+        return out;
+    }
+
+    /*
+        @brief Every entity the client has loaded.
+        @details
+        `World.loadedEntityList` — players, mobs, items, arrows, everything with
+        a position.  On a busy world this is thousands of objects and a string
+        call or two per entity, so it is bounded and is a request rather than
+        something to poll.
+
+        `type` is the class each one REALLY is, so a caller can filter without
+        chatwire having to know what a zombie is.
+    */
+    [[nodiscard]] inline auto entities(const std::size_t limit = 1024u) noexcept
+        -> std::vector<entity_view>
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        std::vector<entity_view> out;
+        try
+        {
+            const vmhook::java_thread_scope java{};
+            if (!java) { return out; }
+
+            const auto world{ d::client_world() };
+            if (!world || !world->get_instance()) { return out; }
+
+            const auto list_proxy{ world->get_field(
+                map::resolve(map::world.loaded_entity_list)) };
+            if (!list_proxy) { return out; }
+            const std::unique_ptr<d::java_collection> held{ list_proxy->get() };
+            if (!held->get_instance()) { return out; }
+
+            auto found{ d::elements_of<d::any_entity>(held, limit) };
+            out.reserve(found.size() < limit ? found.size() : limit);
+            for (const auto& entity : found)
+            {
+                if (!entity || !entity->get_instance() || out.size() >= limit) { continue; }
+                entity_view view{ .type = d::class_name_of(entity->get_instance()) };
+
+                if (const auto id{ entity->get_method(
+                        map::resolve(map::entity.get_entity_id), "()I") })
+                {
+                    view.id = id->call();
+                }
+                view.name = d::string_call(entity, map::entity.get_name);
+                view.custom_name = d::string_call(entity, map::entity.get_custom_name_tag);
+                view.display_name = d::component_call(entity, map::entity.get_display_name);
+
+                const auto load{ [&](const map::name& n, double& into) noexcept
+                {
+                    if (const auto f{ entity->get_field(map::resolve(n)) }) { into = f->get(); }
+                } };
+                load(map::entity.pos_x, view.x);
+                load(map::entity.pos_y, view.y);
+                load(map::entity.pos_z, view.z);
+
+                out.push_back(std::move(view));
             }
         }
         catch (...) { }

@@ -201,6 +201,8 @@ namespace chatwire::mapping
             the question a client needs before pretending to type.
         */
         name current_screen{ .mcp = "currentScreen", .obf = "m", .srg = "field_71462_r" };
+        /* getNetHandler() - the connection, and through it the tab list. */
+        name get_net_handler{ .mcp = "getNetHandler", .obf = "u", .srg = "func_147114_u" };
         // runTick is deliberately absent.  It was the pump's hook target, and
         // there is no pump: vmhook can enter Java on any thread now, so nothing
         // has to be marshalled onto the client's main loop.  This table is only
@@ -239,6 +241,106 @@ namespace chatwire::mapping
         name clazz{ .mcp = "net/minecraft/world/World", .obf = "adm" };
         /* List<EntityPlayer> — everyone the client currently knows about. */
         name player_entities{ .mcp = "playerEntities", .obf = "j", .srg = "field_73010_i" };
+        /* List<Entity> - EVERYTHING the client has loaded, players included. */
+        name loaded_entity_list{ .mcp = "loadedEntityList", .obf = "f", .srg = "field_72996_f" };
+        /* getScoreboard() - the client's copy, fed by the server's packets. */
+        name get_scoreboard{ .mcp = "getScoreboard", .obf = "Z", .srg = "func_96441_U" };
+    };
+
+    // net.minecraft.scoreboard.Scoreboard - objectives, scores and teams.
+    //
+    // TWO OF THESE NEED THEIR DESCRIPTOR AND WILL SILENTLY MISBEHAVE WITHOUT IT.
+    // Under OBF `getPlayersTeam` and `getDisplaySlotStrings` are both `h`, and
+    // `getSortedScores` and `getObjectiveDisplaySlotNumber` are both `i`.  A
+    // name-only lookup takes whichever comes first in the method array, which is
+    // how a scoreboard reader ends up calling the one that returns a String[]
+    // and reporting nothing at all.
+    struct scoreboard_names
+    {
+        name clazz{ .mcp = "net/minecraft/scoreboard/Scoreboard", .obf = "auo" };
+        /* getObjectiveInDisplaySlot(int) - 0 list, 1 sidebar, 2 below name. */
+        name get_objective_in_display_slot{ .mcp = "getObjectiveInDisplaySlot", .obf = "a",
+                                            .srg = "func_96539_a" };
+        /* getSortedScores(ScoreObjective) - highest first, as the sidebar draws. */
+        name get_sorted_scores{ .mcp = "getSortedScores", .obf = "i", .srg = "func_96534_i" };
+        name get_teams{ .mcp = "getTeams", .obf = "g", .srg = "func_96525_g" };
+        name get_players_team{ .mcp = "getPlayersTeam", .obf = "h", .srg = "func_96509_i" };
+    };
+
+    // net.minecraft.scoreboard.ScoreObjective - one scoreboard column.
+    struct score_objective_names
+    {
+        name clazz{ .mcp = "net/minecraft/scoreboard/ScoreObjective", .obf = "auk" };
+        /* The internal name, which is what commands refer to. */
+        name get_name{ .mcp = "getName", .obf = "b", .srg = "func_96679_b" };
+        /* The title drawn above the sidebar, section signs and all. */
+        name get_display_name{ .mcp = "getDisplayName", .obf = "d", .srg = "func_96678_d" };
+    };
+
+    // net.minecraft.scoreboard.Score - one row of one objective.
+    struct score_names
+    {
+        name clazz{ .mcp = "net/minecraft/scoreboard/Score", .obf = "aum" };
+        name get_score_points{ .mcp = "getScorePoints", .obf = "c", .srg = "func_96652_c" };
+        /*
+            The "player" a score belongs to, which on most servers is not a
+            player at all: sidebars are built out of fake entries whose names are
+            the text you see.  Reported as-is rather than filtered.
+        */
+        name get_player_name{ .mcp = "getPlayerName", .obf = "e", .srg = "func_96653_e" };
+    };
+
+    // net.minecraft.scoreboard.ScorePlayerTeam - a team, and the nametag
+    // decoration every member of it gets.
+    struct score_player_team_names
+    {
+        name clazz{ .mcp = "net/minecraft/scoreboard/ScorePlayerTeam", .obf = "aul" };
+        /* The team's id, which is what /team commands use. */
+        name get_registered_name{ .mcp = "getRegisteredName", .obf = "b", .srg = "func_96661_b" };
+        /* The display name, which is what a tab header shows. */
+        name get_team_name{ .mcp = "getTeamName", .obf = "c", .srg = "func_96669_c" };
+        name get_membership_collection{ .mcp = "getMembershipCollection", .obf = "d",
+                                        .srg = "func_96670_d" };
+        /*
+            Prefix and suffix WITH the team's colour already applied - these are
+            the strings the game puts either side of a member's name, which is
+            what makes one nametag red and another blue.  Not the raw fields.
+        */
+        name get_color_prefix{ .mcp = "getColorPrefix", .obf = "e", .srg = "func_96668_e" };
+        name get_color_suffix{ .mcp = "getColorSuffix", .obf = "f", .srg = "func_96663_f" };
+    };
+
+    // net.minecraft.client.network.NetHandlerPlayClient - the connection, and
+    // the only place the TAB LIST exists.  It is not the world's player list:
+    // playerEntities is who is loaded nearby, this is everyone on the server.
+    struct net_handler_play_client_names
+    {
+        name clazz{ .mcp = "net/minecraft/client/network/NetHandlerPlayClient", .obf = "bcy" };
+        name get_player_info_map{ .mcp = "getPlayerInfoMap", .obf = "d", .srg = "func_175106_d" };
+    };
+
+    // net.minecraft.client.network.NetworkPlayerInfo - one tab-list row.
+    struct network_player_info_names
+    {
+        name clazz{ .mcp = "net/minecraft/client/network/NetworkPlayerInfo", .obf = "bdc" };
+        name get_game_profile{ .mcp = "getGameProfile", .obf = "a", .srg = "func_178845_a" };
+        /* Ping in milliseconds, which is what the tab list draws its bars from. */
+        name get_response_time{ .mcp = "getResponseTime", .obf = "c", .srg = "func_178853_c" };
+        /*
+            The tab-list nametag, or null when the server has not set one - in
+            which case the game falls back to the profile name, and so does this.
+        */
+        name get_display_name{ .mcp = "getDisplayName", .obf = "k", .srg = "func_178854_k" };
+    };
+
+    // com.mojang.authlib.GameProfile - a LIBRARY class, so it carries one name
+    // in every mapping and `name::in` falls back to mcp for all three.  Its two
+    // accessors are not remapped either.
+    struct game_profile_names
+    {
+        name clazz{ .mcp = "com/mojang/authlib/GameProfile" };
+        name get_name{ .mcp = "getName" };
+        name get_id{ .mcp = "getId" };
     };
 
     // net.minecraft.entity.Entity — the two identity accessors every player has.
@@ -259,6 +361,17 @@ namespace chatwire::mapping
         name get_name{ .mcp = "getName", .obf = "e_", .srg = "func_70005_c_" };
         /* getUniqueID() — the account UUID, stable across name changes. */
         name get_unique_id{ .mcp = "getUniqueID", .obf = "aK", .srg = "func_110124_au" };
+        /* getEntityId() - the network id, which is how packets name an entity. */
+        name get_entity_id{ .mcp = "getEntityId", .obf = "F", .srg = "func_145782_y" };
+        /*
+            The NAMETAG, in its two halves.  `getCustomNameTag` is the string an
+            anvil or a /summon put on the entity and is "" for most of them;
+            `getDisplayName` is what the game actually draws, team colours and
+            all, and is an IChatComponent rather than a String.
+        */
+        name get_custom_name_tag{ .mcp = "getCustomNameTag", .obf = "aM", .srg = "func_95999_t" };
+        name has_custom_name{ .mcp = "hasCustomName", .obf = "l_", .srg = "func_145818_k_" };
+        name get_display_name{ .mcp = "getDisplayName", .obf = "f_", .srg = "func_145748_c_" };
         /*
             Position and facing, as plain fields.  Every one of these is declared
             on Entity and inherited all the way down to EntityPlayerSP, so they
@@ -387,6 +500,13 @@ namespace chatwire::mapping
         world_names               world{};
         entity_names              entity{};
         entity_living_base_names  entity_living_base{};
+        scoreboard_names          scoreboard{};
+        score_objective_names     score_objective{};
+        score_names               score{};
+        score_player_team_names   score_player_team{};
+        net_handler_play_client_names net_handler_play_client{};
+        network_player_info_names network_player_info{};
+        game_profile_names        game_profile{};
         entity_player_names       entity_player{};
         food_stats_names          food_stats{};
         gui_ingame_names          gui_ingame{};
@@ -408,6 +528,15 @@ namespace chatwire::mapping
     inline constexpr const world_names&               world{ all.world };
     inline constexpr const entity_names&              entity{ all.entity };
     inline constexpr const entity_living_base_names&  entity_living_base{ all.entity_living_base };
+    inline constexpr const scoreboard_names&          scoreboard{ all.scoreboard };
+    inline constexpr const score_objective_names&     score_objective{ all.score_objective };
+    inline constexpr const score_names&               score{ all.score };
+    inline constexpr const score_player_team_names&   score_player_team{ all.score_player_team };
+    inline constexpr const net_handler_play_client_names& net_handler_play_client{
+        all.net_handler_play_client };
+    inline constexpr const network_player_info_names& network_player_info{
+        all.network_player_info };
+    inline constexpr const game_profile_names&        game_profile{ all.game_profile };
     inline constexpr const entity_player_names&       entity_player{ all.entity_player };
     inline constexpr const food_stats_names&          food_stats{ all.food_stats };
     inline constexpr const gui_ingame_names&          gui_ingame{ all.gui_ingame };

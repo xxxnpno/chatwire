@@ -58,6 +58,8 @@ namespace chatwire::features
     inline std::atomic<std::uint64_t> g_player_queries{ 0 };
     /* How many times a client asked what the local player is. */
     inline std::atomic<std::uint64_t> g_player_states{ 0 };
+    /* How many times a client asked for every loaded entity. */
+    inline std::atomic<std::uint64_t> g_entity_queries{ 0 };
 
     /*
         @brief Where a world change goes once the detour has seen it.
@@ -151,6 +153,21 @@ namespace chatwire::features
         std::string screen{};
     };
 
+    /*
+        @brief The answer to `loadedEntityList`.
+        @details
+        EVERYTHING the client has loaded, not just players: mobs, dropped items,
+        arrows, paintings.  `type` on each one is the class it really is, so a
+        caller filters on that rather than chatwire having to know what a zombie
+        is -- and the answer is honest on a vanilla client, where the class is
+        called `zj`.
+    */
+    struct loaded_entities_result
+    {
+        std::size_t                              count{ 0 };
+        std::vector<chatwire::sdk::entity_view>  entities{};
+    };
+
     /* @brief This feature's contribution to `system.stats`. */
     struct world_stats
     {
@@ -158,6 +175,7 @@ namespace chatwire::features
         std::uint64_t worlds_entered{ 0 };
         std::uint64_t worlds_left{ 0 };
         std::uint64_t player_states{ 0 };
+        std::uint64_t entity_queries{ 0 };
     };
 
     class world_feature final : public chatwire::feature
@@ -277,8 +295,23 @@ namespace chatwire::features
                             .open = open, .screen = std::move(screen) }));
                 }
 
+                if (cmd.verb == "loadedEntityList")
+                {
+                    if (!chatwire::sdk::in_world())
+                    {
+                        return chatwire::response::failure("not in a world");
+                    }
+                    auto found{ chatwire::sdk::entities() };
+                    g_entity_queries.fetch_add(1, std::memory_order_relaxed);
+                    const std::size_t count{ found.size() };
+                    return chatwire::response::success(
+                        chatwire::json::object(loaded_entities_result{
+                            .count = count, .entities = std::move(found) }));
+                }
+
                 return chatwire::response::failure(
-                    "unknown member; try playerEntities, thePlayer or currentScreen");
+                    "unknown member; try playerEntities, loadedEntityList, thePlayer "
+                    "or currentScreen");
             }
             catch (...)
             {
@@ -349,7 +382,8 @@ namespace chatwire::features::world
             .player_queries = chatwire::features::g_player_queries.load(std::memory_order_relaxed),
             .worlds_entered = chatwire::features::g_worlds_entered.load(std::memory_order_relaxed),
             .worlds_left    = chatwire::features::g_worlds_left.load(std::memory_order_relaxed),
-            .player_states  = chatwire::features::g_player_states.load(std::memory_order_relaxed) };
+            .player_states  = chatwire::features::g_player_states.load(std::memory_order_relaxed),
+            .entity_queries = chatwire::features::g_entity_queries.load(std::memory_order_relaxed) };
     }
 
     /* @brief This feature's singleton, for the root module to register. */

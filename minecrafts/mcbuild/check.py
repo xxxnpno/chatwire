@@ -226,7 +226,22 @@ def check(header: Path | None = None) -> int:
     def bad(e: Entry, message: str) -> None:
         problems.append(f"  {header.name}:{e.line}  {e.group}::{e.ident} -- {message}")
 
+    # A group whose class carries only an mcp spelling and is not in the
+    # mappings at all is a LIBRARY class -- com/mojang/authlib/GameProfile,
+    # java/util/UUID.  Nobody remaps those, which is why they have one name, and
+    # the MCP mappings do not describe them, which is why they cannot be checked
+    # here.  Unverifiable is not the same as wrong, and reporting it as wrong
+    # would train a reader to ignore this tool's output.
+    library_groups = {
+        e.group for e in entries
+        if e.is_class and not e.obf and not e.srg and e.mcp not in by_class
+    }
+    for group in sorted(library_groups):
+        say(f"  {group}: a library class, not remapped and not in the mappings -- skipped")
+
     for e in entries:
+        if e.group in library_groups:
+            continue
         if e.is_class:
             known = by_class.get(e.mcp)
             if known is None:
@@ -264,5 +279,5 @@ def check(header: Path | None = None) -> int:
         for p in problems:
             say(p)
         return 1
-    say(f"* all {len(entries)} entries agree with the jar")
+    say(f"* all {len(entries) - sum(1 for e in entries if e.group in library_groups)} checkable entries agree with the jar")
     return 0

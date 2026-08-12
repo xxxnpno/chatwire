@@ -51,6 +51,24 @@ IN_WORLD_QUERIES: list[dict] = [
     {"cmd": "net.minecraft.client.Minecraft.thePlayer"},
     {"cmd": "net.minecraft.client.Minecraft.currentScreen"},
     {"cmd": "net.minecraft.world.World.playerEntities"},
+    {"cmd": "net.minecraft.world.World.loadedEntityList"},
+    {"cmd": "net.minecraft.client.network.NetHandlerPlayClient.getPlayerInfoMap"},
+    {"cmd": "net.minecraft.scoreboard.Scoreboard.getObjectiveInDisplaySlot",
+     "slot": "sidebar"},
+    {"cmd": "net.minecraft.scoreboard.Scoreboard.getTeams"},
+]
+
+#: Typed at the SERVER console, so the clients have a scoreboard and a team to
+#: read.  1.8.9 has no /team command -- prefixes come from a team's COLOUR --
+#: so `option red color red` is what makes a member's nametag red, and
+#: getColorPrefix is what reports it.
+SERVER_SETUP: list[str] = [
+    "scoreboard objectives add board dummy Test Board",
+    "scoreboard objectives setdisplay sidebar board",
+    "scoreboard players set alpha board 42",
+    "scoreboard players set beta board 7",
+    "scoreboard teams add red",
+    "scoreboard teams option red color red",
 ]
 
 
@@ -191,6 +209,24 @@ def _summarise(mapping: str, exchanges: list[dict]) -> int:
         elif verb.endswith(".playerEntities"):
             names = ", ".join(sorted(p["name"] for p in result.get("players", [])))
             say(f"    {'playerEntities':<18} {result.get('count')} loaded: {names}")
+        elif verb.endswith(".loadedEntityList"):
+            kinds = {}
+            for e in result.get("entities", []):
+                kinds[e["type"]] = kinds.get(e["type"], 0) + 1
+            top = ", ".join(f"{k.split('/')[-1]}x{v}" for k, v in
+                            sorted(kinds.items(), key=lambda kv: -kv[1])[:4])
+            say(f"    {'loadedEntityList':<18} {result.get('count')} entities: {top}")
+        elif verb.endswith(".getPlayerInfoMap"):
+            rows = ", ".join(f"{p['name']}({p['ping']}ms)" for p in result.get("players", []))
+            say(f"    {'tab list':<18} {result.get('count')}: {rows}")
+        elif verb.endswith(".getObjectiveInDisplaySlot"):
+            scores = ", ".join(f"{s['name']}={s['points']}" for s in result.get("scores", []))
+            say(f"    {'sidebar':<18} {result.get('name')!r} "
+                f"title={result.get('display_name')!r} [{scores}]")
+        elif verb.endswith(".getTeams"):
+            teams = ", ".join(f"{t['name']}(prefix={t['prefix']!r},"
+                              f"members={len(t['members'])})" for t in result.get("teams", []))
+            say(f"    {'teams':<18} {result.get('count')}: {teams}")
         elif verb.endswith(".sendChatMessage"):
             say(f"    {'sendChatMessage':<18} sent={result.get('sent')}")
         else:
@@ -371,6 +407,16 @@ def run(which: tuple[str, ...], keep: bool = False, timeout: float = 180.0,
             say("")
             say(f"* {len(listening)} chatwire(s) live at once on ports "
                 + ", ".join(str(PORTS[m]) for m in listening))
+
+        if server is not None and listening:
+            # Wait for one client before setting up, so `teams join` has a
+            # player to name; the scoreboard itself does not need one.
+            wait_in_world(PORTS[listening[0]])
+            for line in SERVER_SETUP:
+                server_mod.console(server, line)
+            for mapping in listening:
+                server_mod.console(server, f"scoreboard teams join red chatwire_{mapping[:3]}")
+            time.sleep(3)
 
         for mapping in listening:
             say("")
