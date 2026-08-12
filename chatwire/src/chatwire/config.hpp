@@ -45,10 +45,10 @@
 
 #include "chatwire/common.hpp"
 
-// Deliberately here rather than in common.hpp: see the note at the bottom of
-// that file.  Before module.hpp, which reaches windows.h, so the ordering rule
-// still holds.
-#include <meta>
+// Brings <meta> with it, deliberately here rather than in common.hpp: see the
+// note at the bottom of that file.  Before module.hpp, which reaches windows.h,
+// so the ordering rule still holds.
+#include "chatwire/reflect.hpp"
 
 #include "chatwire/module.hpp"
 
@@ -94,18 +94,10 @@ namespace chatwire::config
 
     namespace detail
     {
-        /*
-            @brief `settings`' members, at compile time.
-            @details
-            Through define_static_array for the same reason json.hpp does it:
-            nonstatic_data_members_of allocates during constant evaluation, and
-            that allocation may not be named by a constexpr variable.
-        */
+        /* @brief `settings`' members, at compile time.  See reflect.hpp. */
         consteval auto members_of()
         {
-            return std::define_static_array(
-                std::meta::nonstatic_data_members_of(^^settings,
-                                                     std::meta::access_context::current()));
+            return chatwire::reflect::members_of<settings>();
         }
 
         /*
@@ -164,6 +156,34 @@ namespace chatwire::config
     }
 
     /*
+        @brief The name of the handover file for the process with this pid.
+        @details
+        THE PID IS IN THE NAME, and that is what makes several chatwires legal
+        at the same time.  The file lives beside the library, and the library is
+        ONE file shared by every game on the machine -- it is unpacked into a
+        directory named after its own hash, so two injections of the same build
+        land on the same directory by design.  A single `chatwire.cfg` there was
+        therefore shared by every injection, and two of them overlapped like
+        this:
+
+            injector A writes port=24455, injects into game A
+            injector B writes port=24456, injects into game B
+            game A starts, reads the file, gets B's port, deletes the file
+            game B starts, finds no file, falls back to the default 24455
+
+        Both clients end up on a port their user was never told, and they fight
+        over one of them.  Nothing reports it: chatwire logs the port it bound
+        and the second bind simply fails, leaving a game with hooks installed
+        and no socket.  Naming the file after the TARGET pid removes the sharing
+        entirely -- the injector knows the pid it is injecting into, and the DLL
+        knows the pid it woke up in, and they are the same number.
+    */
+    [[nodiscard]] inline auto file_name_for(const std::uint32_t pid) -> std::string
+    {
+        return std::format("chatwire-{}.cfg", pid);
+    }
+
+    /*
         @brief The config file beside the chatwire library that is asking.
         @details
         Beside the LIBRARY, not beside the game and not in the working
@@ -173,7 +193,8 @@ namespace chatwire::config
     */
     [[nodiscard]] inline auto path_for_self() -> std::string
     {
-        return chatwire::module::sibling("chatwire.cfg");
+        return chatwire::module::sibling(
+            file_name_for(static_cast<std::uint32_t>(::GetCurrentProcessId())));
     }
 
     /*

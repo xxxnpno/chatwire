@@ -638,14 +638,21 @@ int main(const int argc, char** const argv)
     // process is created -- so a flag has to reach chatwire some other way.  The
     // DLL reads this during start-up and DELETES it, so nothing is left behind
     // to apply to a later injection.
+    //
+    // NAMED AFTER THE TARGET PID, because the directory it goes in is named
+    // after the library's hash and is therefore shared by every game on the
+    // machine running this build.  One file there is one file two concurrent
+    // injections fight over, each reading the other's port.  See
+    // config::file_name_for.
     {
         chatwire::config::settings settings{};
         settings.port    = static_cast<std::uint16_t>(port);
         settings.console = console;
         settings.verbose = verbose;
 
-        const std::string cfg{ std::format("{}chatwire.cfg",
-                                           to_utf8(dll.substr(0, dll.find_last_of(L"\\/") + 1u))) };
+        const std::string cfg{
+            to_utf8(dll.substr(0, dll.find_last_of(L"\\/") + 1u))
+            + chatwire::config::file_name_for(static_cast<std::uint32_t>(pid)) };
         if (!chatwire::config::write(cfg, settings))
         {
             std::println("\n  [warn] could not write {};\n"
