@@ -1,0 +1,10 @@
+# Belt and braces: the root .gitignore already excludes everything here except
+# the tooling, but a `git add -f` inside this directory should still not sweep
+# up a decompiled Minecraft.
+__pycache__/
+*.pyc
+shared/
+vanilla/
+srg/
+mcp/
+launch-*.bat

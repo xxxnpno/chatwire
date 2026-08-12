@@ -9,3 +9,14 @@ gcm.cache/
 # server and the test that imports it.
 __pycache__/
 *.pyc
+
+# minecrafts/ is a working Minecraft 1.8.9 install in three mappings: Mojang's
+# jar, libraries, natives and assets, two remapped jars and three decompiled
+# source trees.  Hundreds of megabytes, none of it ours, all of it rebuildable
+# with `python minecrafts/mc.py all`.  The tooling that rebuilds it is tracked;
+# everything it produces is not.
+minecrafts/*
+!minecrafts/.gitignore
+!minecrafts/README.md
+!minecrafts/mc.py
+!minecrafts/mcbuild/
