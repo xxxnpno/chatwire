@@ -20,3 +20,9 @@ minecrafts/*
 !minecrafts/README.md
 !minecrafts/mc.py
 !minecrafts/mcbuild/
+
+# One-shot migration scripts.  They did their job once -- the modules migration
+# -- and what they produced is the code, which is what belongs here.  Keeping
+# them tracked invites someone to re-run a transformation against a tree that
+# has moved on.
+tools/
