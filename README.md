@@ -145,11 +145,12 @@ anything.
 ## Quick start
 
 Needs **GCC 16.2 or newer** and **CMake 3.28+**. chatwire is written as C++26 **modules, all the
-way down** — 30 `.ixx` module interface units, **no headers and no `.cpp` at all**, with the
-standard library arriving as `import std;`. The preprocessor survives in exactly nine lines
-across eight files: the `<windows.h>`/`<winsock2.h>` includes in a global module fragment, where
-Win32 has nowhere else to live, and one `<cstdio>` for the three stream macros a module cannot
-export. It also needs **static reflection** (P2996): every JSON object on the wire is generated
+way down** — 29 `.ixx` module interface units of its own plus vendored vmhook, **no headers and
+no `.cpp` at all**, with the standard library arriving as `import std;`. The preprocessor survives
+in 23 lines across 10 files, every one of them an `#include` in a global module fragment: the
+Win32 headers, where Win32 has nowhere else to live, and one `<cstdio>` for the three stream
+macros a module cannot export. There is no `#define`, `#ifdef`, `#if` or `#pragma` anywhere. It
+also needs **static reflection** (P2996): every JSON object on the wire is generated
 from the struct that describes it, and a compiler without it is refused at configure time. MSYS2
 does not ship GCC 16; the [winlibs](https://winlibs.com) builds do.
 
