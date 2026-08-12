@@ -30,6 +30,7 @@ from pathlib import Path
 
 from . import launch as launch_mod
 from . import paths
+from . import server as server_mod
 from .util import say
 
 #: One port each, so `--keep` can leave all three up at once.
@@ -41,8 +42,15 @@ QUERIES: list[dict] = [
     {"cmd": "system.status"},
     {"cmd": "mapping.detected"},
     {"cmd": "mapping.verify"},
-    {"cmd": "mapping.resolve", "name": "thePlayer"},
     {"cmd": "mapping.resolve", "name": "printChatMessage"},
+]
+
+#: Asked only once the client is in a world, because that is the only place
+#: they mean anything.
+IN_WORLD_QUERIES: list[dict] = [
+    {"cmd": "net.minecraft.client.Minecraft.thePlayer"},
+    {"cmd": "net.minecraft.client.Minecraft.currentScreen"},
+    {"cmd": "net.minecraft.world.World.playerEntities"},
 ]
 
 
@@ -70,6 +78,26 @@ def wait_for_menu(mapping: str, proc: subprocess.Popen, timeout: float = 180.0) 
         if proc.poll() is not None:
             return False
         time.sleep(0.5)
+    return False
+
+
+def wait_in_world(port: int, timeout: float = 120.0) -> bool:
+    """Poll `thePlayer` until it stops saying "not in a world".
+
+    Joining is not instant and the client log does not say when it is done in a
+    way worth parsing.  chatwire already answers the question exactly -- the
+    command fails until there is a player -- so the harness asks the bridge it
+    is testing rather than guessing from a log line.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            reply = ask(port, [{"cmd": "net.minecraft.client.Minecraft.thePlayer"}])
+            if reply and reply[0]["reply"].get("ok"):
+                return True
+        except Exception:                                      # noqa: BLE001
+            pass
+        time.sleep(2)
     return False
 
 
@@ -137,13 +165,30 @@ def _summarise(mapping: str, exchanges: list[dict]) -> int:
         elif verb == "mapping.verify":
             missing += int(result.get("missing", 0))
             say(f"    {verb:<18} checked={result.get('checked')} "
-                f"missing={result.get('missing')}")
+                f"missing={result.get('missing')} "
+                f"unchecked={result.get('unchecked')}")
             for e in result.get("entries", []):
-                if not e.get("found"):
-                    say(f"      ABSENT  {e['group']}.{e['member']} -> {e['spelling']!r}")
+                if e.get("kind") == "absent":
+                    say(f"      ABSENT     {e['group']}.{e['member']} -> {e['spelling']!r}")
+                elif e.get("kind") == "not loaded":
+                    say(f"      not loaded {e['group']} ({e['spelling']})")
         elif verb == "mapping.resolve":
             say(f"    {verb:<18} {item['query']['name']!r} -> {result.get('spelling')!r} "
                 f"({result.get('kind')}, on {result.get('group')})")
+        elif verb.endswith(".thePlayer"):
+            say(f"    {'thePlayer':<18} {result.get('name')!r} at "
+                f"({result.get('x'):.2f}, {result.get('y'):.2f}, {result.get('z'):.2f}) "
+                f"yaw={result.get('yaw'):.1f} ground={result.get('on_ground')} "
+                f"hp={result.get('health')} food={result.get('food')} "
+                f"sat={result.get('saturation')} dim={result.get('dimension')}")
+        elif verb.endswith(".currentScreen"):
+            say(f"    {'currentScreen':<18} open={result.get('open')} "
+                f"{result.get('screen')!r}")
+        elif verb.endswith(".playerEntities"):
+            names = ", ".join(sorted(p["name"] for p in result.get("players", [])))
+            say(f"    {'playerEntities':<18} {result.get('count')} loaded: {names}")
+        elif verb.endswith(".sendChatMessage"):
+            say(f"    {'sendChatMessage':<18} sent={result.get('sent')}")
         else:
             say(f"    {verb:<18} {result}")
     return missing
@@ -168,7 +213,35 @@ def stop(proc: subprocess.Popen) -> None:
         pass
 
 
-def run(which: tuple[str, ...], keep: bool = False, timeout: float = 180.0) -> int:
+def chat_round_trip(mapping: str, port: int, server: subprocess.Popen | None) -> int:
+    """Say something as this client and confirm the SERVER heard it.
+
+    The strongest end-to-end check the harness has: the text starts as JSON on a
+    socket, becomes a Java call inside the game, becomes a packet, and comes back
+    out in another process's log.  Nothing about that can pass by accident.
+    """
+    if server is None:
+        return 0
+    line = f"chatwire {mapping} round trip"
+    exchanges = ask(port, [{"cmd": "net.minecraft.client.entity.EntityPlayerSP.sendChatMessage",
+                            "text": line}])
+    _summarise(mapping, exchanges)
+    if not exchanges[0]["reply"].get("ok"):
+        return 1
+
+    log = server_mod.log_path()
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if log.is_file() and line in log.read_text(encoding="utf-8", errors="replace"):
+            say(f"    {'server heard it':<18} yes")
+            return 0
+        time.sleep(1)
+    say(f"    {'server heard it':<18} NO -- the message never reached the server")
+    return 1
+
+
+def run(which: tuple[str, ...], keep: bool = False, timeout: float = 180.0,
+        with_server: bool = True) -> int:
     """Bring every client up, inject a chatwire into each, then ask them all.
 
     They run AT THE SAME TIME, one chatwire per client, each on its own port.
@@ -180,12 +253,20 @@ def run(which: tuple[str, ...], keep: bool = False, timeout: float = 180.0) -> i
     have exercised that.
     """
     clients: dict[str, subprocess.Popen] = {}
+    server: subprocess.Popen | None = None
     failures = 0
     try:
+        usernames = {m: f"chatwire_{m[:3]}" for m in which}
+        if with_server:
+            server = server_mod.start(ops=tuple(usernames.values()))
+            if server is None:
+                say("  continuing without a server; the in-world checks will be skipped")
+
+        join = f"127.0.0.1:{server_mod.DEFAULT_PORT}" if server else None
         for mapping in which:
             say(f"* {mapping} -- {paths.MAPPING_DESC[mapping]}")
             clients[mapping] = launch_mod.launch(
-                mapping, wait=False, username=f"chatwire_{mapping[:3]}")
+                mapping, wait=False, username=usernames[mapping], join=join)
 
         up: list[str] = []
         for mapping, proc in clients.items():
@@ -217,6 +298,13 @@ def run(which: tuple[str, ...], keep: bool = False, timeout: float = 180.0) -> i
             say(f"* {mapping} on port {PORTS[mapping]}")
             try:
                 failures += 1 if _summarise(mapping, ask(PORTS[mapping], QUERIES)) else 0
+                if server is not None:
+                    if wait_in_world(PORTS[mapping]):
+                        _summarise(mapping, ask(PORTS[mapping], IN_WORLD_QUERIES))
+                        failures += chat_round_trip(mapping, PORTS[mapping], server)
+                    else:
+                        say("    never joined the server; in-world checks skipped")
+                        failures += 1
             except Exception as e:                             # noqa: BLE001
                 say(f"    could not talk to it: {e}")
                 failures += 1
@@ -232,6 +320,9 @@ def run(which: tuple[str, ...], keep: bool = False, timeout: float = 180.0) -> i
             time.sleep(2)
             for proc in clients.values():
                 stop(proc)
+            # The server last, and asked rather than killed: it has a world to
+            # save, and the next run reuses it.
+            server_mod.stop(server)
 
     say("")
     if failures:

@@ -84,12 +84,30 @@ namespace chatwire::features
         bool             found{ false };
     };
 
-    /* @brief The answer to `mapping.verify`. */
+    /*
+        @brief The answer to `mapping.verify`.
+        @details
+        `missing` and `unchecked` are different failures and only the first is
+        chatwire's fault.
+
+        A class Minecraft has NOT LOADED YET cannot be found by any name, right
+        or wrong -- `find_class` walks loaded classes, which is all a running JVM
+        can be asked about.  FoodStats is the honest example: nothing loads it
+        until a player exists, so on the title screen its three names read as
+        absent and look exactly like the `avq` mistake.  They are not.  Those
+        entries are reported `unchecked`, and their group's class is reported
+        `not loaded`, so a reader can tell "this name is wrong" from "ask me
+        again once you are in a world".
+
+        Which is also the advice: verify in a world.  On the title screen a third
+        of the table is simply not loaded.
+    */
     struct mapping_verify_result
     {
         std::string_view                  mapping{};
         std::size_t                       checked{ 0 };
         std::size_t                       missing{ 0 };
+        std::size_t                       unchecked{ 0 };
         std::vector<mapping_entry_report> entries{};
     };
 
@@ -144,6 +162,11 @@ namespace chatwire::features
                           std::vector<mapping_entry_report>& out) -> void
         {
             const std::string class_name{ map::resolve(group.clazz) };
+            // Asked ONCE, before the members: every member's verdict depends on
+            // it, and find_class walks the ClassLoaderDataGraph on a miss -- so
+            // a group whose class is not loaded would otherwise pay for that
+            // walk once per member to reach the same answer.
+            const bool loaded{ chatwire::sdk::class_exists(class_name) };
 
             template for (constexpr auto member : chatwire::reflect::members_of<group_type>())
             {
@@ -154,8 +177,12 @@ namespace chatwire::features
 
                 if constexpr (id == "clazz")
                 {
-                    row.found = chatwire::sdk::class_exists(row.spelling);
-                    row.kind  = row.found ? "class" : "absent";
+                    row.found = loaded;
+                    row.kind  = loaded ? "class" : "not loaded";
+                }
+                else if (!loaded)
+                {
+                    row.kind = "unchecked";
                 }
                 else
                 {
@@ -310,8 +337,13 @@ namespace chatwire::features
             }
 
             auto entries{ detail::verify_table() };
-            const std::size_t missing{ static_cast<std::size_t>(
-                std::ranges::count_if(entries, [](const auto& e) { return !e.found; })) };
+            const auto counted{ [&entries](const std::string_view kind) noexcept
+            {
+                return static_cast<std::size_t>(std::ranges::count_if(
+                    entries, [kind](const auto& e) { return e.kind == kind; }));
+            } };
+            const std::size_t unchecked{ counted("unchecked") + counted("not loaded") };
+            const std::size_t missing{ counted("absent") };
 
             // Logged as well as answered, and at warn: a client asking this
             // question is usually a user diagnosing something, and the answer
@@ -324,10 +356,11 @@ namespace chatwire::features
 
             return chatwire::response::success(
                 chatwire::json::object(mapping_verify_result{
-                    .mapping  = map::mode_name(map::current),
-                    .checked  = entries.size(),
-                    .missing  = missing,
-                    .entries  = std::move(entries) }));
+                    .mapping   = map::mode_name(map::current),
+                    .checked   = entries.size(),
+                    .missing   = missing,
+                    .unchecked = unchecked,
+                    .entries   = std::move(entries) }));
         }
 
         [[nodiscard]] static auto resolve(const chatwire::command& cmd) -> chatwire::response

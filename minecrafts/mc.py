@@ -28,6 +28,7 @@ from mcbuild import check as check_mod                      # noqa: E402
 from mcbuild import decompile as decompile_mod              # noqa: E402
 from mcbuild import launch as launch_mod                    # noqa: E402
 from mcbuild import mappings, paths, vanilla                # noqa: E402
+from mcbuild import server as server_mod                    # noqa: E402
 from mcbuild.util import human, say                         # noqa: E402
 
 
@@ -92,7 +93,19 @@ def cmd_launch(args: argparse.Namespace) -> int:
 
 def cmd_chatwire(args: argparse.Namespace) -> int:
     return bridge_mod.run(_mappings_arg(args.mapping), keep=args.keep,
-                          timeout=args.timeout)
+                          timeout=args.timeout, with_server=not args.no_server)
+
+
+def cmd_server(args: argparse.Namespace) -> int:
+    proc = server_mod.start(ops=tuple(args.op or ()))
+    if proc is None:
+        return 1
+    say("* running; Ctrl-C to stop")
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        server_mod.stop(proc)
+    return 0
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -170,7 +183,13 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("mapping", nargs="*", help="default: all three")
     sp.add_argument("--keep", action="store_true", help="leave the clients running")
     sp.add_argument("--timeout", type=float, default=180.0)
+    sp.add_argument("--no-server", action="store_true",
+                    help="do not start a server; skip the in-world checks")
     sp.set_defaults(func=cmd_chatwire)
+
+    sp = sub.add_parser("server", help="run a local 1.8.9 server for the clients to join")
+    sp.add_argument("--op", action="append", help="username to op (repeatable)")
+    sp.set_defaults(func=cmd_server)
 
     sp = sub.add_parser("check", help="check chatwire's name table against the jar")
     sp.add_argument("--header", type=Path, default=None)

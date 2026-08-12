@@ -194,6 +194,13 @@ namespace chatwire::mapping
             client where both exist is caught entirely by load_world above.
         */
         name load_world_short{ .mcp = "loadWorld", .obf = "a", .srg = "func_71403_a" };
+        /*
+            The GuiScreen currently open, or null when the player is looking at
+            the world.  chatwire only asks whether it is null and what class it
+            is, which together answer "is the player in a menu, and which one" --
+            the question a client needs before pretending to type.
+        */
+        name current_screen{ .mcp = "currentScreen", .obf = "m", .srg = "field_71462_r" };
         // runTick is deliberately absent.  It was the pump's hook target, and
         // there is no pump: vmhook can enter Java on any thread now, so nothing
         // has to be marshalled onto the client's main loop.  This table is only
@@ -252,6 +259,62 @@ namespace chatwire::mapping
         name get_name{ .mcp = "getName", .obf = "e_", .srg = "func_70005_c_" };
         /* getUniqueID() — the account UUID, stable across name changes. */
         name get_unique_id{ .mcp = "getUniqueID", .obf = "aK", .srg = "func_110124_au" };
+        /*
+            Position and facing, as plain fields.  Every one of these is declared
+            on Entity and inherited all the way down to EntityPlayerSP, so they
+            resolve against the local player without naming a subclass.
+
+            posX/posY/posZ are doubles and yaw/pitch are floats: Minecraft's own
+            types, kept rather than widened, because a client comparing a
+            position to one it got from a packet wants the same number.
+        */
+        name pos_x{ .mcp = "posX", .obf = "s", .srg = "field_70165_t" };
+        name pos_y{ .mcp = "posY", .obf = "t", .srg = "field_70163_u" };
+        name pos_z{ .mcp = "posZ", .obf = "u", .srg = "field_70161_v" };
+        name rotation_yaw{ .mcp = "rotationYaw", .obf = "y", .srg = "field_70177_z" };
+        name rotation_pitch{ .mcp = "rotationPitch", .obf = "z", .srg = "field_70125_A" };
+        name on_ground{ .mcp = "onGround", .obf = "C", .srg = "field_70122_E" };
+        name dimension{ .mcp = "dimension", .obf = "am", .srg = "field_71093_bK" };
+    };
+
+    // net.minecraft.entity.EntityLivingBase — where health lives, and the one
+    // value in the player snapshot that is not a field.  1.8.9 keeps health in
+    // the DataWatcher rather than in a member, so getHealth() is the only honest
+    // way to read it; everything else below is a plain load.
+    struct entity_living_base_names
+    {
+        name clazz{ .mcp = "net/minecraft/entity/EntityLivingBase", .obf = "pr" };
+        name get_health{ .mcp = "getHealth", .obf = "bn", .srg = "func_110143_aJ" };
+    };
+
+    // net.minecraft.entity.player.EntityPlayer — the player-only part of the
+    // state, declared here and inherited by EntityPlayerSP.
+    struct entity_player_names
+    {
+        name clazz{ .mcp = "net/minecraft/entity/player/EntityPlayer", .obf = "wn" };
+        /* FoodStats — hunger, which is an object rather than a number. */
+        name food_stats{ .mcp = "foodStats", .obf = "bl", .srg = "field_71100_bB" };
+        name experience_level{ .mcp = "experienceLevel", .obf = "bB", .srg = "field_71068_ca" };
+        /* InventoryPlayer — the 36 main slots plus armour and the held stack. */
+        name inventory{ .mcp = "inventory", .obf = "bi", .srg = "field_71071_by" };
+    };
+
+    // net.minecraft.util.FoodStats — hunger, saturation and the exhaustion that
+    // drives them.  All plain fields, so no call is needed to read the bar.
+    struct food_stats_names
+    {
+        name clazz{ .mcp = "net/minecraft/util/FoodStats", .obf = "xg" };
+        name food_level{ .mcp = "foodLevel", .obf = "a", .srg = "field_75127_a" };
+        name food_saturation_level{ .mcp = "foodSaturationLevel", .obf = "b",
+                                    .srg = "field_75125_b" };
+    };
+
+    // net.minecraft.client.gui.GuiScreen — only ever used as the declared type
+    // of Minecraft.currentScreen.  Which screen it really is comes from the
+    // object's own klass, not from this name.
+    struct gui_screen_names
+    {
+        name clazz{ .mcp = "net/minecraft/client/gui/GuiScreen", .obf = "axu" };
     };
 
     // net.minecraft.client.gui.GuiIngame — holds the chat GUI.
@@ -323,8 +386,12 @@ namespace chatwire::mapping
         world_client_names        world_client{};
         world_names               world{};
         entity_names              entity{};
+        entity_living_base_names  entity_living_base{};
+        entity_player_names       entity_player{};
+        food_stats_names          food_stats{};
         gui_ingame_names          gui_ingame{};
         gui_new_chat_names        gui_new_chat{};
+        gui_screen_names          gui_screen{};
         i_chat_component_names    i_chat_component{};
         chat_component_text_names chat_component_text{};
     };
@@ -340,8 +407,12 @@ namespace chatwire::mapping
     inline constexpr const world_client_names&        world_client{ all.world_client };
     inline constexpr const world_names&               world{ all.world };
     inline constexpr const entity_names&              entity{ all.entity };
+    inline constexpr const entity_living_base_names&  entity_living_base{ all.entity_living_base };
+    inline constexpr const entity_player_names&       entity_player{ all.entity_player };
+    inline constexpr const food_stats_names&          food_stats{ all.food_stats };
     inline constexpr const gui_ingame_names&          gui_ingame{ all.gui_ingame };
     inline constexpr const gui_new_chat_names&        gui_new_chat{ all.gui_new_chat };
+    inline constexpr const gui_screen_names&          gui_screen{ all.gui_screen };
     inline constexpr const i_chat_component_names&    i_chat_component{ all.i_chat_component };
     inline constexpr const chat_component_text_names& chat_component_text{ all.chat_component_text };
 

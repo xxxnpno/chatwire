@@ -242,6 +242,27 @@ namespace chatwire::json
             {
                 out += std::format("{}", value);
             }
+            else if constexpr (std::floating_point<type>)
+            {
+                // JSON HAS NO NaN AND NO INFINITY.  Writing either produces a
+                // document that every strict parser rejects -- Python's
+                // json.loads accepts them, which is worse, because the wire
+                // format would then be valid only for the clients that happen
+                // to be lenient.  Both become null, which is the JSON spelling
+                // of "there is no number here".
+                //
+                // Not hypothetical for this API: a float read off a Java object
+                // whose field could not be resolved, or a health value read
+                // mid-teardown, arrives here as whatever those bits were.
+                if (!std::isfinite(value)) { out += "null"; }
+                // `{}` is shortest-round-trip, so a float 0.5f writes as 0.5 and
+                // a double 1.0 writes as 1 -- both valid JSON numbers that read
+                // back as the same value.  Deliberately not fixed precision:
+                // Minecraft coordinates need the exponent range, and padding
+                // every position with trailing zeros would make the common case
+                // longer for nobody's benefit.
+                else { out += std::format("{}", value); }
+            }
             else if constexpr (std::ranges::input_range<type>)
             {
                 out += '[';

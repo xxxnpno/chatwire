@@ -146,6 +146,35 @@ namespace chatwire::sdk::detail
         }
     };
 
+    /*
+        net.minecraft.util.FoodStats — hunger, reached through EntityPlayer.
+        Registered like the rest because its two numbers are read by name off
+        the object the player's `foodStats` field hands back.
+    */
+    class food_stats : public vmhook::object<food_stats>
+    {
+    public:
+        explicit food_stats(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<food_stats>{ oop }
+        {
+        }
+    };
+
+    /*
+        net.minecraft.client.gui.GuiScreen — the DECLARED type of
+        Minecraft.currentScreen, and never registered: nothing is looked up on
+        it.  What a caller wants is which screen it really is, and that comes
+        from the object's own klass rather than from this name.
+    */
+    class gui_screen : public vmhook::object<gui_screen>
+    {
+    public:
+        explicit gui_screen(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<gui_screen>{ oop }
+        {
+        }
+    };
+
     /* The callback the facade installs.  A plain function pointer: no captures
        to dangle, nothing to destroy at exit, and atomic so the detour thread
        and the installer never race. */
@@ -630,6 +659,8 @@ namespace chatwire::sdk
                                  static_cast<d::gui_new_chat*>(nullptr)) };
         const bool text{ reg("ChatComponentText", map::chat_component_text.clazz,
                              static_cast<d::chat_component_text*>(nullptr)) };
+        const bool food{ reg("FoodStats", map::food_stats.clazz,
+                             static_cast<d::food_stats*>(nullptr)) };
 
         if (!mc || !player)
         {
@@ -639,6 +670,7 @@ namespace chatwire::sdk
         if (!component) { chatwire::log::warn("IChatComponent missing; chat text may be empty"); }
         if (!chat_gui)  { chatwire::log::warn("GuiNewChat missing; incoming chat not observed"); }
         if (!text)      { chatwire::log::warn("ChatComponentText missing; client-side chat unavailable"); }
+        if (!food)      { chatwire::log::warn("FoodStats missing; hunger will read as zero"); }
         return true;
     }
 
@@ -1121,6 +1153,160 @@ namespace chatwire::sdk
         }
         catch (...) { }
         return out;
+    }
+
+    /* @brief What `Minecraft.thePlayer` is, right now. */
+    struct player_state
+    {
+        std::string  name{};
+        /* Minecraft's own types, not widened: a client comparing this to a
+           position it got from a packet wants the same number back. */
+        double       x{ 0.0 };
+        double       y{ 0.0 };
+        double       z{ 0.0 };
+        float        yaw{ 0.0F };
+        float        pitch{ 0.0F };
+        bool         on_ground{ false };
+        std::int32_t dimension{ 0 };
+        float        health{ 0.0F };
+        std::int32_t food{ 0 };
+        float        saturation{ 0.0F };
+        std::int32_t experience_level{ 0 };
+    };
+
+    /*
+        @brief The local player's state, or nullopt when not in a world.
+        @details
+        WRITTEN THE WAY vmhook DOCUMENTS, which is worth saying because most of
+        this file was not: one `java_thread_scope`, then `get_field` and
+        `get_method` on wrappers.  No oop is named, no reference is pinned and
+        nothing has to be released.
+
+        ONE SCOPE around resolve AND read, for the reason the scope's own
+        documentation gives: inside it no collection can begin, so the player
+        found at the top is still at the same address at the bottom.  Split into
+        two scopes, a collection between them could move it.
+
+        Everything here is a field load except `getHealth()`.  1.8.9 keeps health
+        in the DataWatcher rather than in a member, so it is the one value that
+        has to be called for -- which is also why this needs a scope at all
+        rather than being the plain reads `player()` does.
+
+        SHORT, as the scope requires: eleven loads and one call, no allocation,
+        no lock, nothing that can block.  The whole JVM is queued behind it.
+    */
+    [[nodiscard]] inline auto local_player_state() noexcept -> std::optional<player_state>
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        try
+        {
+            const vmhook::java_thread_scope java{};
+            if (!java) { return std::nullopt; }
+
+            const auto player{ d::player() };
+            if (!player->get_instance()) { return std::nullopt; }
+
+            player_state out{};
+
+            // A field that will not resolve leaves its member at the default
+            // rather than failing the whole snapshot: a build missing one name
+            // should still answer with the ten it has, and `mapping.verify` is
+            // where a missing name gets reported as such.
+            const auto load{ [&](const map::name& n, auto& into) noexcept
+            {
+                const auto spelling{ map::resolve(n) };
+                if (spelling.empty()) { return; }
+                if (const auto field{ player->get_field(spelling) }) { into = field->get(); }
+            } };
+
+            load(map::entity.pos_x, out.x);
+            load(map::entity.pos_y, out.y);
+            load(map::entity.pos_z, out.z);
+            load(map::entity.rotation_yaw, out.yaw);
+            load(map::entity.rotation_pitch, out.pitch);
+            load(map::entity.on_ground, out.on_ground);
+            load(map::entity.dimension, out.dimension);
+            load(map::entity_player.experience_level, out.experience_level);
+
+            if (const auto name_method{ player->get_method(map::resolve(map::entity.get_name)) })
+            {
+                out.name = name_method->call();
+            }
+            if (const auto health{ player->get_method(map::resolve(
+                    map::entity_living_base.get_health)) })
+            {
+                out.health = health->call();
+            }
+
+            // foodStats is an object, so its two numbers are one indirection
+            // further in -- and still inside the same scope, which is what makes
+            // reading through it sound.
+            if (const auto stats_field{ player->get_field(
+                    map::resolve(map::entity_player.food_stats)) })
+            {
+                const std::unique_ptr<d::food_stats> stats{ stats_field->get() };
+                if (stats->get_instance())
+                {
+                    if (const auto f{ stats->get_field(map::resolve(map::food_stats.food_level)) })
+                    {
+                        out.food = f->get();
+                    }
+                    if (const auto s{ stats->get_field(
+                            map::resolve(map::food_stats.food_saturation_level)) })
+                    {
+                        out.saturation = s->get();
+                    }
+                }
+            }
+
+            return out;
+        }
+        catch (...) { return std::nullopt; }
+    }
+
+    /*
+        @brief The class of the GUI currently open, "" when the world is showing.
+        @details
+        Minecraft.currentScreen is null whenever the player is looking at the
+        world, so "" is the in-game answer rather than a failure.
+
+        The DECLARED type is GuiScreen and that is useless to a caller -- every
+        screen is one.  What is returned is the class the object REALLY is, read
+        from its own klass, so a client sees `net/minecraft/client/gui/GuiChat`
+        or, on a vanilla client, `axz`.  Which is the honest answer either way:
+        it is what that jar calls it.
+
+        A read, so no scope: resolving a field and following it is a load from an
+        address, and a collection moving the screen changes where it is without
+        changing what class it is.
+    */
+    [[nodiscard]] inline auto current_screen_class() noexcept -> std::string
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        try
+        {
+            const auto mc_field{ map::resolve(map::minecraft.the_minecraft) };
+            const auto screen_field{ map::resolve(map::minecraft.current_screen) };
+            if (mc_field.empty() || screen_field.empty()) { return {}; }
+
+            const auto mc_proxy{ d::minecraft{}.get_field(mc_field) };
+            if (!mc_proxy) { return {}; }
+            const std::unique_ptr<d::minecraft> mc{ mc_proxy->get() };
+            if (!mc->get_instance()) { return {}; }
+
+            const auto screen_proxy{ mc->get_field(screen_field) };
+            if (!screen_proxy) { return {}; }
+            const std::unique_ptr<d::gui_screen> screen{ screen_proxy->get() };
+            if (!screen->get_instance()) { return {}; }        // in the world
+
+            vmhook::hotspot::klass* const k{ vmhook::klass_from_oop(screen->get_instance()) };
+            if (!k) { return {}; }
+            const vmhook::hotspot::symbol* const named{ k->get_name() };
+            return named ? named->to_string() : std::string{};
+        }
+        catch (...) { return {}; }
     }
 
     /*

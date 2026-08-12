@@ -56,6 +56,8 @@
 namespace chatwire::features
 {
     inline std::atomic<std::uint64_t> g_player_queries{ 0 };
+    /* How many times a client asked what the local player is. */
+    inline std::atomic<std::uint64_t> g_player_states{ 0 };
 
     /*
         @brief Where a world change goes once the detour has seen it.
@@ -105,12 +107,57 @@ namespace chatwire::features
         std::vector<chatwire::sdk::player_identity> players{};
     };
 
+    /*
+        @brief The answer to `thePlayer` — everything that object is right now.
+        @details
+        One command rather than eleven, and named after the FIELD it reads, for
+        the same reason `playerEntities` is: `Minecraft.thePlayer` is a real
+        member a reader can check, and what it returns is what that object is.
+        Eleven commands named after eleven Entity fields would be eleven round
+        trips to describe one instant, and the instant is the point -- position
+        and health read a tick apart describe a player who never existed.
+
+        `dimension` is Minecraft's number: 0 overworld, -1 nether, 1 end.
+        `health` is out of 20 and `food` out of 20, both as the HUD shows them.
+    */
+    struct the_player_result
+    {
+        std::string  name{};
+        double       x{ 0.0 };
+        double       y{ 0.0 };
+        double       z{ 0.0 };
+        float        yaw{ 0.0F };
+        float        pitch{ 0.0F };
+        bool         on_ground{ false };
+        std::int32_t dimension{ 0 };
+        float        health{ 0.0F };
+        std::int32_t food{ 0 };
+        float        saturation{ 0.0F };
+        std::int32_t experience_level{ 0 };
+    };
+
+    /*
+        @brief The answer to `currentScreen`.
+        @details
+        `open` is false in the world, which is when `screen` is "".  Otherwise
+        `screen` is the class the screen REALLY is, in the attached client's own
+        spelling -- `net/minecraft/client/gui/GuiChat` on a deobfuscated client,
+        `axz` on a vanilla one.  Both are the honest answer for that jar, and a
+        client that wants to compare them can ask `mapping.resolve`.
+    */
+    struct current_screen_result
+    {
+        bool        open{ false };
+        std::string screen{};
+    };
+
     /* @brief This feature's contribution to `system.stats`. */
     struct world_stats
     {
         std::uint64_t player_queries{ 0 };
         std::uint64_t worlds_entered{ 0 };
         std::uint64_t worlds_left{ 0 };
+        std::uint64_t player_states{ 0 };
     };
 
     class world_feature final : public chatwire::feature
@@ -192,8 +239,46 @@ namespace chatwire::features
                             .count = count, .players = std::move(found) }));
                 }
 
+                if (cmd.verb == "thePlayer")
+                {
+                    const auto state{ chatwire::sdk::local_player_state() };
+                    if (!state)
+                    {
+                        return chatwire::response::failure("not in a world");
+                    }
+                    g_player_states.fetch_add(1, std::memory_order_relaxed);
+
+                    return chatwire::response::success(
+                        chatwire::json::object(the_player_result{
+                            .name             = state->name,
+                            .x                = state->x,
+                            .y                = state->y,
+                            .z                = state->z,
+                            .yaw              = state->yaw,
+                            .pitch            = state->pitch,
+                            .on_ground        = state->on_ground,
+                            .dimension        = state->dimension,
+                            .health           = state->health,
+                            .food             = state->food,
+                            .saturation       = state->saturation,
+                            .experience_level = state->experience_level }));
+                }
+
+                if (cmd.verb == "currentScreen")
+                {
+                    // Answered in or out of a world: "no screen is open" is a
+                    // real answer at the title screen too, and a client polling
+                    // this to know when it may type should not have to special
+                    // case the one moment it most wants to watch.
+                    auto screen{ chatwire::sdk::current_screen_class() };
+                    const bool open{ !screen.empty() };
+                    return chatwire::response::success(
+                        chatwire::json::object(current_screen_result{
+                            .open = open, .screen = std::move(screen) }));
+                }
+
                 return chatwire::response::failure(
-                    "unknown member; try playerEntities");
+                    "unknown member; try playerEntities, thePlayer or currentScreen");
             }
             catch (...)
             {
@@ -263,7 +348,8 @@ namespace chatwire::features::world
         return chatwire::features::world_stats{
             .player_queries = chatwire::features::g_player_queries.load(std::memory_order_relaxed),
             .worlds_entered = chatwire::features::g_worlds_entered.load(std::memory_order_relaxed),
-            .worlds_left    = chatwire::features::g_worlds_left.load(std::memory_order_relaxed) };
+            .worlds_left    = chatwire::features::g_worlds_left.load(std::memory_order_relaxed),
+            .player_states  = chatwire::features::g_player_states.load(std::memory_order_relaxed) };
     }
 
     /* @brief This feature's singleton, for the root module to register. */

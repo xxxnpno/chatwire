@@ -18,6 +18,9 @@
 // it reports overflow for the destination's own type, which is what let two
 // hand-rolled digit loops and their two different ceilings go away.
 #include <charconv>
+// <cmath> for std::isfinite: the JSON writer refuses to put a NaN or an
+// infinity on the wire, and that check is the only place the project needs it.
+#include <cmath>
 #include <chrono>
 #include <concepts>
 #include <cstddef>
