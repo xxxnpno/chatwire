@@ -22,6 +22,7 @@
 #include "chatwire/features/chat.hpp"
 #include "chatwire/features/commands.hpp"
 #include "chatwire/features/mapping.hpp"
+#include "chatwire/features/rewrite.hpp"
 #include "chatwire/features/scoreboard.hpp"
 #include "chatwire/features/system.hpp"
 #include "chatwire/features/world.hpp"
@@ -116,7 +117,8 @@ namespace chatwire::detail
         return json::object(features::chat::stats(),
                             features::commands::stats(),
                             features::world::stats(),
-                            features::scoreboard::stats());
+                            features::scoreboard::stats(),
+                            features::rewrite::stats());
     }
 
     /*
@@ -213,6 +215,9 @@ namespace chatwire::detail
                 // line is swallowed, and nothing answers -- a game that has
                 // quietly stopped working, with no error anywhere.
                 features::commands::forget_client(client);
+                // Same reason, same moment: a rewrite rule nobody owns is the
+                // game quietly lying to its player with nobody left to ask.
+                features::rewrite::forget_client(client);
 
                 chatwire::console::event(std::format("client disconnected ({} left)", total));
                 if (live) { notify_in_game(std::format("a client disconnected ({} left)", total)); }
@@ -464,6 +469,7 @@ namespace chatwire
         registry::add(features::chat::instance());
         registry::add(features::commands::instance());
         registry::add(features::mapping::instance());
+        registry::add(features::rewrite::instance());
         registry::add(features::scoreboard::instance());
         registry::add(features::system::instance());
         registry::add(features::world::instance());

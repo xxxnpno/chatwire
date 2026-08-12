@@ -56,6 +56,7 @@ IN_WORLD_QUERIES: list[dict] = [
     {"cmd": "net.minecraft.scoreboard.Scoreboard.getObjectiveInDisplaySlot",
      "slot": "sidebar"},
     {"cmd": "net.minecraft.scoreboard.Scoreboard.getTeams"},
+    {"cmd": "net.minecraft.client.gui.GuiPlayerTabOverlay.header"},
 ]
 
 #: Typed at the SERVER console, so the clients have a scoreboard and a team to
@@ -217,12 +218,14 @@ def _summarise(mapping: str, exchanges: list[dict]) -> int:
                             sorted(kinds.items(), key=lambda kv: -kv[1])[:4])
             say(f"    {'loadedEntityList':<18} {result.get('count')} entities: {top}")
         elif verb.endswith(".getPlayerInfoMap"):
-            rows = ", ".join(f"{p['name']}({p['ping']}ms)" for p in result.get("players", []))
+            rows = ", ".join(f"{p['name']}={p['line']!r}" for p in result.get("players", []))
             say(f"    {'tab list':<18} {result.get('count')}: {rows}")
         elif verb.endswith(".getObjectiveInDisplaySlot"):
             scores = ", ".join(f"{s['name']}={s['points']}" for s in result.get("scores", []))
             say(f"    {'sidebar':<18} {result.get('name')!r} "
                 f"title={result.get('display_name')!r} [{scores}]")
+        elif verb.endswith("GuiPlayerTabOverlay.header"):
+            say(f"    {'tab header':<18} {result.get('text')!r}")
         elif verb.endswith(".getTeams"):
             teams = ", ".join(f"{t['name']}(prefix={t['prefix']!r},"
                               f"members={len(t['members'])})" for t in result.get("teams", []))

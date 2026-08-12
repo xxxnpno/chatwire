@@ -444,6 +444,30 @@ namespace chatwire::sdk::detail
         }
     };
 
+    /* net.minecraft.client.gui.GuiIngame - holds the tab overlay. */
+    class gui_ingame : public vmhook::object<gui_ingame>
+    {
+    public:
+        explicit gui_ingame(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<gui_ingame>{ oop } { }
+    };
+
+    /* net.minecraft.client.gui.GuiPlayerTabOverlay - the tab list as drawn. */
+    class tab_overlay : public vmhook::object<tab_overlay>
+    {
+    public:
+        explicit tab_overlay(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<tab_overlay>{ oop } { }
+    };
+
+    /* net.minecraft.scoreboard.Team - formatPlayerName's first argument. */
+    class team_handle : public vmhook::object<team_handle>
+    {
+    public:
+        explicit team_handle(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<team_handle>{ oop } { }
+    };
+
     /* The callback the facade installs.  A plain function pointer: no captures
        to dangle, nothing to destroy at exit, and atomic so the detour thread
        and the installer never race. */
@@ -519,6 +543,54 @@ namespace chatwire::sdk::detail
             const auto cb{ g_command_callback.load(std::memory_order_acquire) };
             if (!cb || message.empty()) { return; }
             if (cb(message.c_str())) { ret.cancel(); }
+        }
+        catch (...) { }
+    }
+
+    /*
+        The name rewriter.  Same shape as the other callbacks and for the same
+        reasons: a plain function pointer, atomic, nothing to dangle.
+    */
+    inline std::atomic<bool (*)(const char*, std::string&)> g_rewrite_callback{ nullptr };
+
+    /*
+        @brief The ScorePlayerTeam.formatPlayerName detour.
+        @details
+        STATIC, so there is no receiver: the first declared parameter is the
+        method's own first argument.  The Team may be null -- a player on no team
+        still goes through here -- which is why it is declared and ignored rather
+        than left out.
+
+        THE ARGUMENT IS REWRITTEN, NOT THE RETURN.  set_arg replaces the raw name
+        and lets Minecraft do the decorating, so a rewritten name still gets its
+        team's colour, its prefix and its suffix exactly as the game would have
+        applied them.  Forcing the return instead would mean reproducing that
+        formatting here, and getting it subtly wrong for every server that uses
+        a feature this file had not thought about.
+
+        Runs on the render thread, many times a frame -- once per visible
+        nametag and once per tab row.  So: no allocation unless a rule actually
+        matches, no lock (the rule set is a shared_ptr swapped whole), and a
+        blanket catch, because the frame above is Minecraft's interpreter.
+    */
+    inline auto on_format_player_name(vmhook::return_value& ret,
+                                      const std::unique_ptr<team_handle>&,
+                                      const std::string& player_name) noexcept
+        -> void
+    {
+        try
+        {
+            const auto cb{ g_rewrite_callback.load(std::memory_order_acquire) };
+            if (!cb || player_name.empty()) { return; }
+
+            std::string replacement;
+            if (cb(player_name.c_str(), replacement))
+            {
+                // Index 1: this method is static, so 0 is the Team and 1 is the
+                // name.  On an instance method 0 would be the first argument
+                // rather than the receiver -- see vmhook's own note on set_arg.
+                ret.set_arg(1, replacement);
+            }
         }
         catch (...) { }
     }
@@ -674,6 +746,52 @@ namespace chatwire::sdk::detail
             return proxy->call();
         }
         catch (...) { return std::make_unique<scoreboard>(); }
+    }
+
+    /*
+        @brief `GuiPlayerTabOverlay.getPlayerName(info)` -- one whole tab row.
+        @details
+        Asked of the game rather than assembled here, because the rule it
+        implements is not "the display name": with no server-set display name
+        the row is the team's prefix, the profile name and the team's suffix,
+        and any copy of that logic is a copy that goes stale.
+
+        The overlay may not exist yet -- it is created with the in-game GUI --
+        in which case this is "" and the caller falls back to display_name.
+
+        Must be called inside a java_thread_scope; it is a field walk and a call.
+    */
+    [[nodiscard]] inline auto tab_line_for(const std::unique_ptr<player_info>& row) noexcept
+        -> std::string
+    {
+        namespace map = chatwire::mapping;
+        try
+        {
+            if (!row->get_instance()) { return {}; }
+
+            const auto mc{ client() };
+            if (!mc->get_instance()) { return {}; }
+            const auto gui_proxy{ mc->get_field(map::resolve(map::minecraft.ingame_gui)) };
+            if (!gui_proxy) { return {}; }
+            const std::unique_ptr<gui_ingame> gui{ gui_proxy->get() };
+            if (!gui->get_instance()) { return {}; }
+
+            const auto overlay_proxy{ gui->get_field(
+                map::resolve(map::gui_ingame.overlay_player_list)) };
+            if (!overlay_proxy) { return {}; }
+            const std::unique_ptr<tab_overlay> overlay{ overlay_proxy->get() };
+            if (!overlay->get_instance()) { return {}; }
+
+            const auto method{ overlay->get_method(
+                map::resolve(map::gui_player_tab_overlay.get_player_name),
+                std::format("(L{};)Ljava/lang/String;",
+                            map::resolve(map::network_player_info.clazz))) };
+            if (!method) { return {}; }
+            std::string out{};
+            out = method->call(row);
+            return out;
+        }
+        catch (...) { return {}; }
     }
 
     /*
@@ -971,6 +1089,10 @@ namespace chatwire::sdk
         // class, so those wrappers need no name bound to them.
         const bool entities{ reg("Entity", map::entity.clazz,
                                  static_cast<d::any_entity*>(nullptr)) };
+        // ScorePlayerTeam carries the hook, so it needs a class name bound to
+        // it -- vmhook::hook resolves its target through the registration.
+        const bool team_class{ reg("ScorePlayerTeam", map::score_player_team.clazz,
+                                   static_cast<d::score_player_team*>(nullptr)) };
         const bool food{ reg("FoodStats", map::food_stats.clazz,
                              static_cast<d::food_stats*>(nullptr)) };
 
@@ -986,6 +1108,8 @@ namespace chatwire::sdk
         if (!world_class) { chatwire::log::warn("WorldClient missing; playerEntities unavailable"); }
         if (!other)     { chatwire::log::warn("EntityPlayer missing; playerEntities unavailable"); }
         if (!entities)  { chatwire::log::warn("Entity missing; loadedEntityList unavailable"); }
+        if (!team_class) { chatwire::log::warn("ScorePlayerTeam missing; name rewriting "
+                                               "unavailable"); }
         return true;
     }
 
@@ -1100,6 +1224,11 @@ namespace chatwire::sdk
             // Nothing was installed, so nothing may be left pointing at a
             // callback the caller will assume is unreachable.
             d::g_world_callback.store(nullptr, std::memory_order_release);
+        // Cleared first among equals: a detour already running with no callback
+        // leaves the name ALONE, which is the safe direction.  A half-detached
+        // chatwire that kept rewriting what the player sees would be worse than
+        // one that stopped.
+        d::g_rewrite_callback.store(nullptr, std::memory_order_release);
             return false;
         }
         catch (...) { return false; }
@@ -1172,6 +1301,117 @@ namespace chatwire::sdk
             return true;
         }
         catch (...) { return false; }
+    }
+
+    /*
+        @brief Offered every name the game is about to decorate; true rewrites it.
+        @details
+        Runs INSIDE the formatPlayerName detour, on the render thread, several
+        times a frame.  It must be quick, must not throw, must not allocate
+        unless it is actually changing something, and must not take a lock any
+        other thread holds for long.
+    */
+    using name_rewriter = bool (*)(const char* original, std::string& replacement);
+
+    /*
+        @brief Hooks ScorePlayerTeam.formatPlayerName so `on_name` can rewrite it.
+        @details
+        ONE method, and it is the one every decorated name in the game passes
+        through: the nametag above a head, and a tab row whose display name the
+        server has not overridden.  Hooking here rather than at the two call
+        sites means a rewrite is consistent between them by construction.
+
+        WHAT IT DOES NOT REACH, said plainly because a client will notice: a tab
+        row for which the server HAS pushed a display name does not go through
+        formatPlayerName at all -- Minecraft uses the component it was sent.  So
+        a rewrite changes nametags always, and tab rows on servers that leave the
+        name alone.  `getPlayerName` reports what a row really says, which is how
+        a caller can tell which case it is in.
+
+        The descriptor is built rather than written: it names Team and
+        java.lang.String, and Team is spelled differently on each mapping.
+    */
+    [[nodiscard]] inline auto install_name_rewriter(const name_rewriter on_name) noexcept -> bool
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        try
+        {
+            const auto class_name{ map::resolve(map::score_player_team.clazz) };
+            const auto method{ map::resolve(map::score_player_team.format_player_name) };
+            const auto team{ map::resolve(map::team.clazz) };
+            if (class_name.empty() || method.empty() || team.empty()) { return false; }
+
+            d::g_rewrite_callback.store(on_name, std::memory_order_release);
+
+            const std::string descriptor{
+                std::format("(L{};Ljava/lang/String;)Ljava/lang/String;", team) };
+            if (!vmhook::hook<d::score_player_team>(method, descriptor,
+                                                    &d::on_format_player_name))
+            {
+                d::g_rewrite_callback.store(nullptr, std::memory_order_release);
+                return false;
+            }
+            chatwire::log::info("name rewriter installed on {}.{}{}",
+                                class_name, method, descriptor);
+            return true;
+        }
+        catch (...) { return false; }
+    }
+
+    /* @brief The tab list's header and footer, as the player sees them. */
+    struct tab_decoration
+    {
+        std::string header{};
+        std::string footer{};
+    };
+
+    /*
+        @brief `GuiPlayerTabOverlay.header` and `.footer`.
+        @details
+        These live nowhere else.  A packet pushes them straight into the overlay,
+        so the roster commands cannot report them and a client that wants what
+        the player is looking at has to come here.  Both are "" when the server
+        has set none, which is the usual case on vanilla servers.
+    */
+    [[nodiscard]] inline auto tab_decorations() noexcept -> tab_decoration
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        tab_decoration out{};
+        try
+        {
+            const vmhook::java_thread_scope java{};
+            if (!java) { return out; }
+
+            const auto mc{ d::client() };
+            if (!mc->get_instance()) { return out; }
+
+            const auto gui_proxy{ mc->get_field(map::resolve(map::minecraft.ingame_gui)) };
+            if (!gui_proxy) { return out; }
+            const std::unique_ptr<d::gui_ingame> gui{ gui_proxy->get() };
+            if (!gui->get_instance()) { return out; }
+
+            const auto overlay_proxy{ gui->get_field(
+                map::resolve(map::gui_ingame.overlay_player_list)) };
+            if (!overlay_proxy) { return out; }
+            const std::unique_ptr<d::tab_overlay> overlay{ overlay_proxy->get() };
+            if (!overlay->get_instance()) { return out; }
+
+            const auto read{ [&](const map::name& field) noexcept -> std::string
+            {
+                const auto proxy{ overlay->get_field(map::resolve(field)) };
+                if (!proxy) { return {}; }
+                const std::unique_ptr<d::chat_component> line{ proxy->get() };
+                if (!line->get_instance()) { return {}; }
+                return d::text_of(line,
+                                  map::resolve(map::i_chat_component.get_formatted_text));
+            } };
+            out.header = read(map::gui_player_tab_overlay.header);
+            out.footer = read(map::gui_player_tab_overlay.footer);
+        }
+        catch (...) { }
+        return out;
     }
 
     /*
@@ -1513,6 +1753,15 @@ namespace chatwire::sdk
             exactly as the game does.
         */
         std::string  display_name{};
+        /*
+            THE COMPLETE LINE, straight from the method that draws it --
+            `GuiPlayerTabOverlay.getPlayerName`.  It is not always the same as
+            `display_name`: when the server has pushed no display name the game
+            builds the row out of the team's prefix, the profile name and the
+            team's suffix, and only this reports the result.  Asking the game
+            rather than assembling it here is what keeps the two in step.
+        */
+        std::string  line{};
     };
 
     /* @brief One entity the client has loaded — a player, a mob, an item. */
@@ -1791,6 +2040,7 @@ namespace chatwire::sdk
 
                 entry.display_name =
                     d::component_call(row, map::network_player_info.get_display_name);
+                entry.line = d::tab_line_for(row);
                 // The game falls back to the profile name when the server set no
                 // display name, and so does this: a caller that has to know the
                 // difference can compare the two fields, and one that does not

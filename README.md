@@ -191,7 +191,9 @@ one you asked for is written into the question.
 ```python
 {"cmd": "net.minecraft.client.network.NetHandlerPlayClient.getPlayerInfoMap"}
 -> {"count": 3, "players": [
-     {"name": "alpha", "uuid": "…", "ping": 42, "display_name": "§7[VIP] alpha"}, …]}
+     {"name": "alpha", "uuid": "…", "ping": 42,
+      "display_name": "§7[VIP] alpha",
+      "line": "§c§7[VIP] alpha§r"}, …]}
 
 {"cmd": "net.minecraft.scoreboard.Scoreboard.getTeams"}
 -> {"count": 1, "teams": [
@@ -205,6 +207,19 @@ one you asked for is written into the question.
 `prefix` and `suffix` are the **coloured** forms — what the game puts either side of a member's
 name — so the nametag a player is drawn with is `prefix + name + suffix`, with nothing else to
 ask for.
+
+`line` is the **complete tab row**, asked of the method that draws it
+(`GuiPlayerTabOverlay.getPlayerName`) rather than assembled here. It is not always
+`display_name`: with no server-set display name the game builds the row out of the team's
+prefix, the profile name and the team's suffix, and only `line` reports the result.
+
+The tab's header and footer are two more fields, each under its own name, because they live on
+the overlay rather than in the roster:
+
+```python
+{"cmd": "net.minecraft.client.gui.GuiPlayerTabOverlay.header"}   -> {"text": "§6My Server"}
+{"cmd": "net.minecraft.client.gui.GuiPlayerTabOverlay.footer"}   -> {"text": ""}
+```
 
 ### `getObjectiveInDisplaySlot` — the sidebar
 
@@ -237,6 +252,45 @@ client and `bex` on a vanilla one, and `mapping.resolve` relates the two.
 
 This is the most expensive command chatwire has: on a busy world it is thousands of objects and
 a call or two each. Ask when something happened; do not poll it.
+
+### `rewrite.*` — change what the player is shown
+
+Every other command reads the game or sends something into it. This one edits the game's own
+output on its way to the screen.
+
+```python
+{"cmd": "rewrite.add", "find": "rouge", "replace": "bleu"}   -> {"id": 1}
+```
+
+From that moment a player called `rouge_42` is **drawn** as `bleu_42` — above their head and in
+the tab list — until the rule is removed. Nothing is sent to the server, and no other player
+sees anything change: this is your client's own display.
+
+```python
+{"cmd": "rewrite.list"}
+-> {"count": 1, "applied": 137,
+    "rules": [{"id": 1, "find": "rouge", "replace": "bleu", "owner": 2}]}
+
+{"cmd": "rewrite.remove", "id": "1"}   -> {"removed": 1}
+{"cmd": "rewrite.clear"}               -> {"removed": 0}
+```
+
+`applied` counts the names actually changed since chatwire started, which is what tells a rule
+that matches nothing apart from a rule that was never registered.
+
+**Colours survive.** chatwire hooks `ScorePlayerTeam.formatPlayerName` — the one static method
+every decorated name in 1.8.9 goes through, for nametags and tab rows alike — and rewrites its
+*argument*, so Minecraft still applies the team's colour, prefix and suffix to the new name. A
+red-team `chatwire_mcp` drawn as `§cchatwire_mcp§r` becomes `§cbleu_mcp§r`, not a bare string.
+
+**What it does not reach**, because you will notice: a tab row for which the server has *pushed*
+a display name never goes through `formatPlayerName` — the game draws the component it was
+sent. So a rule always changes nametags, and changes tab rows on servers that leave the name
+alone. Compare `display_name` and `line` from `getPlayerInfoMap` to see which case you are in.
+
+A rule belongs to the connection that registered it and is withdrawn when that connection
+closes, exactly like a registered command. That is deliberate: a rule nobody owns is a game
+quietly lying to its player with no one left to ask why.
 
 ### `commands.register` — add a command to the game
 

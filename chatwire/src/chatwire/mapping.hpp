@@ -308,6 +308,44 @@ namespace chatwire::mapping
         */
         name get_color_prefix{ .mcp = "getColorPrefix", .obf = "e", .srg = "func_96668_e" };
         name get_color_suffix{ .mcp = "getColorSuffix", .obf = "f", .srg = "func_96663_f" };
+        /*
+            formatPlayerName(Team, String) -- STATIC, and the single place every
+            decorated name in the game is built.  The nametag above a head
+            (RendererLivingEntity.renderName) and a tab row with no server-set
+            display name (GuiPlayerTabOverlay.getPlayerName) both end here, which
+            is why hooking this ONE method rewrites both.
+
+            Its second argument is the raw name, so a rewrite changes the input
+            and lets Minecraft do the decorating -- rather than a hook trying to
+            reproduce team colours itself and getting them subtly wrong.
+        */
+        name format_player_name{ .mcp = "formatPlayerName", .obf = "a", .srg = "func_96667_a" };
+    };
+
+    // net.minecraft.scoreboard.Team - the interface formatPlayerName's first
+    // argument is declared as.  Named only so that descriptor can be built.
+    struct team_names
+    {
+        name clazz{ .mcp = "net/minecraft/scoreboard/Team", .obf = "auq" };
+    };
+
+    // net.minecraft.client.gui.GuiPlayerTabOverlay - the tab list as DRAWN,
+    // which is a different thing from the roster behind it.  The header and
+    // footer live nowhere else: they are pushed by a packet straight into these
+    // two fields, so a client that wants what the player is looking at has to
+    // read them here.
+    struct gui_player_tab_overlay_names
+    {
+        name clazz{ .mcp = "net/minecraft/client/gui/GuiPlayerTabOverlay", .obf = "awh" };
+        name header{ .mcp = "header", .obf = "i", .srg = "field_175256_i" };
+        name footer{ .mcp = "footer", .obf = "h", .srg = "field_175255_h" };
+        /*
+            getPlayerName(NetworkPlayerInfo) -- the COMPLETE line the tab draws
+            for one row, server-set display name and team colours included.  It
+            is the answer to "what does that row actually say", which neither the
+            profile name nor the display name gives on its own.
+        */
+        name get_player_name{ .mcp = "getPlayerName", .obf = "a", .srg = "func_175243_a" };
     };
 
     // net.minecraft.client.network.NetHandlerPlayClient - the connection, and
@@ -435,6 +473,8 @@ namespace chatwire::mapping
     {
         name clazz{ .mcp = "net/minecraft/client/gui/GuiIngame", .obf = "avo" };
         name persistant_chat_gui{ .mcp = "persistantChatGUI", .obf = "l", .srg = "field_73840_e" };
+        /* The tab overlay, which is where the header and footer live. */
+        name overlay_player_list{ .mcp = "overlayPlayerList", .obf = "v", .srg = "field_175196_v" };
     };
 
     // net.minecraft.client.gui.GuiNewChat — every line that reaches the chat box
@@ -504,6 +544,8 @@ namespace chatwire::mapping
         score_objective_names     score_objective{};
         score_names               score{};
         score_player_team_names   score_player_team{};
+        team_names                team{};
+        gui_player_tab_overlay_names gui_player_tab_overlay{};
         net_handler_play_client_names net_handler_play_client{};
         network_player_info_names network_player_info{};
         game_profile_names        game_profile{};
@@ -532,6 +574,9 @@ namespace chatwire::mapping
     inline constexpr const score_objective_names&     score_objective{ all.score_objective };
     inline constexpr const score_names&               score{ all.score };
     inline constexpr const score_player_team_names&   score_player_team{ all.score_player_team };
+    inline constexpr const team_names&                team{ all.team };
+    inline constexpr const gui_player_tab_overlay_names& gui_player_tab_overlay{
+        all.gui_player_tab_overlay };
     inline constexpr const net_handler_play_client_names& net_handler_play_client{
         all.net_handler_play_client };
     inline constexpr const network_player_info_names& network_player_info{

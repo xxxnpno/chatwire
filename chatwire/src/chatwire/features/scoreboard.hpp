@@ -76,6 +76,18 @@ namespace chatwire::features
         std::vector<chatwire::sdk::tab_entry>   players{};
     };
 
+    /*
+        @brief The answer to `header` and `footer`.
+        @details
+        One field, because each command answers about one field.  "" is the
+        normal state: most servers set neither, and a client should treat an
+        empty string as "there is nothing there" rather than as a failure.
+    */
+    struct tab_text_result
+    {
+        std::string text{};
+    };
+
     /* @brief This feature's contribution to `system.stats`. */
     struct scoreboard_stats
     {
@@ -105,7 +117,8 @@ namespace chatwire::features
         [[nodiscard]] auto claims(const std::string_view prefix) const noexcept -> bool override
         {
             return prefix == "net.minecraft.scoreboard.Scoreboard"
-                || prefix == "net.minecraft.client.network.NetHandlerPlayClient";
+                || prefix == "net.minecraft.client.network.NetHandlerPlayClient"
+                || prefix == "net.minecraft.client.gui.GuiPlayerTabOverlay";
         }
 
         /*
@@ -127,10 +140,21 @@ namespace chatwire::features
                 if (cmd.verb == "getTeams")                  { return this->all_teams(); }
                 if (cmd.verb == "getPlayersTeam")            { return this->players_team(cmd); }
                 if (cmd.verb == "getPlayerInfoMap")          { return this->tab(); }
+                // The overlay's two fields, each answered under its own name.
+                // They are the tab list's header and footer, they live nowhere
+                // else, and a packet pushes them straight into these fields --
+                // so the roster command cannot report them and does not try.
+                if (cmd.verb == "header" || cmd.verb == "footer")
+                {
+                    const auto both{ chatwire::sdk::tab_decorations() };
+                    return chatwire::response::success(chatwire::json::object(
+                        tab_text_result{ .text = cmd.verb == "header" ? both.header
+                                                                     : both.footer }));
+                }
 
                 return chatwire::response::failure(
                     "unknown member; try getObjectiveInDisplaySlot, getTeams, "
-                    "getPlayersTeam or getPlayerInfoMap");
+                    "getPlayersTeam, getPlayerInfoMap, header or footer");
             }
             catch (...)
             {
