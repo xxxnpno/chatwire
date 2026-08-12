@@ -488,6 +488,14 @@ export namespace chatwire::sdk::detail
             : vmhook::object<tab_overlay>{ oop } { }
     };
 
+    /* net.minecraft.client.renderer.entity.Render - draws the floating nametag. */
+    class entity_render : public vmhook::object<entity_render>
+    {
+    public:
+        explicit entity_render(const vmhook::oop_t oop = nullptr) noexcept
+            : vmhook::object<entity_render>{ oop } { }
+    };
+
     /* net.minecraft.scoreboard.Team - formatPlayerName's first argument. */
     class team_handle : public vmhook::object<team_handle>
     {
@@ -500,6 +508,12 @@ export namespace chatwire::sdk::detail
        to dangle, nothing to destroy at exit, and atomic so the detour thread
        and the installer never race. */
     inline std::atomic<void (*)(const char*, const char*)> g_chat_callback{ nullptr };
+
+    /*
+        The name rewriter.  Same shape as the other callbacks and for the same
+        reasons: a plain function pointer, atomic, nothing to dangle.
+    */
+    inline std::atomic<bool (*)(const char*, std::string&)> g_rewrite_callback{ nullptr };
 
     /*
         The interceptor for chat the PLAYER sends, installed the same way and for
@@ -538,9 +552,23 @@ export namespace chatwire::sdk::detail
         try
         {
             const auto cb{ g_chat_callback.load(std::memory_order_acquire) };
-            if (!cb || !line->get_instance()) { return; }
-            const std::string formatted{
+            if (!line->get_instance()) { return; }
+            std::string formatted{
                 text_of(line, map::resolve(map::i_chat_component.get_formatted_text)) };
+
+            // CHAT IS NOT REWRITTEN HERE, and the attempt is worth recording.
+            // Replacing the IChatComponent argument means building a new
+            // ChatComponentText inside the detour and handing it to set_arg --
+            // and that CRASHED the JVM outright (hs_err, SIGSEGV) on the first
+            // line it touched.  vmhook documents set_arg with a string; an
+            // allocated object argument is a different thing, and printChatMessage
+            // hands its component on to setChatLine which stores it.
+            //
+            // A line can still be rewritten before it is ever drawn -- the
+            // commands feature already cancels chat the player sends -- but
+            // editing one the server sent needs a route that does not swap a
+            // live object out from under the method that is about to keep it.
+            if (!cb) { return; }
             const std::string plain{
                 text_of(line, map::resolve(map::i_chat_component.get_unformatted_text)) };
             if (formatted.empty() && plain.empty()) { return; }
@@ -575,11 +603,6 @@ export namespace chatwire::sdk::detail
         catch (...) { }
     }
 
-    /*
-        The name rewriter.  Same shape as the other callbacks and for the same
-        reasons: a plain function pointer, atomic, nothing to dangle.
-    */
-    inline std::atomic<bool (*)(const char*, std::string&)> g_rewrite_callback{ nullptr };
 
     /*
         @brief The ScorePlayerTeam.formatPlayerName detour.
@@ -617,6 +640,41 @@ export namespace chatwire::sdk::detail
                 // Index 1: this method is static, so 0 is the Team and 1 is the
                 // name.  On an instance method 0 would be the first argument
                 // rather than the receiver -- see vmhook's own note on set_arg.
+                ret.set_arg(1, replacement);
+            }
+        }
+        catch (...) { }
+    }
+
+    /*
+        @brief The Render.renderLivingLabel detour -- the FLOATING nametag.
+        @details
+        A different path from formatPlayerName entirely: by the time the label
+        reaches here the text is already built, team colours and all, so this
+        rewrites the finished string rather than the raw name.  That is why the
+        rule sees `§calpha§r` here and `alpha` there, and why the rewriter is
+        given both and told which.
+
+        Only the receiver, the entity and the label are declared; the three
+        doubles and the int after them are left off, because vmhook reads only as
+        many slots as the detour asks for and nothing here needs a position.
+
+        Render thread, once per visible nametag per frame.
+    */
+    inline auto on_render_living_label(vmhook::return_value& ret,
+                                       const std::unique_ptr<entity_render>&,
+                                       const std::unique_ptr<any_entity>&,
+                                       const std::string& label) noexcept
+        -> void
+    {
+        try
+        {
+            const auto cb{ g_rewrite_callback.load(std::memory_order_acquire) };
+            if (!cb || label.empty()) { return; }
+            std::string replacement;
+            if (cb(label.c_str(), replacement))
+            {
+                // Index 1: instance method, so 0 is the Entity and 1 is the label.
                 ret.set_arg(1, replacement);
             }
         }
@@ -1121,6 +1179,8 @@ export namespace chatwire::sdk
         // it -- vmhook::hook resolves its target through the registration.
         const bool team_class{ reg("ScorePlayerTeam", map::score_player_team.clazz,
                                    static_cast<d::score_player_team*>(nullptr)) };
+        const bool render_class{ reg("Render", map::render.clazz,
+                                     static_cast<d::entity_render*>(nullptr)) };
         const bool food{ reg("FoodStats", map::food_stats.clazz,
                              static_cast<d::food_stats*>(nullptr)) };
 
@@ -1138,6 +1198,8 @@ export namespace chatwire::sdk
         if (!entities)  { chatwire::log::warn("Entity missing; loadedEntityList unavailable"); }
         if (!team_class) { chatwire::log::warn("ScorePlayerTeam missing; name rewriting "
                                                "unavailable"); }
+        if (!render_class) { chatwire::log::warn("Render missing; floating nametags cannot "
+                                                 "be rewritten"); }
         return true;
     }
 
@@ -1382,6 +1444,38 @@ export namespace chatwire::sdk
             }
             chatwire::log::info("name rewriter installed on {}.{}{}",
                                 class_name, method, descriptor);
+            return true;
+        }
+        catch (...) { return false; }
+    }
+
+    /*
+        @brief Hooks Render.renderLivingLabel so `on_name` can rewrite the
+               FLOATING nametag too.
+        @details
+        Separate from install_name_rewriter because it is a separate surface with
+        a separate shape: formatPlayerName gets the raw name and this gets the
+        finished label.  Both feed the same rules, which is what makes one rule
+        change every place a name appears.
+    */
+    [[nodiscard]] inline auto install_label_rewriter() noexcept -> bool
+    {
+        namespace map = chatwire::mapping;
+        namespace d   = chatwire::sdk::detail;
+        try
+        {
+            const auto method{ map::resolve(map::render.render_living_label) };
+            const auto entity{ map::resolve(map::entity.clazz) };
+            if (method.empty() || entity.empty()) { return false; }
+
+            const std::string descriptor{ std::format("(L{};Ljava/lang/String;DDDI)V", entity) };
+            if (!vmhook::hook<d::entity_render>(method, descriptor,
+                                                &d::on_render_living_label))
+            {
+                return false;
+            }
+            chatwire::log::info("label rewriter installed on {}.{}{}",
+                                map::resolve(map::render.clazz), method, descriptor);
             return true;
         }
         catch (...) { return false; }

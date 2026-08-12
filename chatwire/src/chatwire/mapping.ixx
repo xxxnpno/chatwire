@@ -351,6 +351,24 @@ export namespace chatwire::mapping
         name format_player_name{ .mcp = "formatPlayerName", .obf = "a", .srg = "func_96667_a" };
     };
 
+    // net.minecraft.client.renderer.entity.Render - where a nametag is DRAWN
+    // above a head.  `formatPlayerName` never reaches this path: the floating
+    // label goes through renderLivingLabel with the text already built, which is
+    // why rewriting the team formatter changed the tab and the sidebar and left
+    // the name over the player's head alone.
+    struct render_names
+    {
+        name clazz{ .mcp = "net/minecraft/client/renderer/entity/Render", .obf = "biv" };
+        /*
+            renderLivingLabel(Entity, String, double, double, double, int) -- the
+            String is the label about to be drawn, and rewriting it is how the
+            floating name changes.  Every entity's nametag comes through here,
+            not just players'.
+        */
+        name render_living_label{ .mcp = "renderLivingLabel", .obf = "a",
+                                  .srg = "func_147906_a" };
+    };
+
     // net.minecraft.scoreboard.Team - the interface formatPlayerName's first
     // argument is declared as.  Named only so that descriptor can be built.
     struct team_names
@@ -574,6 +592,7 @@ export namespace chatwire::mapping
         score_names               score{};
         score_player_team_names   score_player_team{};
         team_names                team{};
+        render_names              render{};
         gui_player_tab_overlay_names gui_player_tab_overlay{};
         net_handler_play_client_names net_handler_play_client{};
         network_player_info_names network_player_info{};
@@ -604,6 +623,7 @@ export namespace chatwire::mapping
     inline constexpr const score_names&               score{ all.score };
     inline constexpr const score_player_team_names&   score_player_team{ all.score_player_team };
     inline constexpr const team_names&                team{ all.team };
+    inline constexpr const render_names&              render{ all.render };
     inline constexpr const gui_player_tab_overlay_names& gui_player_tab_overlay{
         all.gui_player_tab_overlay };
     inline constexpr const net_handler_play_client_names& net_handler_play_client{

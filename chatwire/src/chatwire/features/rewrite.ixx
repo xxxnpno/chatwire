@@ -56,6 +56,27 @@ import chatwire.sdk;
 // and no other player sees anything change; this is the client's own display.
 //
 // ===========================================================================
+// EVERY SURFACE A NAME APPEARS ON, WHICH IS THREE HOOKS AND NOT ONE
+// ===========================================================================
+// A name is drawn in four places and they do not share a code path:
+//
+//   tab list      GuiPlayerTabOverlay -> ScorePlayerTeam.formatPlayerName
+//   sidebar       GuiIngame           -> ScorePlayerTeam.formatPlayerName
+//   above a head  Render.renderLivingLabel, with the text ALREADY BUILT
+//   chat          GuiNewChat.printChatMessage, an IChatComponent
+//
+// The first two share a hook; the other two need their own.  Rewriting only the
+// team formatter -- which is what this feature did first -- changed the tab and
+// the sidebar and left the name over the player's head untouched, which looks
+// exactly like a rule that did not match.
+//
+// The rules are the same set for all three.  What differs is WHAT each hook
+// hands over: formatPlayerName gets the raw name, renderLivingLabel gets the
+// finished label with its colours in, and chat gets a whole line.  A rule
+// matching `alpha` therefore sees `alpha` in one and `§calpha§r` in another,
+// which is why `match` is a substring test rather than an equality one.
+//
+// ===========================================================================
 // WHERE IT HOOKS, AND WHY THAT ONE PLACE
 // ===========================================================================
 // `ScorePlayerTeam.formatPlayerName(Team, String)`.  It is static, and it is
@@ -393,6 +414,16 @@ export namespace chatwire::features
                 chatwire::log::warn("rewrite: could not hook the name formatter; "
                                     "display names cannot be changed");
                 return false;
+            }
+            // The FLOATING nametag is a separate draw path -- Render
+            // .renderLivingLabel, with the text already built -- so it needs its
+            // own hook.  Not fatal if it fails: the tab and the sidebar still
+            // rewrite, and saying which half is missing beats failing both.
+            if (!chatwire::sdk::install_label_rewriter())
+            {
+                chatwire::log::warn("rewrite: could not hook the nametag renderer; "
+                                    "the tab list and sidebar still rewrite, the name "
+                                    "above a player's head does not");
             }
             detail::g_refresh_stop.store(false, std::memory_order_release);
             try { detail::g_refresher = std::thread{ &rewrite_feature::refresh_loop }; }
