@@ -368,38 +368,20 @@ export namespace chatwire::json
         return out;
     }
 
-    /*
-        @brief Reads a top-level string field out of a flat JSON object.
-        @details
-        Scans for `"key"`, skips to the value, and unescapes it.  Returns
-        nullopt when the key is absent, when the value is not a string, or when
-        the object is malformed — all three are "the client sent something I
-        cannot use", which the caller reports as one error.
-
-        Only TOP-LEVEL keys match.  A key inside a nested object would be found
-        by a naive scan and silently treated as top-level, so nesting depth is
-        tracked and anything below depth 1 is skipped.
-    */
-    [[nodiscard]] inline auto get_string(const std::string_view object,
-                                         const std::string_view key)
-        -> std::optional<std::string>
+    namespace detail
     {
-        std::size_t i{ 0 };
-        int         depth{ 0 };
-
-        const auto skip_ws{ [&]() noexcept
-        {
-            while (i < object.size()
-                   && (object[i] == ' ' || object[i] == '\t'
-                       || object[i] == '\n' || object[i] == '\r'))
-            {
-                ++i;
-            }
-        } };
-
-        // Reads a quoted string starting at object[i] == '"'.  Returns nullopt
-        // on an unterminated string rather than running to the end of the view.
-        const auto read_string{ [&]() -> std::optional<std::string>
+        /*
+            @brief Reads a quoted string at object[i], unescaping it, and leaves
+                   `i` one past its closing quote.
+            @details
+            A free function rather than a lambda inside one reader, because there
+            are two readers now and the scan underneath both of them needs it as
+            well -- for every key it compares and every string value it has to
+            step over.  Returns nullopt on an unterminated string rather than
+            running to the end of the view.
+        */
+        [[nodiscard]] inline auto read_string_at(const std::string_view object, std::size_t& i)
+            -> std::optional<std::string>
         {
             if (i >= object.size() || object[i] != '"') { return std::nullopt; }
             ++i;
@@ -473,58 +455,128 @@ export namespace chatwire::json
                 ++i;
             }
             return std::nullopt;                            // unterminated
-        } };
-
-        skip_ws();
-        if (i >= object.size() || object[i] != '{') { return std::nullopt; }
-        ++i;
-        depth = 1;
-
-        while (i < object.size())
-        {
-            skip_ws();
-            if (i >= object.size()) { break; }
-
-            const char c{ object[i] };
-            if (c == '}') { --depth; ++i; if (depth == 0) { break; } continue; }
-            if (c == '{' || c == '[') { ++depth; ++i; continue; }
-            if (c == ']') { --depth; ++i; continue; }
-            if (c == ',' || c == ':') { ++i; continue; }
-
-            if (c == '"')
-            {
-                const std::size_t key_start{ i };
-                auto candidate{ read_string() };
-                if (!candidate) { return std::nullopt; }
-
-                // Only a key at depth 1 followed by ':' is a top-level key.
-                skip_ws();
-                const bool is_key{ i < object.size() && object[i] == ':' };
-                if (!is_key || depth != 1)
-                {
-                    (void)key_start;
-                    continue;                                // it was a value
-                }
-                ++i;                                         // past ':'
-                skip_ws();
-
-                if (*candidate == key)
-                {
-                    if (i < object.size() && object[i] == '"') { return read_string(); }
-                    return std::nullopt;                     // present, not a string
-                }
-
-                // Wrong key: skip its value so a nested object cannot be
-                // mistaken for more top-level keys.
-                if (i < object.size() && object[i] == '"')
-                {
-                    if (!read_string()) { return std::nullopt; }
-                }
-                continue;
-            }
-
-            ++i;                                             // number / literal byte
         }
+
+        /*
+            @brief Where a top-level key's value starts, or nullopt.
+            @details
+            The scan both readers share: it finds the key and stops on the first
+            byte of its value, leaving what that value MEANS to the caller.  That
+            split is the whole point -- `get_string` and `get_bool` disagree about
+            what an acceptable value looks like and agree about everything else,
+            and the version this replaced had the disagreement buried in the
+            middle of the agreement, so a second reader meant a second copy of
+            the scan.
+
+            Only TOP-LEVEL keys match.  A key inside a nested object would be
+            found by a naive scan and silently treated as top-level, so nesting
+            depth is tracked and anything below depth 1 is skipped.
+        */
+        [[nodiscard]] inline auto value_offset(const std::string_view object,
+                                               const std::string_view key)
+            -> std::optional<std::size_t>
+        {
+            std::size_t i{ 0 };
+            int         depth{ 0 };
+
+            const auto skip_ws{ [&]() noexcept
+            {
+                while (i < object.size()
+                       && (object[i] == ' ' || object[i] == '\t'
+                           || object[i] == '\n' || object[i] == '\r'))
+                {
+                    ++i;
+                }
+            } };
+
+            skip_ws();
+            if (i >= object.size() || object[i] != '{') { return std::nullopt; }
+            ++i;
+            depth = 1;
+
+            while (i < object.size())
+            {
+                skip_ws();
+                if (i >= object.size()) { break; }
+
+                const char c{ object[i] };
+                if (c == '}') { --depth; ++i; if (depth == 0) { break; } continue; }
+                if (c == '{' || c == '[') { ++depth; ++i; continue; }
+                if (c == ']') { --depth; ++i; continue; }
+                if (c == ',' || c == ':') { ++i; continue; }
+
+                if (c == '"')
+                {
+                    auto candidate{ read_string_at(object, i) };
+                    if (!candidate) { return std::nullopt; }
+
+                    // Only a key at depth 1 followed by ':' is a top-level key.
+                    skip_ws();
+                    const bool is_key{ i < object.size() && object[i] == ':' };
+                    if (!is_key || depth != 1)
+                    {
+                        continue;                            // it was a value
+                    }
+                    ++i;                                     // past ':'
+                    skip_ws();
+
+                    if (*candidate == key)
+                    {
+                        if (i >= object.size()) { return std::nullopt; }
+                        return i;
+                    }
+
+                    // Wrong key: skip its value so a nested object cannot be
+                    // mistaken for more top-level keys.
+                    if (i < object.size() && object[i] == '"')
+                    {
+                        if (!read_string_at(object, i)) { return std::nullopt; }
+                    }
+                    continue;
+                }
+
+                ++i;                                         // number / literal byte
+            }
+            return std::nullopt;
+        }
+    }
+
+    /*
+        @brief Reads a top-level string field out of a flat JSON object.
+        @details
+        Returns nullopt when the key is absent, when the value is not a string,
+        or when the object is malformed — all three are "the client sent
+        something I cannot use", which the caller reports as one error.
+    */
+    [[nodiscard]] inline auto get_string(const std::string_view object,
+                                         const std::string_view key)
+        -> std::optional<std::string>
+    {
+        auto at{ detail::value_offset(object, key) };
+        if (!at) { return std::nullopt; }
+        if (object[*at] != '"') { return std::nullopt; }     // present, not a string
+        return detail::read_string_at(object, *at);
+    }
+
+    /*
+        @brief Reads a top-level boolean field out of a flat JSON object.
+        @details
+        `true` and `false`, the JSON literals, and nothing else: `"true"` is a
+        string and answers nullopt, because a client that quoted it has a bug
+        and a reader that guessed would hide it.  Same nullopt for absent, so a
+        caller that treats "absent" and "false" alike -- which is most of them --
+        writes `get_bool(body, "drop").value_or(false)` and says so.
+    */
+    [[nodiscard]] inline auto get_bool(const std::string_view object,
+                                       const std::string_view key)
+        -> std::optional<bool>
+    {
+        const auto at{ detail::value_offset(object, key) };
+        if (!at) { return std::nullopt; }
+
+        const std::string_view rest{ object.substr(*at) };
+        if (rest.starts_with("true"))  { return true; }
+        if (rest.starts_with("false")) { return false; }
         return std::nullopt;
     }
 }

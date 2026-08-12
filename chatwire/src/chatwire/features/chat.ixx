@@ -131,6 +131,20 @@ export namespace chatwire::features
         std::string_view formatted{};
         /* The same line with them stripped. */
         std::string_view plain{};
+        /*
+            A `rewrite` rule hid this line: the game received it and the player
+            did not see it.  Reported rather than withheld, because the socket
+            and the screen answer different questions -- a tool that hides a
+            spammer still counts what it hid, and a bridge that relays chat
+            elsewhere should not silently go quiet because somebody stopped
+            wanting to READ it.
+
+            Which also means the drop is visible to every connected client and
+            not only to the one that asked for it.  That is the same shape as
+            every other chat line, and the honest one: what the player is being
+            shown is a property of the game, not of a connection.
+        */
+        bool             dropped{ false };
     };
 
     /* @brief The reply to sendChatMessage: it has already reached the server. */
@@ -262,7 +276,8 @@ export namespace chatwire::features
             noexcept and fully guarded whichever thread it is: the frame above is
             Minecraft's interpreter, which has no handler for a C++ exception.
         */
-        static auto on_chat_line(const char* const formatted, const char* const plain) noexcept
+        static auto on_chat_line(const char* const formatted, const char* const plain,
+                                 const bool dropped) noexcept
             -> void
         {
             try
@@ -277,6 +292,11 @@ export namespace chatwire::features
                 const std::string_view plain_view{ plain ? plain : "" };
                 if (formatted_view.empty() && plain_view.empty()) { return; }
 
+                // A dropped line still shows in chatwire's OWN console.  The
+                // console is not the game's chat box -- it is where someone is
+                // watching chatwire work, and a rule that made lines disappear
+                // from the one window that could explain it would be the worst
+                // possible place to hide them.
                 if (console)
                 {
                     console(formatted_view.empty() ? plain_view : formatted_view);
@@ -285,7 +305,8 @@ export namespace chatwire::features
 
                 const std::string payload{ chatwire::json::object(
                     print_chat_message_event{ .formatted = formatted_view,
-                                              .plain     = plain_view }) };
+                                              .plain     = plain_view,
+                                              .dropped   = dropped }) };
 
                 sink(payload);
             }
