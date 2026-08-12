@@ -13,7 +13,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from . import mappings, paths, tools, vanilla
+from . import access, mappings, paths, tools, vanilla
 from .util import human, run, say
 
 
@@ -31,6 +31,10 @@ def _remap(src: Path, dst: Path, srg: Path, label: str) -> Path:
         "--srg-in", str(srg),
         "--quiet",
     ])
+    # Widen BEFORE the jar is published under its final name, so a jar that
+    # exists is a jar that runs.  Remapping alone produces one that reaches the
+    # main menu and then dies on the first cross-package access -- see access.py.
+    access.widen_jar(tmp, tmp)
     tmp.replace(dst)
     say(f"  {label}: {human(dst.stat().st_size)}")
     return dst

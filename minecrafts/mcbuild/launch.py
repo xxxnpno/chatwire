@@ -40,7 +40,8 @@ def offline_uuid(username: str) -> str:
 
 def command(mapping: str, username: str = DEFAULT_USERNAME, memory: str = "2G",
             extra_jvm: list[str] | None = None,
-            extra_game: list[str] | None = None) -> list[str]:
+            extra_game: list[str] | None = None,
+            join: str | None = None) -> list[str]:
     if mapping not in paths.MAPPINGS_ORDER:
         raise SystemExit(f"unknown mapping {mapping!r}; pick one of {paths.MAPPINGS_ORDER}")
 
@@ -83,6 +84,14 @@ def command(mapping: str, username: str = DEFAULT_USERNAME, memory: str = "2G",
         re.sub(r"\$\{(\w+)\}", lambda m: subst.get(m.group(1), m.group(0)), tok)
         for tok in shlex.split(template)
     ]
+    # `--server` / `--port` are 1.8.9's own options -- Main declares both, and
+    # the launcher uses them for "join this server on launch".  They are what
+    # gets a client into a world with no GUI to drive: the alternative is
+    # clicking through the main menu, which no harness can do.
+    if join:
+        host, _, port_text = join.partition(":")
+        game_args += ["--server", host, "--port", port_text or "25565"]
+
     game_args += extra_game or []
 
     return jvm + [vj["mainClass"]] + game_args
@@ -106,7 +115,8 @@ def write_script(mapping: str) -> Path:
 def launch(mapping: str, wait: bool = True, timeout: float | None = None,
            username: str = DEFAULT_USERNAME, memory: str = "2G",
            extra_jvm: list[str] | None = None,
-           extra_game: list[str] | None = None):
+           extra_game: list[str] | None = None,
+           join: str | None = None):
     """Start `mapping`.  Returns its exit code, or the Popen when `wait` is false.
 
     The handle rather than the pid, and that is not a convenience: on Windows
@@ -115,7 +125,7 @@ def launch(mapping: str, wait: bool = True, timeout: float | None = None,
     "is it still up?" check silently shot the client it was waiting for.
     Popen.poll() is the question that asks nothing of the process.
     """
-    cmd = command(mapping, username, memory, extra_jvm, extra_game)
+    cmd = command(mapping, username, memory, extra_jvm, extra_game, join)
     run_dir = paths.mapping_run(mapping)
     log = run_dir / "launch.log"
 
