@@ -107,6 +107,26 @@ export namespace chatwire::features
     struct rewrite_rule
     {
         std::uint64_t id{ 0 };
+        /*
+            WHOSE name this rewrites.  Empty means every name, which is the old
+            behaviour and almost never what someone wants: "half the players"
+            needs a rule per player, or a rule whose match names them.
+        */
+        std::string   match{};
+        /*
+            WHAT to draw instead, with placeholders resolved at draw time:
+
+                {name}      the raw name Minecraft was about to decorate
+                {health}    out of 20, one decimal
+                {food}      out of 20
+                {ping}      milliseconds
+                {x} {y} {z} position, one decimal
+
+            So `{name} {health}` turns `alpha` into `alpha 18.5`.  A template
+            with no placeholder is a plain replacement, which is what the old
+            find/replace did.
+        */
+        std::string   pattern{};
         std::string   find{};
         std::string   replace{};
         /* Which connection registered it.  See the note at the top. */
@@ -157,6 +177,85 @@ export namespace chatwire::features
         inline std::atomic<std::uint64_t> g_next_id{ 1 };
         inline std::atomic<std::uint64_t> g_applied{ 0 };
 
+        /*
+            @brief The player snapshot the detour reads.  Swapped whole.
+            @details
+            `{health}` has to come from somewhere and it must not be the detour:
+            that runs on the render thread several times a frame, and reading a
+            player's health means walking the entity list and calling Java.  A
+            refresher takes the snapshot off-thread; the detour loads a pointer.
+        */
+        using snapshot_set = std::vector<chatwire::sdk::player_snapshot>;
+
+        inline auto snapshots() noexcept
+            -> std::atomic<std::shared_ptr<const snapshot_set>>&
+        {
+            static auto* const live{ new std::atomic<std::shared_ptr<const snapshot_set>>{
+                std::make_shared<const snapshot_set>() } };
+            return *live;
+        }
+
+        inline std::atomic<bool>   g_refresh_stop{ false };
+        inline std::atomic<bool>   g_needs_live{ false };
+        inline std::thread         g_refresher{};
+
+        /* @brief True when any rule uses a placeholder that changes per tick. */
+        [[nodiscard]] inline auto uses_live_data(const std::string_view pattern) noexcept -> bool
+        {
+            for (const std::string_view token : { "{health}", "{food}", "{ping}",
+                                                  "{x}", "{y}", "{z}" })
+            {
+                if (pattern.find(token) != std::string_view::npos) { return true; }
+            }
+            return false;
+        }
+
+        /*
+            @brief Renders one template for one name.  Detour, so: no allocation
+                   beyond the result, no lock, no Java.
+        */
+        [[nodiscard]] inline auto render(const std::string_view pattern,
+                                         const std::string_view name) -> std::string
+        {
+            const std::shared_ptr<const snapshot_set> live{
+                snapshots().load(std::memory_order_acquire) };
+            const chatwire::sdk::player_snapshot* found{ nullptr };
+            if (live)
+            {
+                for (const auto& who : *live)
+                {
+                    if (who.name == name) { found = &who; break; }
+                }
+            }
+
+            std::string out;
+            out.reserve(pattern.size() + 16u);
+            for (std::size_t i{ 0 }; i < pattern.size(); ++i)
+            {
+                if (pattern[i] != '{') { out += pattern[i]; continue; }
+                const std::size_t close{ pattern.find('}', i) };
+                if (close == std::string_view::npos) { out += pattern[i]; continue; }
+
+                const std::string_view token{ pattern.substr(i + 1u, close - i - 1u) };
+                if (token == "name") { out += name; }
+                else if (!found)
+                {
+                    // A placeholder we cannot fill yet -- the snapshot has not
+                    // caught up, or that name is not a player.  The token is
+                    // dropped rather than printed, so a nametag never reads
+                    // "alpha {health}" at somebody.
+                }
+                else if (token == "health") { out += std::format("{:.1f}", found->health); }
+                else if (token == "food")   { out += std::format("{}", found->food); }
+                else if (token == "ping")   { out += std::format("{}", found->ping); }
+                else if (token == "x")      { out += std::format("{:.1f}", found->x); }
+                else if (token == "y")      { out += std::format("{:.1f}", found->y); }
+                else if (token == "z")      { out += std::format("{:.1f}", found->z); }
+                i = close;
+            }
+            return out;
+        }
+
         /* @brief Replaces every occurrence of `find` in `text`. */
         inline auto substitute(std::string& text, const std::string_view find,
                                const std::string_view replace) -> bool
@@ -198,9 +297,23 @@ export namespace chatwire::features
                 bool changed{ false };
                 for (const rewrite_rule& rule : *live)
                 {
-                    if (!changed && source.find(rule.find) == std::string_view::npos)
+                    // WHOSE name is this?  An empty match is every name; a
+                    // non-empty one has to appear in it, which is what lets a
+                    // rule apply to one player and not the next.
+                    if (!rule.match.empty()
+                        && source.find(rule.match) == std::string_view::npos)
                     {
-                        continue;                       // no match, nothing built yet
+                        continue;
+                    }
+
+                    if (!rule.pattern.empty())
+                    {
+                        // A TEMPLATE replaces the whole name rather than editing
+                        // it, because `{name} {health}` is not a substitution --
+                        // it is a new string built from the old one.
+                        replacement = render(rule.pattern, source);
+                        changed = true;
+                        continue;
                     }
                     if (!changed) { replacement.assign(source); }
                     changed = substitute(replacement, rule.find, rule.replace) || changed;
@@ -241,6 +354,38 @@ export namespace chatwire::features
             that could reasonably grow to several.  Naming the command after
             `formatPlayerName` would promise a precision this does not have.
         */
+        /*
+            @brief Keeps the snapshot the templates read from going stale.
+            @details
+            Runs only while a rule actually uses a live placeholder -- a rule
+            that just renames somebody needs no snapshot, and taking one twice a
+            second for nothing would be a java_thread_scope the whole VM waits on
+            for no reason.
+
+            Off the render thread, deliberately: this is the work the detour is
+            not allowed to do.
+        */
+        static auto refresh_loop() noexcept -> void
+        {
+            while (!detail::g_refresh_stop.load(std::memory_order_acquire))
+            {
+                for (int tick{ 0 }; tick < 5; ++tick)
+                {
+                    if (detail::g_refresh_stop.load(std::memory_order_acquire)) { return; }
+                    std::this_thread::sleep_for(std::chrono::milliseconds{ 100 });
+                }
+                if (!detail::g_needs_live.load(std::memory_order_acquire)) { continue; }
+                try
+                {
+                    detail::snapshots().store(
+                        std::make_shared<const detail::snapshot_set>(
+                            chatwire::sdk::player_snapshots()),
+                        std::memory_order_release);
+                }
+                catch (...) { }
+            }
+        }
+
         [[nodiscard]] auto start() noexcept -> bool override
         {
             if (!chatwire::sdk::install_name_rewriter(&detail::rewrite_name))
@@ -249,6 +394,9 @@ export namespace chatwire::features
                                     "display names cannot be changed");
                 return false;
             }
+            detail::g_refresh_stop.store(false, std::memory_order_release);
+            try { detail::g_refresher = std::thread{ &rewrite_feature::refresh_loop }; }
+            catch (...) { }
             return true;
         }
 
@@ -259,6 +407,11 @@ export namespace chatwire::features
             // centrally, in sdk::remove_hooks, after every thread that could be
             // inside it has been joined.
             (void)detail::update([](detail::rule_set& set) { set.clear(); return 0u; });
+            // JOINED, not signalled and forgotten: it runs code in this DLL and
+            // the DLL is about to be unloaded.
+            detail::g_refresh_stop.store(true, std::memory_order_release);
+            try { if (detail::g_refresher.joinable()) { detail::g_refresher.join(); } }
+            catch (...) { }
         }
 
         [[nodiscard]] auto handle(const chatwire::command& cmd) noexcept
@@ -282,15 +435,24 @@ export namespace chatwire::features
     private:
         [[nodiscard]] static auto add(const chatwire::command& cmd) -> chatwire::response
         {
+            const auto match{ chatwire::json::get_string(cmd.body, "match") };
+            const auto pattern{ chatwire::json::get_string(cmd.body, "template") };
             const auto find{ chatwire::json::get_string(cmd.body, "find") };
             const auto replace{ chatwire::json::get_string(cmd.body, "replace") };
-            if (!find || find->empty())
+
+            // Two shapes, and the reply says which one it took.  `template` is
+            // the one that can build a name out of live values; `find`/`replace`
+            // is a plain substitution and stays because it is the shortest way
+            // to say "call them something else".
+            if (!pattern && !find)
             {
-                return chatwire::response::failure("missing or empty 'find'");
+                return chatwire::response::failure(
+                    "give either 'template' (with {name}, {health}, {food}, {ping}, "
+                    "{x}, {y}, {z}) or 'find' and 'replace'");
             }
-            if (!replace)
+            if (!pattern && (find->empty() || !replace))
             {
-                return chatwire::response::failure("missing or non-string 'replace'");
+                return chatwire::response::failure("'find' needs a matching 'replace'");
             }
             // A rule per frame per nametag is cheap; ten thousand of them are
             // not.  The bound is here rather than in the detour because the
@@ -303,11 +465,32 @@ export namespace chatwire::features
             const std::uint64_t id{ detail::g_next_id.fetch_add(1, std::memory_order_relaxed) };
             (void)detail::update([&](detail::rule_set& set)
             {
-                set.push_back(rewrite_rule{ .id = id, .find = *find,
-                                            .replace = *replace, .owner = cmd.client });
+                set.push_back(rewrite_rule{ .id = id,
+                                            .match = match ? *match : std::string{},
+                                            .pattern = pattern ? *pattern : std::string{},
+                                            .find = find ? *find : std::string{},
+                                            .replace = replace ? *replace : std::string{},
+                                            .owner = cmd.client });
                 return 1u;
             });
-            chatwire::log::info("rewrite rule {}: '{}' -> '{}'", id, *find, *replace);
+            // Does anything now need a live snapshot?  Recomputed over the whole
+            // set rather than latched on, so removing the last live rule stops
+            // the refresher paying for one.
+            {
+                const auto live{ detail::rules().load(std::memory_order_acquire) };
+                bool needed{ false };
+                if (live)
+                {
+                    for (const auto& r : *live)
+                    {
+                        if (detail::uses_live_data(r.pattern)) { needed = true; break; }
+                    }
+                }
+                detail::g_needs_live.store(needed, std::memory_order_release);
+            }
+            chatwire::log::info("rewrite rule {}: match '{}' -> '{}'", id,
+                                match ? *match : "(everyone)",
+                                pattern ? *pattern : std::format("{} -> {}", *find, *replace));
             return chatwire::response::success(
                 chatwire::json::object(rewrite_added{ .id = id }));
         }

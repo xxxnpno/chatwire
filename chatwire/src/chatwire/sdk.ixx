@@ -1719,6 +1719,31 @@ export namespace chatwire::sdk
         return out;
     }
 
+    /*
+        @brief What a rewrite template can put in a name, per player.
+        @details
+        A SNAPSHOT, refreshed off the render thread and read from inside a
+        detour.  `{health}` in a nametag has to come from somewhere, and the one
+        place it must not come from is the detour itself: that runs on the render
+        thread several times a frame, and reading a player's health means walking
+        the entity list and calling into Java.  Doing that per drawn name would
+        turn a nametag into a stall.
+
+        So the socket side takes this snapshot on a timer and the detour reads
+        the pointer.  The cost is that a nametag can be up to one refresh stale,
+        which for a health number a human is reading is not a cost at all.
+    */
+    struct player_snapshot
+    {
+        std::string name{};
+        float       health{ 0.0F };
+        std::int32_t food{ 0 };
+        std::int32_t ping{ 0 };
+        double      x{ 0.0 };
+        double      y{ 0.0 };
+        double      z{ 0.0 };
+    };
+
     /* @brief One row of a scoreboard objective. */
     struct score_entry
     {
@@ -2296,6 +2321,45 @@ export namespace chatwire::sdk
             return named ? named->to_string() : std::string{};
         }
         catch (...) { return {}; }
+    }
+
+    /*
+        @brief Every player the client can see, with what a template can use.
+        @details
+        Joins the entity list (health, position) to the tab list (ping) by name,
+        because neither has all of it: playerEntities knows what is loaded
+        nearby, the tab list knows who the server says is connected.  A player in
+        one and not the other still gets an entry, with the other half zero.
+    */
+    [[nodiscard]] inline auto player_snapshots() noexcept -> std::vector<player_snapshot>
+    {
+        std::vector<player_snapshot> out;
+        try
+        {
+            for (const auto& entity : chatwire::sdk::entities(256u))
+            {
+                if (entity.name.empty()) { continue; }
+                out.push_back(player_snapshot{ .name = entity.name, .x = entity.x,
+                                               .y = entity.y, .z = entity.z });
+            }
+            for (const auto& row : chatwire::sdk::tab_list())
+            {
+                auto found{ std::ranges::find(out, row.name, &player_snapshot::name) };
+                if (found != out.end()) { found->ping = row.ping; }
+                else { out.push_back(player_snapshot{ .name = row.name, .ping = row.ping }); }
+            }
+            if (const auto self{ chatwire::sdk::local_player_state() })
+            {
+                auto found{ std::ranges::find(out, self->name, &player_snapshot::name) };
+                if (found != out.end())
+                {
+                    found->health = self->health;
+                    found->food   = self->food;
+                }
+            }
+        }
+        catch (...) { }
+        return out;
     }
 
     /*
