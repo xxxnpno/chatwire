@@ -410,10 +410,25 @@ namespace chatwire
                 let this thread call Java — in which case nothing was left
                 installed.
     */
-    auto start(const std::uint16_t port, const std::chrono::seconds timeout) noexcept
+    auto start(const std::uint16_t port, const std::chrono::seconds timeout,
+               const std::string_view bind_address, const std::string_view token) noexcept
         -> bool
     {
         if (detail::g_running.load(std::memory_order_acquire)) { return true; }
+
+        // REFUSED HERE, before a socket exists.  The server refuses this too,
+        // and the repetition is deliberate: there must be no arrangement of
+        // arguments, from any caller, that leaves chatwire listening on the
+        // network with nothing guarding it.  Saying so this early also means the
+        // error names the mistake rather than a failed bind.
+        const bool public_bind{ !bind_address.empty() && bind_address != "127.0.0.1"
+                                && bind_address != "localhost" };
+        if (public_bind && token.empty())
+        {
+            log::error("--bind {} needs --token: this socket can send chat as the player "
+                       "and read everything they see", bind_address);
+            return false;
+        }
 
         // Port 0 asks the OS for ANY free port, which is a legitimate thing to
         // want but never what a caller who simply did not set one means.  A
@@ -514,7 +529,8 @@ namespace chatwire
         // 5. The server, last, so an instant client finds a working API.
         features::chat::set_sink(&detail::broadcast_line);
         features::chat::set_console_sink(&detail::console_line);
-        if (!detail::server_instance().start(bind_port, &detail::dispatch, &detail::on_presence))
+        if (!detail::server_instance().start(bind_port, &detail::dispatch, &detail::on_presence,
+                                            bind_address, token))
         {
             log::error("websocket server failed to start; shutting down");
             detail::stop_feature_retry();
@@ -539,6 +555,12 @@ namespace chatwire
         // reported where the rest of chatwire's self-reporting is.
         features::system::set_stats_source(&detail::stats_json);
 
+        if (public_bind)
+        {
+            log::warn("listening on {}:{} -- authenticated, but NOT encrypted.  Tunnel it "
+                      "(WireGuard, Tailscale, ssh -L) before it crosses a network you do "
+                      "not control", bind_address, detail::server_instance().port());
+        }
         chatwire::console::banner(chatwire::version, detail::server_instance().port(),
                                   mapping::mode_name(mode));
         // Just "attached".  The port belongs in the console banner and the log,

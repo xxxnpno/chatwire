@@ -479,6 +479,13 @@ namespace
             "  chatwire --list          list candidate processes and exit\n"
             "  chatwire --pid <n>       inject into a specific process\n"
             "  chatwire --port <n>      port for chatwire to listen on\n"
+            "  chatwire --bind <addr>   listen on <addr> rather than 127.0.0.1;\n"
+            "                           requires --token\n"
+            "  chatwire --token <s>     shared secret.  A client proves it knows\n"
+            "                           this with HMAC-SHA256 over a nonce, so the\n"
+            "                           secret itself is never sent.  NOT\n"
+            "                           encryption -- tunnel it across a network\n"
+            "                           you do not control\n"
             "  chatwire --console       ALSO open a console showing chat\n"
             "  chatwire --verbose       show chatwire's start-up trace\n"
             "  chatwire --dll <path>    inject a DLL from disk instead of the\n"
@@ -503,6 +510,8 @@ int main(const int argc, char** const argv)
     // game's window when the game has one.  Opt in with --console.
     bool         console{ false };
     bool         verbose{ false };
+    std::string  bind_address{};
+    std::string  token{};
 
     for (int i{ 1 }; i < argc; ++i)
     {
@@ -516,6 +525,8 @@ int main(const int argc, char** const argv)
         else if (arg == "--verbose") { verbose = true; }
         else if (arg == "--pid")  { if (const char* v{ next() }) { pid = std::strtoul(v, nullptr, 10); } }
         else if (arg == "--port") { if (const char* v{ next() }) { port = std::strtoul(v, nullptr, 10); } }
+        else if (arg == "--bind")  { if (const char* v{ next() }) { bind_address = v; } }
+        else if (arg == "--token") { if (const char* v{ next() }) { token = v; } }
         else if (arg == "--dll")
         {
             if (const char* v{ next() })
@@ -649,6 +660,8 @@ int main(const int argc, char** const argv)
         settings.port    = static_cast<std::uint16_t>(port);
         settings.console = console;
         settings.verbose = verbose;
+        settings.bind    = bind_address;
+        settings.token   = token;
 
         const std::string cfg{
             to_utf8(dll.substr(0, dll.find_last_of(L"\\/") + 1u))
@@ -662,6 +675,16 @@ int main(const int argc, char** const argv)
         {
             std::println("  port   : {}{}{}", port != 0u ? port : 24455u, console ? "   (console)" : "   (no console)", verbose ? "   (verbose)" : "");
         }
+    }
+
+    if (!bind_address.empty() && bind_address != "127.0.0.1" && bind_address != "localhost"
+        && token.empty())
+    {
+        std::println("\n  --bind {} needs --token.\n"
+                     "  This socket can send chat as the player and read everything\n"
+                     "  they see; on anything but loopback it must be authenticated.",
+                     bind_address);
+        return 1;
     }
 
     (void)enable_debug_privilege();

@@ -12,14 +12,33 @@
 // are living inside someone's game process.
 //
 // ===========================================================================
-// BOUND TO LOOPBACK, DELIBERATELY
+// LOOPBACK BY DEFAULT, AND AUTHENTICATED WHEN IT IS NOT
 // ===========================================================================
-// The listener binds 127.0.0.1, never 0.0.0.0.  This socket can send chat as
-// the player and read everything they see; exposing it to the network would
-// hand that to anyone who can reach the machine.  Loopback-only keeps it to
-// software the user already ran.  There is no authentication, and that is only
-// defensible BECAUSE of the bind address — so the bind address is not a
-// configuration knob.
+// This socket can send chat as the player and read everything they see, so who
+// may open it is the whole security question.  For a long time the answer was
+// "only this machine": the listener bound 127.0.0.1 and there was no
+// authentication, which was defensible ONLY because of the bind address.
+//
+// That is still the default, and still what most people want.  But two players
+// on two networks wanting to bridge their games is a real thing to want, and
+// the honest way to allow it is not to loosen the bind and hope:
+//
+//   * the address is a setting, and anything that is not a loopback address is
+//     REFUSED unless a token is set.  The refusal is in chatwire::start, before
+//     a socket exists, so there is no window in which an unauthenticated server
+//     is listening on the network;
+//   * with a token, every connection must prove it knows the secret before it
+//     can send a command or receive a single event.  The proof is
+//     HMAC-SHA256(token, nonce) over a nonce this server generated for that one
+//     connection, so the secret never crosses the wire and a captured proof is
+//     useless on the next connection;
+//   * a wrong proof closes the connection rather than answering, which is what
+//     makes guessing cost a full TCP handshake per attempt.
+//
+// WHAT THIS DOES NOT DO IS ENCRYPT.  Everything after the handshake is
+// plaintext, so across an untrusted network chatwire must be tunnelled --
+// WireGuard, Tailscale, an SSH forward.  See chatwire/crypto.hpp for why a
+// hand-rolled TLS inside an injected DLL would be worse than saying so.
 //
 // ===========================================================================
 // LIFETIME, WHICH IS THE WHOLE DIFFICULTY
@@ -45,6 +64,9 @@
 // Winsock itself stays behind chatwire/net.hpp; none of it leaks into this
 // file.
 #include "chatwire/common.hpp"
+
+#include "chatwire/crypto.hpp"
+#include "chatwire/json.hpp"
 
 #include "chatwire/log.hpp"
 #include "chatwire/net.hpp"
@@ -73,6 +95,20 @@ namespace chatwire::ws::detail
         std::uint64_t id{ 0 };
         std::mutex write_mutex{};              // serialises frames on this socket
         std::atomic<bool> alive{ true };
+
+        /*
+            Whether this connection has proved it knows the token.  True from the
+            start when no token is set, which is the loopback default and the
+            case that must stay frictionless.
+
+            Read by the broadcaster as well as by this client's own thread -- an
+            event must not reach a connection that has not authenticated -- so it
+            is atomic rather than plain.
+        */
+        std::atomic<bool> authenticated{ true };
+        /* The nonce this connection was challenged with.  Written once, before
+           the client thread starts reading, and only read after that. */
+        std::string nonce{};
 
         ~client()
         {
@@ -179,12 +215,23 @@ namespace chatwire::ws
                     caller reports it and keeps running (chat hooks still work,
                     there is simply nothing to talk to).
         */
+        /*
+            @param bind_address  Empty or a loopback address for the default.
+                                 Anything else REQUIRES `token`; the caller is
+                                 expected to have refused already, and this
+                                 refuses again rather than trusting it.
+            @param token         The shared secret, or empty for no
+                                 authentication.
+        */
         [[nodiscard]] auto start(const std::uint16_t port, const message_handler handler,
-                                 const presence_handler on_presence = nullptr) noexcept
+                                 const presence_handler on_presence = nullptr,
+                                 const std::string_view bind_address = {},
+                                 const std::string_view token = {}) noexcept
             -> bool
         {
             if (this->running_.load(std::memory_order_acquire)) { return true; }
             this->handler_  = handler;
+            this->token_.assign(token);
             this->presence_ = on_presence;
 
             if (!chatwire::net::startup())
@@ -210,12 +257,40 @@ namespace chatwire::ws
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
             addr.sin_port   = chatwire::net::to_network_port(port);
-            // Loopback ONLY.  See the file header.
+
+            // Loopback unless told otherwise AND a token is set.  The second
+            // half is not belt and braces: this function is reachable from a
+            // test and from a future caller, and "listening on the network with
+            // no authentication" must not be one keystroke away anywhere.
+            std::string where{ "127.0.0.1" };
             addr.sin_addr.s_addr = chatwire::net::loopback_address();
+            if (!bind_address.empty() && bind_address != "127.0.0.1" && bind_address != "localhost")
+            {
+                if (this->token_.empty())
+                {
+                    chatwire::log::error("refusing to bind {} with no token; an unauthenticated "
+                                         "chatwire on the network can drive the game",
+                                         bind_address);
+                    this->close_listener();
+                    this->cleanup_net();
+                    return false;
+                }
+                const std::string wanted{ bind_address };
+                const auto parsed{ ::inet_addr(wanted.c_str()) };
+                if (parsed == INADDR_NONE && wanted != "255.255.255.255")
+                {
+                    chatwire::log::error("'{}' is not an address chatwire can bind", wanted);
+                    this->close_listener();
+                    this->cleanup_net();
+                    return false;
+                }
+                addr.sin_addr.s_addr = parsed;
+                where = wanted;
+            }
 
             if (::bind(this->listener_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
             {
-                chatwire::log::error("bind(127.0.0.1:{}) failed: {}", port,
+                chatwire::log::error("bind({}:{}) failed: {}", where, port,
                                      chatwire::net::last_error());
                 this->close_listener();
                 this->cleanup_net();
@@ -353,7 +428,11 @@ namespace chatwire::ws
 
             for (auto& c : snapshot)
             {
-                if (c && !c->send_frame(opcode::text, payload))
+                // NOT to a connection that has not authenticated.  An event is
+                // as much of a leak as an answer: chat lines carry whatever
+                // players said, and a world change says where somebody is.
+                if (!c || !c->authenticated.load(std::memory_order_acquire)) { continue; }
+                if (!c->send_frame(opcode::text, payload))
                 {
                     this->drop(c);
                 }
@@ -583,6 +662,14 @@ namespace chatwire::ws
                 return;
             }
 
+            // Before the connection is announced and before a byte of it is
+            // read: a client that cannot be challenged never becomes a client.
+            if (!this->challenge(c))
+            {
+                this->drop(c);
+                return;
+            }
+
             // Already in `clients_`: accept_loop put it there so that stop()
             // could wake it out of the handshake.  Only the announcement waits
             // for the handshake to have succeeded.
@@ -674,6 +761,16 @@ namespace chatwire::ws
                 std::string request;
                 request.swap(fragment);
 
+                // THE GATE.  Until a connection has proved it knows the
+                // token, `system.auth` is the only thing it can say -- not
+                // `system.status`, not `ping`.  Anything else is answered with
+                // a refusal and the connection is closed, so an attacker pays a
+                // TCP handshake per guess and learns nothing from the reply.
+                if (!c->authenticated.load(std::memory_order_acquire))
+                {
+                    return this->answer_challenge(c, request);
+                }
+
                 if (!this->handler_) { return true; }
                 std::string reply;
                 try
@@ -691,6 +788,78 @@ namespace chatwire::ws
             }
             }
             return true;
+        }
+
+        /*
+            @brief Sends this connection its challenge, or lets it straight in.
+            @details
+            Called once, after the WebSocket handshake and before the client's
+            first frame is read.  With no token there is nothing to prove and the
+            connection is already authenticated; with one, it gets a nonce of its
+            own and stays shut out until it returns the right MAC.
+
+            A nonce that cannot be generated CLOSES the connection.  The
+            alternative -- carrying on with a weaker nonce, or with none -- would
+            turn an RNG failure into a silent downgrade of everybody's
+            authentication, which is the worst way for this to fail.
+        */
+        auto challenge(const detail::client_ptr& c) noexcept -> bool
+        {
+            if (this->token_.empty()) { return true; }         // nothing to prove
+
+            c->authenticated.store(false, std::memory_order_release);
+            try
+            {
+                c->nonce = chatwire::crypto::random_hex(32);
+                if (c->nonce.empty())
+                {
+                    chatwire::log::error("no random nonce available; refusing the connection");
+                    return false;
+                }
+                const std::string frame{ std::format(
+                    R"({{"type":"chatwire.auth.challenge","nonce":"{}"}})", c->nonce) };
+                return c->send_frame(opcode::text, frame);
+            }
+            catch (...) { return false; }
+        }
+
+        /*
+            @brief Checks one `system.auth` and lets the connection in, or ends it.
+            @return false to close the connection, which every failure does.
+        */
+        auto answer_challenge(const detail::client_ptr& c,
+                              const std::string_view request) noexcept -> bool
+        {
+            try
+            {
+                const auto verb{ chatwire::json::get_string(request, "cmd") };
+                const auto proof{ chatwire::json::get_string(request, "proof") };
+                if (verb && *verb == "system.auth" && proof)
+                {
+                    const std::string expected{ chatwire::crypto::to_hex(
+                        chatwire::crypto::hmac_sha256(this->token_, c->nonce)) };
+                    if (chatwire::crypto::equal_in_constant_time(*proof, expected))
+                    {
+                        c->authenticated.store(true, std::memory_order_release);
+                        chatwire::log::info("client {} authenticated", c->id);
+                        return c->send_frame(
+                            opcode::text,
+                            R"({"ok":true,"result":{"authenticated":true}})");
+                    }
+                }
+
+                // One reply, then gone.  Deliberately the SAME message for a
+                // wrong proof, a missing proof and a command sent too early: a
+                // caller that is doing it right never sees this, and one that is
+                // guessing learns nothing about which part was wrong.
+                chatwire::log::warn("client {} failed authentication; closing", c->id);
+                (void)c->send_frame(
+                    opcode::text,
+                    R"({"ok":false,"error":"authenticate first: )"
+                    R"(send {\"cmd\":\"system.auth\",\"proof\":\"<hmac>\"}"})");
+                return false;
+            }
+            catch (...) { return false; }
         }
 
         auto handshake(const detail::client_ptr& c) noexcept -> bool
@@ -791,6 +960,9 @@ namespace chatwire::ws
         bool                            net_started_{ false };
         std::atomic<bool>               running_{ false };
         message_handler                 handler_{ nullptr };
+        /* The shared secret, or empty for no authentication.  Written once in
+           start(), read by every client thread afterwards. */
+        std::string                     token_{};
         presence_handler                presence_{ nullptr };
         std::thread                     accept_thread_{};
         mutable std::mutex              clients_mutex_{};

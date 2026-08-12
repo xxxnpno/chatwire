@@ -62,7 +62,9 @@ namespace chatwire
                 let chatwire call it — in which case nothing was left installed.
     */
     [[nodiscard]] auto start(std::uint16_t port = default_port,
-                             std::chrono::seconds timeout = std::chrono::seconds{ 120 }) noexcept
+                             std::chrono::seconds timeout = std::chrono::seconds{ 120 },
+                             std::string_view bind_address = {},
+                             std::string_view token = {}) noexcept
         -> bool;
 
     /*

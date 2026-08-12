@@ -81,6 +81,23 @@ namespace chatwire::config
             from the environment.
         */
         std::uint32_t timeout_seconds{ 0 };
+        /*
+            @brief The address to listen on.  Empty means 127.0.0.1.
+            @details
+            A knob at all only because there is now something guarding the
+            socket -- see `token`.  Anything other than a loopback address is
+            REFUSED without one, in chatwire::start, rather than trusted to the
+            person who typed it.
+        */
+        std::string bind{};
+        /*
+            @brief The shared secret, or empty for none.
+            @details
+            Never transmitted: the server sends a nonce and the client returns
+            HMAC-SHA256(token, nonce).  Setting it turns authentication on even
+            on loopback, because setting it is how someone says they want it.
+        */
+        std::string token{};
     };
 
     /*
@@ -128,6 +145,16 @@ namespace chatwire::config
                         // The ONE place a bool's spelling is decided.  write()
                         // below emits whatever this test wants to see.
                         out.[:member:] = (value != "0");
+                    }
+                    else if constexpr (std::same_as<field_type, std::string>)
+                    {
+                        // Verbatim, and deliberately unvalidated here: a bind
+                        // address and a secret are checked by the code that has
+                        // to act on them, which can say something useful when
+                        // they are wrong.  A parser that silently dropped a
+                        // malformed one would leave chatwire listening on the
+                        // default with no explanation.
+                        out.[:member:] = std::string{ value };
                     }
                     else
                     {

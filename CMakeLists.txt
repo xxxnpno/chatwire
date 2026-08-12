@@ -272,7 +272,7 @@ target_compile_features(chatwire_lib PUBLIC cxx_std_26)
 # only meant to include.
 target_compile_options(chatwire_lib PUBLIC ${CHATWIRE_REFLECTION_OPTIONS})
 
-target_link_libraries(chatwire_lib PUBLIC ws2_32)
+target_link_libraries(chatwire_lib PUBLIC ws2_32 bcrypt)
 
 # ---------------------------------------------------------------------------
 # Warnings.

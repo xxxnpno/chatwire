@@ -188,13 +188,14 @@ namespace chatwire::entry
             chatwire::log::warn("could not attach a console; running without one");
         }
 
-        // 0 means the caller said nothing, so chatwire::start's own default
-        // applies.  Repeating that number here would be a second place to keep
-        // it in step with the first.
-        const bool ok{ settings.timeout_seconds == 0u
-                           ? chatwire::start(settings.port)
-                           : chatwire::start(settings.port,
-                                             std::chrono::seconds{ settings.timeout_seconds }) };
+        const bool ok{ chatwire::start(
+            settings.port,
+            // 0 means the caller said nothing, so chatwire::start's own default
+            // applies.  Repeating that number here would be a second place to
+            // keep it in step with the first.
+            settings.timeout_seconds == 0u ? std::chrono::seconds{ 120 }
+                                           : std::chrono::seconds{ settings.timeout_seconds },
+            settings.bind, settings.token) };
         if (!ok)
         {
             chatwire::log::error("chatwire could not start");
