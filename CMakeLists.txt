@@ -265,6 +265,9 @@ target_compile_features(vmhook PUBLIC cxx_std_26)
 # GCC needs the flag on EVERY translation unit that imports, not only on the
 # interface units.  PUBLIC so consumers inherit it.
 target_compile_options(vmhook PUBLIC -fmodules)
+# vmhook uses reflection itself now (display_string_of, annotations_of), so the
+# flag belongs on ITS target too -- not only on chatwire_lib.
+target_compile_options(vmhook PUBLIC ${CHATWIRE_REFLECTION_OPTIONS})
 
 # ---------------------------------------------------------------------------
 # The library.  Header-based, with one .cpp for the bodies that should not be
