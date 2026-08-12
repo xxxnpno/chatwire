@@ -106,7 +106,23 @@ def java_for(major: int) -> Path:
 
 
 def java_game() -> Path:
-    """Minecraft 1.8.9 needs Java 8: LWJGL 2.9.4 and the class files predate 9."""
+    """The JVM 1.8.9 runs on.
+
+    MOJANG'S OWN FIRST -- `shared/runtime/jre-legacy`, which is what the version
+    manifest names and what a player's launcher installs.  It is not merely a
+    Java 8; it is the Java 8, and which build it is turns out to matter far
+    beyond running the game: chatwire reads HotSpot's internals through the
+    `gHotSpotVMStructs` table, and Adoptium 8u492 does not expose enough of it
+    for vmhook's JDK 8 path to resolve a single class.  See runtime.py.
+
+    A system Java 8 is the fallback, for a tree where `mc.py setup` has not run
+    or the download was refused.  1.8.9 will not start on anything newer:
+    LWJGL 2.9.4 and the class files both predate 9.
+    """
+    for component in ("jre-legacy",):
+        exe = SHARED / "runtime" / component / "bin" / "java.exe"
+        if exe.is_file():
+            return exe
     return java_for(8)
 
 

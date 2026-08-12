@@ -22,7 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from mcbuild import bridge as bridge_mod                    # noqa: E402
 from mcbuild import build as build_mod                      # noqa: E402
+from mcbuild import check as check_mod                      # noqa: E402
 from mcbuild import decompile as decompile_mod              # noqa: E402
 from mcbuild import launch as launch_mod                    # noqa: E402
 from mcbuild import mappings, paths, vanilla                # noqa: E402
@@ -73,19 +75,28 @@ def cmd_launch(args: argparse.Namespace) -> int:
     extra_game = args.game or []
 
     if args.all:
-        pids = []
+        started = []
         for m in which:
-            pid = launch_mod.launch(m, wait=False, username=f"{args.username}_{m[:3]}",
-                                    memory=args.memory, extra_jvm=extra_jvm,
-                                    extra_game=extra_game)
-            pids.append((m, pid))
+            proc = launch_mod.launch(m, wait=False, username=f"{args.username}_{m[:3]}",
+                                     memory=args.memory, extra_jvm=extra_jvm,
+                                     extra_game=extra_game)
+            started.append((m, proc.pid))
             time.sleep(2)
-        say(f"* started {len(pids)}: " + ", ".join(f"{m}={p}" for m, p in pids))
+        say(f"* started {len(started)}: " + ", ".join(f"{m}={p}" for m, p in started))
         return 0
 
     return launch_mod.launch(which[0], wait=not args.detach, timeout=args.timeout,
                              username=args.username, memory=args.memory,
                              extra_jvm=extra_jvm, extra_game=extra_game)
+
+
+def cmd_chatwire(args: argparse.Namespace) -> int:
+    return bridge_mod.run(_mappings_arg(args.mapping), keep=args.keep,
+                          timeout=args.timeout)
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    return check_mod.check(args.header)
 
 
 def cmd_status(_args: argparse.Namespace) -> int:
@@ -154,6 +165,16 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--jvm", action="append", help="extra JVM argument (repeatable)")
     sp.add_argument("--game", action="append", help="extra game argument (repeatable)")
     sp.set_defaults(func=cmd_launch)
+
+    sp = sub.add_parser("chatwire", help="inject chatwire into each client and ask it")
+    sp.add_argument("mapping", nargs="*", help="default: all three")
+    sp.add_argument("--keep", action="store_true", help="leave the clients running")
+    sp.add_argument("--timeout", type=float, default=180.0)
+    sp.set_defaults(func=cmd_chatwire)
+
+    sp = sub.add_parser("check", help="check chatwire's name table against the jar")
+    sp.add_argument("--header", type=Path, default=None)
+    sp.set_defaults(func=cmd_check)
 
     sp = sub.add_parser("status", help="what exists on disk right now")
     sp.set_defaults(func=cmd_status)

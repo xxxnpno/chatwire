@@ -106,7 +106,15 @@ def write_script(mapping: str) -> Path:
 def launch(mapping: str, wait: bool = True, timeout: float | None = None,
            username: str = DEFAULT_USERNAME, memory: str = "2G",
            extra_jvm: list[str] | None = None,
-           extra_game: list[str] | None = None) -> int:
+           extra_game: list[str] | None = None):
+    """Start `mapping`.  Returns its exit code, or the Popen when `wait` is false.
+
+    The handle rather than the pid, and that is not a convenience: on Windows
+    `os.kill(pid, 0)` is not a liveness probe, it is TerminateProcess.  Python
+    ignores the signal number there and kills unconditionally, so the obvious
+    "is it still up?" check silently shot the client it was waiting for.
+    Popen.poll() is the question that asks nothing of the process.
+    """
     cmd = command(mapping, username, memory, extra_jvm, extra_game)
     run_dir = paths.mapping_run(mapping)
     log = run_dir / "launch.log"
@@ -121,7 +129,7 @@ def launch(mapping: str, wait: bool = True, timeout: float | None = None,
                                 stderr=subprocess.STDOUT, text=True)
         if not wait:
             say(f"  pid      : {proc.pid}")
-            return proc.pid
+            return proc
 
         deadline = time.time() + timeout if timeout else None
         ready = False

@@ -160,6 +160,11 @@ def setup() -> dict:
     _cp, native_archives = libraries(vj)
     extract_natives(native_archives)
     assets(vj)
+
+    # Imported here rather than at the top: runtime imports this module back for
+    # the version json, and a module-level import either way would be a cycle.
+    from . import runtime
+    runtime.install(vj)
     return vj
 
 

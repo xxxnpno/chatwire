@@ -26,10 +26,14 @@ they produce is ignored, because it is ~350 MB of other people's bytes.
 python minecrafts/mc.py all          # setup + build + status, from nothing
 ```
 
-Roughly two minutes on a warm machine, mostly downloads. If a Minecraft launcher is
+Roughly three minutes on a warm machine, mostly downloads. If a Minecraft launcher is
 installed, `%APPDATA%\.minecraft` is used as a download cache — every candidate file is
 sha1-checked before it is copied, so a foreign or corrupt file falls through to the network
 instead of poisoning the tree. Nothing there is written to.
+
+That includes **Mojang's own JVM**: the version manifest names `jre-legacy` (Java 8u51) and
+setup installs exactly that into `shared/runtime`. Not a detail — see *The JVM is not
+interchangeable* below.
 
 ## Run it
 
@@ -72,14 +76,66 @@ Vineflower writes `<mapping>/src`. The vanilla tree is the interesting one: `a.c
 | `build [mapping...]` | produce the three jars, and the `.bat` launchers |
 | `decompile [mapping...]` | Vineflower each jar into `<mapping>/src` |
 | `launch <mapping>` | start one; `--all`, `--detach`, `--timeout N`, `--username`, `--memory` |
+| `check` | check chatwire's name table against the jar, offline |
+| `chatwire` | launch all three, inject a chatwire into each, ask them all |
 | `status` | what exists on disk right now |
 | `all` | setup + build + status |
+
+## Checking chatwire against them
+
+Two checks, and the cheap one runs without starting anything:
+
+```bash
+python minecrafts/mc.py check       # offline: mapping.hpp vs the real mappings
+python minecrafts/mc.py chatwire    # live: all three clients, three chatwires at once
+```
+
+`check` parses every `name` triple out of `chatwire/src/chatwire/mapping.hpp` and looks each one
+up in `1.8.9-mappings.json`, resolving inherited members through the class hierarchy read
+straight out of the jar's class files. It is the check that would have caught `avq`.
+
+`chatwire` is the live one. It brings up all three clients, injects a separate chatwire into
+each **at the same time** on ports 24455-24457, and asks every one of them `mapping.verify`.
+Three bridges into three JVMs is what a user driving several accounts has, and running them one
+at a time would never exercise it:
+
+```
+* vanilla on port 24455
+    mapping.detected   'OBF (vanilla obfuscated)' (minecraft_class=False ... obf_class=True)
+    mapping.verify     checked=24 missing=0
+    mapping.resolve    'printChatMessage' -> 'a' (field and method, on gui_new_chat)
+* srg on port 24456
+    mapping.verify     checked=24 missing=0
+    mapping.resolve    'printChatMessage' -> 'func_146227_a' (method, on gui_new_chat)
+* mcp on port 24457
+    mapping.verify     checked=24 missing=0
+    mapping.resolve    'printChatMessage' -> 'printChatMessage' (method, on gui_new_chat)
+```
+
+`--keep` leaves the clients up so you can drive them yourself.
+
+## The JVM is not interchangeable
+
+A JVM is not just what runs the game. It is what chatwire *reads*: vmhook resolves HotSpot's
+internals through the `gHotSpotVMStructs` table each build exports, and builds differ.
+
+This tree originally launched with whatever Java 8 was installed, which here was Adoptium
+8u492 — eleven years newer than anything a 1.8.9 player runs. On that build chatwire could not
+resolve a single class, `java/lang/String` included, and reported "no supported Minecraft 1.8.9
+found". On Mojang's `jre-legacy` it works. Testing against a JVM nobody runs proves nothing
+about the ones they do, so the runtime is pinned by the version manifest like everything else.
+
+The same investigation turned up a real defect in vmhook's JDK 8 path, fixed in this branch:
+`BasicHashtableEntry` keeps `_hash` at +0 and `_next` at +8, and the dictionary walk read
+`_next` from +0. Every bucket chain ended at its first entry, so a client with 5000 loaded
+classes looked like it had 1015 — almost exactly the JDK 8 SystemDictionary's 1009 buckets.
+It never crashed and never logged; it just could not find most classes.
 
 ## What it needs
 
 - **Java 8** to run the game — 1.8.9 ships LWJGL 2.9.4 and will not start on anything newer.
-  Found automatically under `C:\Program Files\Eclipse Adoptium` and friends; override with
-  `MC_JAVA8`.
+  `mc.py setup` downloads Mojang's, which is the one to use. A system Java 8 is the fallback,
+  found under `C:\Program Files\Eclipse Adoptium` and friends; override with `MC_JAVA8`.
 - **Any modern JDK** to run SpecialSource and Vineflower. Found the same way.
 - **Python 3.11+**, standard library only.
 
@@ -88,6 +144,7 @@ Vineflower writes `<mapping>/src`. The vanilla tree is the interesting one: `a.c
 | | |
 |---|---|
 | client jar, libraries, assets | `launchermeta.mojang.com` version manifest v2 |
+| the JVM (`jre-legacy`, 8u51) | Mojang's java-runtime manifest |
 | notch → srg (`joined.srg`) | `de.oceanlabs.mcp:mcp:1.8.9:srg@zip` |
 | srg → mcp (`fields.csv`, `methods.csv`) | `de.oceanlabs.mcp:mcp_stable:22-1.8.9@zip` |
 | remapper | `net.md-5:SpecialSource:1.11.0` |

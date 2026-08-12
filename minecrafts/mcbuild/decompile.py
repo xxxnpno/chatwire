@@ -1,52 +1,37 @@
 """Decompile each jar to readable Java with Vineflower.
 
-Vineflower writes a sources *archive* when handed a jar, so we decompile to a
-zip and unpack that.  Unpacking is where the obfuscated mapping gets
-interesting: `a.class` and `A.class` are different classes to the JVM and the
-same file to Windows.  Colliding names get a `#` suffix rather than silently
-overwriting each other.
+Handed a jar and a directory, Vineflower writes the sources loose into it and
+copies the non-class entries across, so `<mapping>/src` is the decompiled game
+plus its assets.
+
+The obfuscated jar is the one that could have gone wrong here: `a.class` and
+`A.class` are two classes to the JVM and one filename to Windows.  1.8.9's
+obfuscator happens to emit lowercase names only -- checked, not assumed, by
+`case_collisions()` below, which refuses the decompile rather than letting the
+filesystem silently drop half a pair.
 """
 
 from __future__ import annotations
 
 import shutil
 import zipfile
+from collections import Counter
 from pathlib import Path
 
 from . import paths, tools, vanilla
-from .util import say
+from .util import run, say, sha1_of
 
 #: -dgs generic signatures, -rsy synthetic members hidden, -asc ascii escapes,
-#: -jrt resolve java.* from this JVM, -log WARN to keep the output readable.
+#: -jrt resolve java.* against this JVM, -log WARN to keep the output readable.
 VINEFLOWER_OPTS = ["-dgs=1", "-rsy=1", "-asc=1", "-jrt=1", "-log=WARN", "-thr=8"]
 
 
-def _unpack_sources(archive: Path, dest: Path) -> tuple[int, int]:
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True, exist_ok=True)
-
-    written: dict[str, str] = {}                   # lowercased path -> real path
-    files = collisions = 0
-    with zipfile.ZipFile(archive) as z:
-        for name in z.namelist():
-            if name.endswith("/"):
-                continue
-            out_name = name
-            n = 0
-            while out_name.lower() in written:
-                n += 1
-                stem, _, ext = name.rpartition(".")
-                out_name = f"{stem}#{n}.{ext}" if ext else f"{name}#{n}"
-            if n:
-                collisions += 1
-            written[out_name.lower()] = out_name
-            target = dest / out_name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with z.open(name) as src, target.open("wb") as out:
-                shutil.copyfileobj(src, out)
-            files += 1
-    return files, collisions
+def case_collisions(jar: Path) -> list[list[str]]:
+    """Entries that differ only in case, and would therefore share a filename."""
+    with zipfile.ZipFile(jar) as z:
+        names = [n for n in z.namelist() if not n.endswith("/")]
+    seen = Counter(n.lower() for n in names)
+    return [[n for n in names if n.lower() == k] for k, v in seen.items() if v > 1]
 
 
 def decompile(mapping: str, force: bool = False) -> Path:
@@ -56,34 +41,36 @@ def decompile(mapping: str, force: bool = False) -> Path:
 
     src = paths.mapping_src(mapping)
     stamp = src / ".jar-sha"
-    from .util import run, sha1_of
-
     digest = sha1_of(jar)
     if not force and stamp.is_file() and stamp.read_text().strip() == digest:
         say(f"  {mapping}: sources up to date")
         return src
 
-    work = paths.mapping_dir(mapping) / ".decompile"
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
+    clashes = case_collisions(jar)
+    if clashes:
+        for pair in clashes[:5]:
+            say(f"  ! {' and '.join(pair)} differ only in case")
+        raise SystemExit(
+            f"{jar.name} has {len(clashes)} case-colliding entries; a Windows "
+            f"filesystem would silently keep one of each pair"
+        )
+
+    if src.exists():
+        shutil.rmtree(src)
+    src.mkdir(parents=True)
 
     vj = vanilla.version_json()
     libs = [f"-e={p}" for p in vanilla.classpath(vj) if p.is_file()]
 
-    say(f"  {mapping}: decompiling {jar.name} (this takes a few minutes)")
+    say(f"  {mapping}: decompiling {jar.name} (a few minutes)")
     run([
         str(paths.java_tools()), "-Xmx4G", "-jar", str(tools.vineflower()),
-        *VINEFLOWER_OPTS, *libs, str(jar), str(work),
-    ])
+        *VINEFLOWER_OPTS, *libs, str(jar), str(src),
+    ], quiet=True)
 
-    produced = next((p for p in work.iterdir() if p.suffix in (".jar", ".zip")), None)
-    if produced is None:
-        raise RuntimeError(f"Vineflower produced nothing in {work}")
-
-    files, collisions = _unpack_sources(produced, src)
-    shutil.rmtree(work, ignore_errors=True)
+    java = sum(1 for _ in src.rglob("*.java"))
+    if not java:
+        raise RuntimeError(f"Vineflower wrote no .java into {src}")
     stamp.write_text(digest, encoding="utf-8")
-    note = f", {collisions} case collisions renamed" if collisions else ""
-    say(f"  {mapping}: {files} source files{note} -> {src}")
+    say(f"  {mapping}: {java} source files -> {src}")
     return src
