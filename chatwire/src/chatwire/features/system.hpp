@@ -87,6 +87,15 @@ namespace chatwire::features
         std::uint16_t    port{ 0 };
         std::size_t      clients{ 0 };
         bool             can_call{ false };
+        /*
+            Which features are up.  Not decoration: a feature whose class was
+            not loaded when chatwire arrived starts LATER, and until it does the
+            thing it provides silently does not happen.  `chat` at the main menu
+            is the normal case -- GuiNewChat does not exist until a chat box has
+            been drawn -- so a client that wants chat should wait for this to say
+            so rather than assume.
+        */
+        std::vector<chatwire::registry::status_line> features{};
     };
 
     class system_feature final : public chatwire::feature
@@ -121,7 +130,8 @@ namespace chatwire::features
                             .mapping  = chatwire::mapping::mode_name(chatwire::mapping::current),
                             .port     = g_status_port.load(std::memory_order_relaxed),
                             .clients  = clients ? clients() : 0u,
-                            .can_call = g_can_call.load(std::memory_order_relaxed) }));
+                            .can_call = g_can_call.load(std::memory_order_relaxed),
+                            .features = chatwire::registry::status() }));
                 }
 
                 if (cmd.verb == "stats")

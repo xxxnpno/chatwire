@@ -154,8 +154,12 @@ def _summarise(mapping: str, exchanges: list[dict]) -> int:
         result = reply.get("result", {})
 
         if verb == "system.status":
+            up = ",".join(f["name"] for f in result.get("features", []) if f.get("started"))
+            waiting = ",".join(f["name"] for f in result.get("features", [])
+                               if not f.get("started"))
             say(f"    {verb:<18} mapping={result.get('mapping')!r} "
                 f"port={result.get('port')} can_call={result.get('can_call')}")
+            say(f"    {'features':<18} up: {up or '-'}   waiting: {waiting or '-'}")
         elif verb == "mapping.detected":
             say(f"    {verb:<18} {result.get('mapping')!r} "
                 f"(minecraft_class={result.get('minecraft_class')} "
@@ -252,7 +256,32 @@ async def _add_chat_echo(port: int, text: str) -> bool:
     return seen
 
 
+def wait_for_feature(port: int, feature: str, timeout: float = 90.0) -> bool:
+    """Wait until chatwire reports `feature` as started.
+
+    A feature whose class was not loaded at inject time comes up later, and
+    until it does the thing it provides does not happen.  Asserting on the chat
+    echo before the chat observer exists tests the harness's patience, not
+    chatwire -- which is what it did, intermittently, on whichever client
+    happened to be injected earliest.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            reply = ask(port, [{"cmd": "system.status"}])[0]["reply"]
+            for f in reply.get("result", {}).get("features", []):
+                if f.get("name") == feature and f.get("started"):
+                    return True
+        except Exception:                                      # noqa: BLE001
+            pass
+        time.sleep(2)
+    return False
+
+
 def add_chat_echo(mapping: str, port: int) -> int:
+    if not wait_for_feature(port, "chat"):
+        say(f"    {'addChatMessage':<18} the chat feature never started")
+        return 1
     text = f"chatwire {mapping} local echo"
     try:
         heard = asyncio.run(_add_chat_echo(port, text))

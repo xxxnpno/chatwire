@@ -270,6 +270,38 @@ namespace chatwire
             return started_now;
         }
 
+        /* @brief One feature, and whether it is running. */
+        struct status_line
+        {
+            std::string_view name{};
+            bool             started{ false };
+        };
+
+        /*
+            @brief Every feature and whether it started.  For `system.status`.
+            @details
+            Worth reporting because "started" is not a formality here: a feature
+            whose class was not loaded when chatwire arrived comes up LATER, and
+            until it does, the thing it provides silently does not happen.  A
+            user wondering why no chat is arriving should be able to see that the
+            chat feature is not up yet rather than deduce it.
+        */
+        [[nodiscard]] inline auto status() noexcept -> std::vector<status_line>
+        {
+            std::vector<status_line> out;
+            try
+            {
+                for (feature* const f : detail::storage())
+                {
+                    if (!f) { continue; }
+                    out.push_back(status_line{ .name = f->name(),
+                                               .started = detail::has_started(f) });
+                }
+            }
+            catch (...) { }
+            return out;
+        }
+
         /* @brief How many features are still waiting for their classes. */
         [[nodiscard]] inline auto pending() noexcept -> std::size_t
         {
