@@ -142,6 +142,24 @@ anything.
 
 ---
 
+## Download
+
+[**`chatwire.exe`**](https://github.com/xxxnpno/chatwire/releases/latest/download/chatwire.exe)
+— Windows x64, from the [latest release](https://github.com/xxxnpno/chatwire/releases/latest).
+One file, nothing to install. The library is carried inside it as a resource, so there is nothing
+to keep together and no way to run a new injector against an old library.
+
+```
+chatwire                 find Minecraft and inject
+chatwire --list          list candidate processes and exit
+chatwire --console       also open a console showing live chat
+```
+
+Every flag is in the table [below](#quick-start). Building it yourself needs a compiler with
+static reflection; the release does not.
+
+---
+
 ## Quick start
 
 Needs **GCC 16.2 or newer** and **CMake 3.28+**. chatwire is written as C++26 **modules, all the
