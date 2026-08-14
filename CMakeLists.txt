@@ -327,13 +327,17 @@ endif()
 
 
 # ---------------------------------------------------------------------------
-# vmhook — vendored, and a module of its own.
+# vmhook 7.0.0 — vendored, and a module of its own.
 #
 # Pinned rather than fetched: chatwire depends on invocation working pure-VM,
 # and on vmhook::attach_current_thread, without which a Java call would once
 # again have to happen inside a detour and the pump would have to come back.  A
 # floating dependency on a library this project is injected alongside is how a
 # game crashes after an unrelated upgrade.
+#
+# The version is written here so that `vmhook::version_string` in a running
+# build and this line can be compared without going and looking.  Bump both
+# together when re-vendoring from C:/repos/cpp/vmhook.
 # ---------------------------------------------------------------------------
 # vmhook is a C++26 MODULE now, not a header: it is compiled here as an interface
 # unit and consumers `import vmhook;`.  A STATIC library rather than INTERFACE,

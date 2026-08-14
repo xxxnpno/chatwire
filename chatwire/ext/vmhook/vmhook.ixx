@@ -210,7 +210,7 @@ export namespace vmhook
         exported, so `vmhook::version_major` works from anywhere and is a real
         `int` to the type system and the debugger.
     */
-    inline constexpr int version_major{ 6 };
+    inline constexpr int version_major{ 7 };
     inline constexpr int version_minor{ 0 };
     inline constexpr int version_patch{ 0 };
 
@@ -222,7 +222,7 @@ export namespace vmhook
     }
 
     inline constexpr int version{ make_version(version_major, version_minor, version_patch) };
-    inline constexpr std::string_view version_string{ "6.0.0" };
+    inline constexpr std::string_view version_string{ "7.0.0" };
 
     /*
         @brief Whether the library emits its diagnostic trace.
@@ -369,19 +369,36 @@ export namespace vmhook
     inline constexpr std::string_view info_tag{ "[VMHook INFO]" };
 
     /*
-        @brief The version the compiled library (vmhook.lib) was built from.
+        @brief The version the compiled library (libvmhook.a) was built from.
         @details
-        Declared here, DEFINED only in vmhook/src/vmhook.cpp — so these two link
-        only if you link vmhook::compiled, and a header-only consumer that never
-        calls them is unaffected.  Comparing compiled_version() with
-        vmhook::version catches the one mistake a static library can introduce
-        silently: a .lib built from a different checkout than the header you
-        included.
+        Comparing compiled_version() with vmhook::version catches the one mistake
+        a prebuilt library can introduce silently: an archive built from a
+        different checkout than the interface you compiled against.  A release
+        ships both, so they agree; a working copy that rebuilt one and not the
+        other is where they stop agreeing.
+
+        DEFINED HERE, not merely declared, because these are the module's own
+        symbols and the module's archive is where they have to live -- a
+        `import vmhook;` consumer that linked only libvmhook.a would otherwise
+        get an undefined reference to a function the interface plainly offers.
+        They are deliberately NOT inline: one definition, in one object, is the
+        whole point of a check on which object you linked.
+
+        vmhook.hpp keeps the declaration and takes its definition from
+        vmhook.cpp instead, which is the same arrangement one build system down.
     */
-    [[nodiscard]] auto compiled_version() noexcept -> std::uint32_t;
+    [[nodiscard]] auto compiled_version() noexcept
+        -> std::uint32_t
+    {
+        return static_cast<std::uint32_t>(vmhook::version);
+    }
 
     /* @brief @see compiled_version. */
-    [[nodiscard]] auto compiled_version_string() noexcept -> const char*;
+    [[nodiscard]] auto compiled_version_string() noexcept
+        -> const char*
+    {
+        return vmhook::version_string.data();
+    }
 
     /*
         @brief Exception type thrown internally by VMHook to report unrecoverable errors.
@@ -1617,7 +1634,34 @@ export namespace vmhook
             // mis-instantiated template argument can be.  This used to fall back
             // to typeid(type).name(), which emits a mangled identifier
             // ("5playerE") into a user-facing warning.
-            return std::string{ std::meta::display_string_of(^^type) };
+            const std::string_view spelling{ std::meta::display_string_of(^^type) };
+
+            // GCC marks a MODULE-ATTACHED entity with its module: every one of
+            // this library's own types comes back as "vmhook::object_base@vmhook".
+            // That suffix is an implementation detail of how vmhook is built and
+            // means nothing to the reader of a warning, so it is dropped here --
+            // including inside template arguments, where it appears once per
+            // module-attached component ("ref<player@vmhook>@vmhook").
+            std::string name{};
+            name.reserve(spelling.size());
+            for (std::size_t index{ 0 }; index < spelling.size(); ++index)
+            {
+                if (spelling[index] != '@') { name.push_back(spelling[index]); continue; }
+
+                // Skip the module name: identifier characters and the dots that
+                // separate the components of a partitioned name.
+                ++index;
+                while (index < spelling.size()
+                       && (spelling[index] == '_' || spelling[index] == '.'
+                           || (spelling[index] >= '0' && spelling[index] <= '9')
+                           || (spelling[index] >= 'a' && spelling[index] <= 'z')
+                           || (spelling[index] >= 'A' && spelling[index] <= 'Z')))
+                {
+                    ++index;
+                }
+                --index;    // the outer ++index re-reads the character that ended it
+            }
+            return name;
         }
 
         /*
@@ -1659,6 +1703,72 @@ export namespace vmhook
                 }
             }
             return {};
+        }
+
+        /*
+            @brief The name of an enumerator, as the enum declared it.
+            @details
+            Every "kind" and "state" this library puts in a log used to need a
+            switch that spelled each enumerator's identifier back as a string
+            literal -- a SECOND LIST, kept in sync by hand, which silently goes
+            stale the moment an enumerator is added and answers with the fallback
+            for the one case a reader most wants named.
+
+            std::meta::enumerators_of(^^enum_type) IS the list, so there is no
+            second one to keep.  A new enumerator is named the day it is
+            declared, and an enum that never had a name function gets one for
+            nothing -- which is why java_thread_state now reads as
+            "_thread_in_Java" in a trace instead of as 8.
+
+            Returns an EMPTY view for a value that is not an enumerator, which is
+            reachable: these enums are read out of JVM memory, and a JDK this
+            build has never seen can put an unknown number in one.  A caller that
+            needs a word for that case supplies its own; error_message() and
+            gc_collector_name() keep their switches for exactly that reason, as
+            their strings are prose and display names rather than identifiers.
+
+            The expansion is over std::define_static_array(...) rather than the
+            vector itself: enumerators_of() allocates during constant evaluation
+            and such an allocation cannot escape it, so the array is what gives
+            the reflections storage that outlives the consteval region.
+            identifier_of() has the same problem and define_static_string() is
+            the same answer, which is what makes the returned view safe to hold.
+
+            INSTANTIATE IT INSIDE THIS MODULE, which is why every enum vmhook
+            names has a small named function of its own (anchor_kind_name,
+            thread_state_name) rather than callers reaching for this directly.
+            enumerators_of() returns a std::vector, <vector> lives in the global
+            module fragment, and a global-module-fragment name is not reachable
+            from a consumer's translation unit -- so instantiating this template
+            THERE fails with "couldn't look up 'std::vector'", pointing at a line
+            in this file that is perfectly well-formed.  Measured on GCC 16.2.0.
+            Instantiated here, the module's own object carries it and a consumer
+            calling one of the named wrappers never sees the problem.
+
+            Complexity: O(enumerators), fully unrolled, no allocation and no
+            static initialiser at run time.  noexcept.  Thread safety: safe.
+        */
+        template<typename enum_type>
+            requires std::is_enum_v<enum_type>
+        [[nodiscard]] inline auto enum_name(const enum_type value) noexcept
+            -> std::string_view
+        {
+            std::string_view name{};
+
+            // An expansion statement, not a loop: `break` is ill-formed in one,
+            // so every enumerator is compared and the last match wins.  For a
+            // well-formed enum there is at most one, and duplicate enumerators
+            // with one value are indistinguishable anyway.
+            template for (constexpr auto enumerator :
+                          std::define_static_array(std::meta::enumerators_of(^^enum_type)))
+            {
+                if (value == [:enumerator:])
+                {
+                    name = std::define_static_string(std::meta::identifier_of(enumerator));
+                }
+            }
+
+            return name;
         }
 
         /*
@@ -5051,6 +5161,30 @@ export namespace vmhook
             _thread_blocked_trans = 11,
             _thread_max_state = 12
         };
+
+        /*
+            @brief The name of a thread state, as HotSpot spells it.
+            @details
+            Reflected off the enum above, so there is no second list to keep and
+            no state that prints as a bare number.  "refusing to invoke on a
+            JavaThread in state 11" was the old message; "_thread_blocked_trans"
+            is the same fact without the trip to HotSpot's headers.
+
+            Returns an EMPTY view for a value no enumerator has, which is
+            reachable: this is read out of JVM memory and a JDK vmhook has never
+            been run against can put anything there.
+
+            It exists as a named function rather than a call to
+            vmhook::detail::enum_name because that template must be instantiated
+            inside this module -- see its @details.
+
+            Complexity: O(1).  Exception safety: noexcept.  Thread safety: safe.
+        */
+        [[nodiscard]] inline auto thread_state_name(const vmhook::hotspot::java_thread_state state) noexcept
+            -> std::string_view
+        {
+            return vmhook::detail::enum_name(state);
+        }
 
         /*
             @brief Represents a HotSpot internal JavaThread object.
@@ -10813,7 +10947,7 @@ export namespace vmhook
             {
                 ::vmhook::detail::log_line("thread {:p}: state={}, tid={}",
                            reinterpret_cast<void*>(t.thread),
-                           static_cast<int>(t.state), t.os_thread_id);
+                           vmhook::hotspot::thread_state_name(t.state), t.os_thread_id);
             });
         @endcode
     */
@@ -18698,9 +18832,13 @@ export namespace vmhook
                 && previous_state != vmhook::hotspot::java_thread_state::_thread_in_native
                 && previous_state != vmhook::hotspot::java_thread_state::_thread_in_vm)
             {
+                // The state by NAME.  It used to print as an integer, and "state
+                // 11" is a number the reader has to go and look up in HotSpot's
+                // JavaThreadState enum before the message means anything;
+                // "_thread_blocked_trans" is the same fact, already read.
                 ::vmhook::detail::log_line("{} method_proxy::call('{}{}'): refusing to invoke on a JavaThread in state {}.",
                            vmhook::error_tag, this->name(), selected_signature,
-                           static_cast<int>(previous_state));
+                           vmhook::hotspot::thread_state_name(previous_state));
                 return value_t{ std::monostate{} };
             }
 
@@ -25204,20 +25342,22 @@ namespace hotspot
 
     /*
         @brief Human-readable name of an anchor kind, for logs and diagnostics.
+        @details
+        Reflected, so the enum above is the ONLY list.  This was a switch that
+        spelled each enumerator back as a string literal -- five lines that said
+        nothing the declaration had not already said, and that a sixth anchor
+        kind would have left quietly answering "empty" for itself.
+
+        `empty` is the fallback for a value that is not an enumerator at all, and
+        that is deliberate: an empty anchor is what an unreadable one means here.
+
         Complexity: O(1).  Exception safety: noexcept.  Thread safety: safe.
     */
     inline auto anchor_kind_name(const vmhook::anchor_kind kind) noexcept
         -> std::string_view
     {
-        switch (kind)
-        {
-        case vmhook::anchor_kind::static_root: return "static_root";
-        case vmhook::anchor_kind::field_of:    return "field_of";
-        case vmhook::anchor_kind::element_of:  return "element_of";
-        case vmhook::anchor_kind::ephemeral:   return "ephemeral";
-        case vmhook::anchor_kind::empty:       break;
-        }
-        return "empty";
+        const std::string_view name{ vmhook::detail::enum_name(kind) };
+        return name.empty() ? std::string_view{ "empty" } : name;
     }
 
     /*
